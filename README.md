@@ -12,7 +12,7 @@ MacroMagi is a small, portable desktop tool for automating keyboard, mouse and c
   <img src="docs/images/recording.png" alt="A Play Recording block with its information card, and its timeline, Trim and Cut in the block settings" width="500">
 </p>
 
-> **Status: early development (0.1.3, unreleased).** The features below work and are covered by tests, but things will change. Windows is the tested platform; see [Platform support](#platform-support).
+> **Status: early development (0.1.4, unreleased).** The features below work and are covered by tests, but things will change. Windows is the tested platform; see [Platform support](#platform-support).
 
 ## Contents
 
@@ -29,6 +29,7 @@ MacroMagi is a small, portable desktop tool for automating keyboard, mouse and c
   - [Magic: AI models](#magic-ai-models)
   - [Several displays](#several-displays)
   - [Games and windows](#games-and-windows)
+  - [Files](#files)
   - [Hotkeys](#hotkeys)
   - [Options](#options)
   - [Appearance](#appearance)
@@ -63,7 +64,7 @@ MacroMagi is a small, portable desktop tool for automating keyboard, mouse and c
 **Macro editor**
 
 - A node graph that reads like a flowchart: *flow goes down, values go across*.
-- 34 blocks for flow (Start, Wait, Repeat, Decision, Wait Until, Stop, Rate, Definition, Function, Log), input (Input, Auto Click, Auto Typer, Play Recording), the screen (Image and Color Detection, Text Scan), sound (Sound Detection and Recognition), AI (AI Watch, AI Model), windows, variables (Variable, Set Variable, Counter), logic (Logic, Random Chance, Math, Compare, Text), the system (Clipboard, Notification), Python Script and Comment. See the [block reference](docs/NODES.md).
+- 42 blocks for flow (Start, Wait, Repeat, Decision, Wait Until, Stop, Rate, Definition, Function, Log), input (Input, Auto Click, Auto Typer, Play Recording), the screen (Image and Color Detection, Text Scan, Screenshot), sound (Sound Detection and Recognition), AI (AI Watch, AI Model), windows (Switch to Window, Switch to Display, Current Window), variables (Variable, Set Variable, Counter), logic (Logic, Random Chance, Math, Compare, Text), the system (Clipboard, Notification), files (Read File, Write to File, Find in Text, Folder Contents, Make Folder), Python Script and Comment. Every drop-down can be searched. See the [block reference](docs/NODES.md).
 - **Variables** that any block setting can follow, a Variables panel with their live values, and Python scripts that read and change them. A variable can start fresh every run or keep its value from the last one.
 - **Functions**: build a piece of a macro once under a Definition block and run it from anywhere.
 - Any number of **Start** blocks, each with its own hotkey, running side by side.
@@ -82,6 +83,7 @@ MacroMagi is a small, portable desktop tool for automating keyboard, mouse and c
 
 **Seeing and hearing**
 
+- **Screenshot** takes a picture of the screen while a macro runs, to save with Write to File or to look for with Image Detection; a picture read from a file works the same way.
 - **Text Scan** reads the text in an area of the screen – what it says, whether a given word is there and where, and the first number – with the text recognition built into Windows.
 - **Image Detection** finds pictures on screen – one or many per block, in groups with search areas of their own – with an accuracy from 0% to 100% (default 80%), and less detail when speed matters more. **Color Detection** finds a color, with a tolerance.
 - **Sound Detection** reacts to sound that is loud enough, optionally within a pitch range. **Sound Recognition** reacts when it hears one of the sounds you uploaded – a notification, an alarm, a voice line – at any volume, and recognises long sounds while they play. Both listen to what the computer plays or to a microphone you choose.
@@ -200,7 +202,9 @@ A variable keeps its value from one run to the next – a running total, the las
 
 ### Recording
 
-Press **Record** (`F9`), do the thing, press it again. A **Play Recording** block appears, with an information card beside it. The arrow next to Record chooses what is recorded and how movement is recorded (*Smart Recording* by default).
+Press **Record** (`F9`), do the thing, press it again. A **Play Recording** block appears, with an information card beside it. The arrow next to Record chooses what is recorded and how movement is recorded (*Smart Recording* by default; a Smart recording gets the same conversion as the editor's *Smart* button when it ends). **Skip task switches** (off by default) leaves out the Alt+Tab, Win+Tab or click on another display you use to get to the program you record in – the first, the last, and those in between, as you choose.
+
+The recording drop-down of a Play Recording block has a bin beside each recording to delete it from the macro. When a macro is saved, recordings no block plays are deleted (*Automatically delete unassigned recordings when saving*, in *Settings → Recording* and *Options → Behaviours*; on by default).
 
 The block's settings show the recording's **timeline**:
 
@@ -268,7 +272,12 @@ Every click position and search area remembers which display it is on, so a macr
 
 ### Games and windows
 
-- **Switch to Window** brings a program to the front before the next step – by window title or program name, picked from the running programs. It knows that exclusive-fullscreen games take longer to come back than windowed ones, or works it out itself.
+- **Switch to Window** brings a program to the front before the next step – by window title or program name, picked from the running programs (those with windows first). It knows that exclusive-fullscreen games take longer to come back than windowed ones, or works it out itself.
+- **Switch to Display** moves the pointer to the middle of a display, and can click there so the window on it gets the keyboard. **Current Window** gives the title and program of the window in front, the display it is on and the display the pointer is on.
+
+### Files
+
+**Read File** reads a file's text, one line of it, or a picture; **Find in Text** finds a word in that text and says on which line; **Write to File** sets a file, adds to it, or changes one line – and saves a picture (from Screenshot or Read File) as a PNG, replacing one of the same name; **Folder Contents** lists a folder and **Make Folder** makes one. A path is a full path, or a name inside the `files` folder in MacroMagi's data folder; each has a *Browse* button, and a path can be wired in from another block.
 - Games with a first-person camera keep moving the pointer back to the middle. **Smart recording** (the default) detects this and records relative motion; **Play Recording** can also be told to replay all movement as relative motion. Right-click a Play Recording block → *Convert to Smart Recording* fixes an older recording.
 
 ### Hotkeys
@@ -294,7 +303,7 @@ The **Options** menu holds rules shared by the Auto Clicker and macros:
 | --- | --- |
 | Auto-stop hotkeys | More key combinations that stop everything. |
 | Program rules | A whitelist (input only reaches these programs) or blacklist (never reaches them), with search over the running programs. Each program can *stop* the clicker or macro, or *pause* it until an allowed program is in front again. Off by default. |
-| Behaviours | *Strict hotkey modifiers* – on: a hotkey works only when exactly its modifier keys are held (`Ctrl+F6` never triggers `F6`); off (default): extra held modifiers are ignored, so `F6` still works while you hold `Shift` in a game. *Stop on task switch* – stop everything on `Alt+Tab` or `Win+Tab`. *Stop the auto clicker when editing a hotkey* (on by default), so you can press the new hotkey. |
+| Behaviours | *Strict hotkey modifiers* – on: a hotkey works only when exactly its modifier keys are held (`Ctrl+F6` never triggers `F6`); off (default): extra held modifiers are ignored, so `F6` still works while you hold `Shift` in a game. *Stop on task switch* – stop everything on `Alt+Tab` or `Win+Tab`. *Stop the auto clicker when editing a hotkey* (on by default), so you can press the new hotkey. *Automatically delete unassigned recordings when saving* (on by default). |
 | Dry run | Run without sending any input; the console lists what would have been sent. |
 | Notify when a macro finishes | A sound and a desktop notification when a macro ends by itself (not when you stop it). For a notification in the middle of a macro, use a **Notification** block. |
 | Create desktop shortcut | Puts a shortcut to MacroMagi, with its icon, on the desktop. |
@@ -368,6 +377,8 @@ assets/….wav        sounds linked from Sound Recognition blocks
 assets/….magic      AI models linked from AI blocks
 presets/….mp        presets bundled with the macro (optional)
 ```
+
+**File → Save as** can also save a `.mp` preset: of the selected blocks, or of the whole workspace when nothing is selected. **File → Export presets** exports the workspace, the selection, or one of your presets as a `.mp` file.
 
 **File → Export** saves a `.magi` and asks what else to put in it: your **presets**, your **Options** (stop hotkeys, program rules…) and your **Auto Clicker settings**. The defaults for that dialog are in *Settings → General*. When you open a file that carries Options or Auto Clicker settings, MacroMagi asks whether to use them.
 

@@ -152,6 +152,28 @@ pub struct ReadTextParams {
     pub language: String,
 }
 
+/// What a Screenshot block captures.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShotSource {
+    /// The display the pointer is on.
+    #[default]
+    Current,
+    /// A chosen display.
+    Display,
+    /// A chosen area.
+    Area,
+}
+
+/// Settings of a **Screenshot** block.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScreenshotParams {
+    pub source: ShotSource,
+    pub display: u8,
+    pub region: Option<Rect>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FindColorParams {
@@ -196,6 +218,7 @@ pub(super) fn register(registry: &mut Registry) {
         .data_out("name", "Which image", DataType::Text)
         .data_out("group", "Its group", DataType::Text)
         .data_out("count", "How many", DataType::Number)
+        .data_in("picture", "Picture", DataType::Image)
         .param(
             ParamDef::new("images", "Images", ParamKind::Images).help(
                 "Several images can be looked for at once, in order of priority: the first one found is the one \
@@ -306,6 +329,41 @@ pub(super) fn register(registry: &mut Registry) {
                 format!("Looks for “{}”", p.find.trim())
             };
             vec![headline, region_line(p.region, p.display)]
+        }),
+    );
+
+    registry.register(
+        NodeDef::new(
+            ids::SCREENSHOT,
+            "Screenshot",
+            Category::Vision,
+            "Takes a picture of the screen – the display the pointer is on, a chosen display, or an area. \
+             The picture is kept only while the macro runs: wire it into Write to File to save it, or into \
+             Image Detection to look for it.",
+        )
+        .keywords(&["screenshot", "capture", "screen", "picture", "image", "grab", "print screen"])
+        .data_out("picture", "Picture", DataType::Image)
+        .data_out("width", "Width", DataType::Number)
+        .data_out("height", "Height", DataType::Number)
+        .param(ParamDef::new(
+            "source",
+            "Capture",
+            ParamKind::choice(&[
+                ("current", "The display the pointer is on"),
+                ("display", "A display"),
+                ("area", "An area"),
+            ]),
+        ))
+        .param(ParamDef::new("display", "Display", ParamKind::Display).show_if("source", "display"))
+        .param(ParamDef::new("region", "Area", ParamKind::Region).show_if("source", "area"))
+        .defaults(&ScreenshotParams::default())
+        .summarize(|node, _| {
+            let p: ScreenshotParams = node.params_or_default();
+            vec![match p.source {
+                ShotSource::Current => "The display the pointer is on".to_owned(),
+                ShotSource::Display => format!("Display {}", p.display + 1),
+                ShotSource::Area => region_line(p.region, p.display),
+            }]
         }),
     );
 

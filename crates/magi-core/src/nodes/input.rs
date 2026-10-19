@@ -41,6 +41,8 @@ pub struct AutoTypeParams {
     pub limit: u64,
     pub new_lines: NewLines,
     pub enter_at_end: bool,
+    /// Characters never typed.
+    pub ignore: Vec<String>,
 }
 
 impl Default for AutoTypeParams {
@@ -56,6 +58,7 @@ impl Default for AutoTypeParams {
             limit: 0,
             new_lines: NewLines::Enter,
             enter_at_end: false,
+            ignore: Vec::new(),
         }
     }
 }
@@ -64,7 +67,8 @@ impl AutoTypeParams {
     /// The characters to type, after trimming, skipping and the limit.
     pub fn characters(&self, text: &str) -> Vec<char> {
         let text = if self.trim { text.trim() } else { text };
-        let chars = text.chars().filter(|c| *c != '\r').skip(self.skip as usize);
+        let ignored: Vec<char> = self.ignore.iter().flat_map(|entry| entry.chars()).collect();
+        let chars = text.chars().filter(|c| *c != '\r' && !ignored.contains(c)).skip(self.skip as usize);
         if self.limit > 0 { chars.take(self.limit as usize).collect() } else { chars.collect() }
     }
 }
@@ -235,6 +239,10 @@ pub(super) fn register(registry: &mut Registry) {
             ]),
         ))
         .param(ParamDef::new("enter_at_end", "Press Enter at the end", ParamKind::Bool))
+        .param(
+            ParamDef::new("ignore", "Leave out", ParamKind::Characters)
+                .help("Characters that are never typed, wherever they are in the text."),
+        )
         .defaults(&AutoTypeParams::default())
         .summarize(|node, _| {
             let p: AutoTypeParams = node.params_or_default();
@@ -284,4 +292,15 @@ pub(super) fn register(registry: &mut Registry) {
             lines
         }),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_auto_typer_leaves_out_ignored_characters() {
+        let p = AutoTypeParams { ignore: vec!["-".into(), " ".into()], ..AutoTypeParams::default() };
+        assert_eq!(p.characters("a-b c").into_iter().collect::<String>(), "abc");
+    }
 }

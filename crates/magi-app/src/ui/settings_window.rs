@@ -72,6 +72,8 @@ pub enum SettingsEvent {
     SetStartHotkey(NodeId, Hotkey),
     /// Work out the optional downloads' statuses.
     CheckComponents,
+    /// Look for Pythons without starting the engine (the AI page needs to know where PyTorch would be).
+    FindPythons,
     Install(Component),
     Remove(Component),
 }
@@ -170,12 +172,15 @@ impl SettingsWindow {
             });
         };
         if narrow {
-            egui::ComboBox::from_id_salt("settings-page")
+            widgets::combo("settings-page")
                 .width(ui.available_width())
                 .selected_text(settings.settings_page.label())
                 .show_ui(ui, |ui| {
+                    let needle = widgets::combo_search(ui);
                     for page in SettingsPage::ALL {
-                        ui.selectable_value(&mut settings.settings_page, page, page.label());
+                        if widgets::option(ui, &needle, settings.settings_page == page, page.label()) {
+                            settings.settings_page = page;
+                        }
                     }
                 });
             ui.separator();
@@ -312,13 +317,14 @@ impl SettingsWindow {
         section(ui, "Background");
         ui.horizontal_wrapped(|ui| {
             let current = look.background.clone().unwrap_or_else(|| "None".to_owned());
-            egui::ComboBox::from_id_salt("background").width(170.0).selected_text(current).show_ui(ui, |ui| {
-                if ui.selectable_label(look.background.is_none(), "None").clicked() {
+            widgets::combo("background").width(170.0).selected_text(current).show_ui(ui, |ui| {
+                let needle = widgets::combo_search(ui);
+                if widgets::option(ui, &needle, look.background.is_none(), "None") {
                     look.background = None;
                 }
                 for name in env.backgrounds {
                     ui.horizontal(|ui| {
-                        if ui.selectable_label(look.background.as_ref() == Some(name), name).clicked() {
+                        if widgets::option(ui, &needle, look.background.as_ref() == Some(name), name) {
                             look.background = Some(name.clone());
                         }
                         if widgets::icon_button(ui, icon::TRASH, "Delete this picture").clicked() {
@@ -619,6 +625,13 @@ fn recording(ui: &mut Ui, settings: &mut Settings) {
 
     section(ui, "After recording");
     widgets::toggle_row(ui, "Skip the pause before the first input", "", &mut settings.record.trim_start);
+    widgets::skip_switches(ui, &mut settings.record.skip_switches);
+    widgets::toggle_row(
+        ui,
+        "Automatically delete unassigned recordings when saving",
+        "Recordings that no Play Recording block plays are left out of the file when it is saved.",
+        &mut settings.delete_unused_recordings,
+    );
     widgets::toggle_row(
         ui,
         "Add a Play Recording block when a recording ends",
@@ -688,17 +701,16 @@ fn engine(ui: &mut Ui, settings: &mut Settings, env: &SettingsEnv<'_>, events: &
         (None, None) => "(auto) not checked yet – press Check".to_owned(),
     };
     let shown = settings.python_path.as_deref().map_or_else(|| auto.clone(), describe);
-    egui::ComboBox::from_id_salt("python-choice")
-        .width(ui.available_width() - 8.0)
-        .truncate()
-        .selected_text(shown)
-        .show_ui(ui, |ui| {
-            if ui.selectable_label(settings.python_path.is_none(), &auto).clicked() {
+    widgets::combo("python-choice").width(ui.available_width() - 8.0).truncate().selected_text(shown).show_ui(
+        ui,
+        |ui| {
+            let needle = widgets::combo_search(ui);
+            if widgets::option(ui, &needle, settings.python_path.is_none(), &auto) {
                 settings.python_path = None;
             }
             for (path, version) in found {
                 let chosen = settings.python_path.as_deref() == Some(path.as_path());
-                if ui.selectable_label(chosen, format!("Python {version} – {}", path.display())).clicked() {
+                if widgets::option(ui, &needle, chosen, format!("Python {version} – {}", path.display())) {
                     settings.python_path = Some(path.clone());
                 }
             }
@@ -707,7 +719,8 @@ fn engine(ui: &mut Ui, settings: &mut Settings, env: &SettingsEnv<'_>, events: &
             {
                 settings.python_path = Some(file);
             }
-        });
+        },
+    );
     match env.pythons {
         None => widgets::note(ui, "Press Check to look for Python. It is also looked for the first time a macro runs."),
         Some([]) => widgets::notice(ui, icon::WARNING, "No Python was found on this computer.", theme::warning()),
@@ -785,8 +798,11 @@ fn component_card(
                 let idle = installing.is_none();
                 ui.horizontal_wrapped(|ui| {
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                    let installed = matches!(status, Some(ComponentStatus::Installed { .. }));
-                    if !installed {
+                    // PyTorch found in the Python macros use can be uninstalled from it too.
+                    let installed = matches!(status, Some(ComponentStatus::Installed { .. }))
+                        || (component == Component::PyTorch && matches!(status, Some(ComponentStatus::OnSystem(_))));
+                    let found = matches!(status, Some(ComponentStatus::OnSystem(_)));
+                    if !installed && !found {
                         let label = format!("{}  Install ({})", icon::DOWNLOAD_SIMPLE, component.size());
                         if ui.add_enabled(idle, egui::Button::new(label)).clicked() {
                             events.push(SettingsEvent::Install(component));
@@ -804,7 +820,12 @@ fn component_card(
 }
 
 fn ai(ui: &mut Ui, settings: &mut Settings, env: &SettingsEnv<'_>, events: &mut Vec<SettingsEvent>) {
-    if env.components.is_empty() {
+    // PyTorch lives in the Python macros use: find that first (the statuses follow).
+    if env.pythons.is_none() && settings.python_path.is_none() {
+        if !env.looking_for_python {
+            events.push(SettingsEvent::FindPythons);
+        }
+    } else if env.components.is_empty() {
         events.push(SettingsEvent::CheckComponents);
     }
     section(ui, "Where AI models run");
@@ -819,18 +840,24 @@ fn ai(ui: &mut Ui, settings: &mut Settings, env: &SettingsEnv<'_>, events: &mut 
             .find(|g| g.index == index)
             .map_or_else(|| format!("Graphics card {}", index + 1), |g| format!("{} ({} MB)", g.name, g.memory_mb)),
     };
-    egui::ComboBox::from_id_salt("ai-device")
+    widgets::combo("ai-device")
         .width(ui.available_width() - 8.0)
         .truncate()
         .selected_text(label(settings.ai_device))
         .show_ui(ui, |ui| {
-            ui.selectable_value(&mut settings.ai_device, magi_ml::Device::Auto, label(magi_ml::Device::Auto));
-            ui.selectable_value(&mut settings.ai_device, magi_ml::Device::Cpu, label(magi_ml::Device::Cpu));
+            let needle = widgets::combo_search(ui);
+            if widgets::option(ui, &needle, settings.ai_device == magi_ml::Device::Auto, label(magi_ml::Device::Auto)) {
+                settings.ai_device = magi_ml::Device::Auto;
+            }
+            if widgets::option(ui, &needle, settings.ai_device == magi_ml::Device::Cpu, label(magi_ml::Device::Cpu)) {
+                settings.ai_device = magi_ml::Device::Cpu;
+            }
             for gpu in env.gpus {
                 let device = magi_ml::Device::Gpu { index: gpu.index };
                 ui.add_enabled_ui(gpu_ready, |ui| {
-                    ui.selectable_value(&mut settings.ai_device, device, label(device))
-                        .on_disabled_hover_text("Needs ONNX Runtime for graphics cards (below)");
+                    if widgets::option(ui, &needle, settings.ai_device == device, label(device)) {
+                        settings.ai_device = device;
+                    }
                 });
             }
         });

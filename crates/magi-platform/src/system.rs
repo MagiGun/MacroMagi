@@ -21,7 +21,7 @@ pub struct ProcessEntry {
 }
 
 #[cfg(windows)]
-pub use self::windows::{focus_window, foreground_process, running_processes, trim_memory};
+pub use self::windows::{active_window, focus_window, foreground_process, running_processes, trim_memory};
 
 /// Where the pointer is, in physical desktop pixels.
 #[cfg(windows)]
@@ -204,6 +204,30 @@ mod windows {
         // SAFETY: the buffer length is passed.
         let length = unsafe { GetWindowTextW(hwnd, buffer.as_mut_ptr(), buffer.len() as i32) };
         String::from_utf16_lossy(&buffer[..length.max(0) as usize])
+    }
+
+    /// The window in front: title, program and place.
+    pub fn active_window() -> Option<magi_core::host::ActiveWindow> {
+        // SAFETY: plain queries with a valid out pointer.
+        let (hwnd, rect) = unsafe {
+            let hwnd = GetForegroundWindow();
+            if hwnd.is_null() {
+                return None;
+            }
+            let mut rect: RECT = std::mem::zeroed();
+            GetWindowRect(hwnd, &mut rect);
+            (hwnd, rect)
+        };
+        Some(magi_core::host::ActiveWindow {
+            title: window_title(hwnd),
+            process: process_name(window_pid(hwnd)).unwrap_or_default(),
+            rect: magi_core::geom::Rect::new(
+                rect.left,
+                rect.top,
+                (rect.right - rect.left).max(0) as u32,
+                (rect.bottom - rect.top).max(0) as u32,
+            ),
+        })
     }
 
     pub fn foreground_process() -> Option<String> {

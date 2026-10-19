@@ -176,6 +176,11 @@ pub trait Host: Send + Sync {
         Err(HostError::new("listening to sound is not available here"))
     }
 
+    /// The window in front: its title, program and place.
+    fn active_window(&self) -> Option<ActiveWindow> {
+        None
+    }
+
     /// The words in a picture (optical character recognition), with where
     /// each is in the picture. `language` is a tag such as `en-US`, or empty
     /// for the system's languages.
@@ -183,6 +188,16 @@ pub trait Host: Send + Sync {
         let _ = (picture, language);
         Err(HostError::new("reading text from the screen is not available on this system yet"))
     }
+}
+
+/// The window in front, as [`Host::active_window`] describes it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ActiveWindow {
+    pub title: String,
+    /// Executable name, e.g. `game.exe`.
+    pub process: String,
+    /// Where it is on the desktop.
+    pub rect: Rect,
 }
 
 /// A word read from a picture.
@@ -214,6 +229,7 @@ struct SimState {
     sound: SoundClip,
     screens: Option<Vec<Rect>>,
     words: Vec<TextWord>,
+    active: Option<ActiveWindow>,
 }
 
 impl SimHost {
@@ -259,6 +275,11 @@ impl SimHost {
     /// Makes `listen` return this sound.
     pub fn set_sound(&self, clip: SoundClip) {
         self.lock().sound = clip;
+    }
+
+    /// Pretends this window is in front.
+    pub fn set_active_window(&self, window: Option<ActiveWindow>) {
+        self.lock().active = window;
     }
 
     /// Makes `read_text` find these words.
@@ -343,6 +364,10 @@ impl Host for SimHost {
 
     fn read_text(&self, _picture: &Frame, _language: &str) -> Result<Vec<TextWord>, HostError> {
         Ok(self.lock().words.clone())
+    }
+
+    fn active_window(&self) -> Option<ActiveWindow> {
+        self.lock().active.clone()
     }
 
     fn listen(&self, _source: SoundSource, _device: &str, ms: f64) -> Result<SoundClip, HostError> {

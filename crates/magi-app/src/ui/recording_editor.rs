@@ -42,10 +42,12 @@ pub enum RowKind {
     Scroll,
     PadButton,
     Display,
+    Move,
+    Look,
 }
 
 impl RowKind {
-    const ALL: [RowKind; 9] = [
+    const ALL: [RowKind; 11] = [
         RowKind::Key,
         RowKind::KeyDown,
         RowKind::KeyUp,
@@ -55,6 +57,8 @@ impl RowKind {
         RowKind::Scroll,
         RowKind::PadButton,
         RowKind::Display,
+        RowKind::Move,
+        RowKind::Look,
     ];
 
     fn label(self) -> &'static str {
@@ -68,6 +72,8 @@ impl RowKind {
             RowKind::Scroll => "Scroll",
             RowKind::PadButton => "Pad button",
             RowKind::Display => "Display change",
+            RowKind::Move => "Move",
+            RowKind::Look => "Look (camera)",
         }
     }
 
@@ -82,7 +88,9 @@ impl RowKind {
             StrokeInput::Scroll { .. } => RowKind::Scroll,
             StrokeInput::PadButton { .. } => RowKind::PadButton,
             StrokeInput::Display { .. } => RowKind::Display,
-            StrokeInput::Move { .. } | StrokeInput::Look { .. } | StrokeInput::PadAxis { .. } => return None,
+            StrokeInput::Move { .. } => RowKind::Move,
+            StrokeInput::Look { .. } => RowKind::Look,
+            StrokeInput::PadAxis { .. } => return None,
         })
     }
 
@@ -97,12 +105,14 @@ impl RowKind {
             RowKind::Scroll => StrokeInput::Scroll { dx: 0, dy: -1 },
             RowKind::PadButton => StrokeInput::PadButton { button: GamepadButton::South },
             RowKind::Display => StrokeInput::Display { index: 0 },
+            RowKind::Move => StrokeInput::Move { path: vec![PathPoint(0.0, 0, 0), PathPoint(200.0, 100, 100)] },
+            RowKind::Look => StrokeInput::Look { path: vec![LookPoint(0.0, 0, 0), LookPoint(200.0, 100, 0)] },
         }
     }
 
     /// Whether a new row of this kind starts out held for a moment.
     fn held(self) -> bool {
-        matches!(self, RowKind::Key | RowKind::Click | RowKind::PadButton)
+        matches!(self, RowKind::Key | RowKind::Click | RowKind::PadButton | RowKind::Move | RowKind::Look)
     }
 }
 
@@ -128,6 +138,9 @@ pub enum RecordingEdit {
     Display(usize, u8),
     /// Where a movement starts and ends; the path in between follows.
     MoveEnds(usize, Point, Point),
+    /// Asks for one end of a movement (`true`: where it ends) to be picked on
+    /// screen. The app does the picking; applying it changes nothing.
+    PickMoveEnd(usize, bool),
     /// The total relative motion of a look.
     LookTotal(usize, i32, i32),
     /// Movement between positions ⇄ relative motion.
@@ -267,6 +280,7 @@ impl RecordingEdit {
                     *index = new_index;
                 }
             }
+            RecordingEdit::PickMoveEnd(..) => {}
             RecordingEdit::MoveEnds(i, start, end) => {
                 if let Some(StrokeInput::Move { path }) = input(recording, i)
                     && let (Some(first), Some(last)) = (path.first().copied(), path.last().copied())
@@ -779,16 +793,14 @@ fn ui_pointer(response: &egui::Response) -> Option<egui::Pos2> {
 fn kind_cell(ui: &mut Ui, index: usize, input: &StrokeInput, edit: &mut Option<RecordingEdit>) {
     match RowKind::of(input) {
         Some(kind) => {
-            egui::ComboBox::from_id_salt(("kind", index)).width(92.0).selected_text(input.kind_label()).show_ui(
-                ui,
-                |ui| {
-                    for option in RowKind::ALL {
-                        if ui.selectable_label(option == kind, option.label()).clicked() && option != kind {
-                            *edit = Some(RecordingEdit::Kind(index, option));
-                        }
+            widgets::combo(("kind", index)).width(92.0).selected_text(input.kind_label()).show_ui(ui, |ui| {
+                let needle = widgets::combo_search(ui);
+                for option in RowKind::ALL {
+                    if widgets::option(ui, &needle, option == kind, option.label()) && option != kind {
+                        *edit = Some(RecordingEdit::Kind(index, option));
                     }
-                },
-            );
+                }
+            });
         }
         None => {
             ui.label(input.kind_label());
@@ -805,9 +817,10 @@ fn button_detail(
     here: bool,
     edit: &mut Option<RecordingEdit>,
 ) {
-    egui::ComboBox::from_id_salt(("button", index)).width(70.0).selected_text(button.label()).show_ui(ui, |ui| {
+    widgets::combo(("button", index)).width(70.0).selected_text(button.label()).show_ui(ui, |ui| {
+        let needle = widgets::combo_search(ui);
         for &option in MouseButton::ALL {
-            if ui.selectable_label(option == button, option.label()).clicked() {
+            if widgets::option(ui, &needle, option == button, option.label()) {
                 *edit = Some(RecordingEdit::Button(index, option));
             }
         }
@@ -871,11 +884,22 @@ fn detail(ui: &mut Ui, index: usize, input: &StrokeInput) -> Option<RecordingEdi
         StrokeInput::Move { path } => {
             if let (Some(a), Some(b)) = (path.first(), path.last()) {
                 let (mut ax, mut ay, mut bx, mut by) = (a.1, a.2, b.1, b.2);
+                let pick = |ui: &mut Ui, hint: &str| {
+                    ui.add(egui::Button::new(RichText::new(icon::CROSSHAIR).size(12.0)).frame(false))
+                        .on_hover_text(hint)
+                        .clicked()
+                };
                 let mut changed =
                     coord(ui, &mut ax, "Where the movement starts") | coord(ui, &mut ay, "Where the movement starts");
+                if pick(ui, "Pick where the movement starts on screen") {
+                    edit = Some(RecordingEdit::PickMoveEnd(index, false));
+                }
                 ui.label(RichText::new("›").color(theme::text_faint()));
                 changed |=
                     coord(ui, &mut bx, "Where the movement ends") | coord(ui, &mut by, "Where the movement ends");
+                if pick(ui, "Pick where the movement ends on screen") {
+                    edit = Some(RecordingEdit::PickMoveEnd(index, true));
+                }
                 if changed {
                     edit = Some(RecordingEdit::MoveEnds(index, Point::new(ax, ay), Point::new(bx, by)));
                 }
@@ -907,9 +931,10 @@ fn detail(ui: &mut Ui, index: usize, input: &StrokeInput) -> Option<RecordingEdi
             }
         }
         StrokeInput::PadButton { button } => {
-            egui::ComboBox::from_id_salt(("pad", index)).width(110.0).selected_text(button.label()).show_ui(ui, |ui| {
+            widgets::combo(("pad", index)).width(110.0).selected_text(button.label()).show_ui(ui, |ui| {
+                let needle = widgets::combo_search(ui);
                 for &option in GamepadButton::ALL {
-                    if ui.selectable_label(option == *button, option.label()).clicked() {
+                    if widgets::option(ui, &needle, option == *button, option.label()) {
                         edit = Some(RecordingEdit::PadButton(index, option));
                     }
                 }
@@ -917,9 +942,12 @@ fn detail(ui: &mut Ui, index: usize, input: &StrokeInput) -> Option<RecordingEdi
         }
         StrokeInput::PadAxis { axis, value } => {
             let mut new_axis = *axis;
-            egui::ComboBox::from_id_salt(("axis", index)).width(100.0).selected_text(axis.label()).show_ui(ui, |ui| {
+            widgets::combo(("axis", index)).width(100.0).selected_text(axis.label()).show_ui(ui, |ui| {
+                let needle = widgets::combo_search(ui);
                 for &option in GamepadAxis::ALL {
-                    ui.selectable_value(&mut new_axis, option, option.label());
+                    if widgets::option(ui, &needle, new_axis == option, option.label()) {
+                        new_axis = option;
+                    }
                 }
             });
             let mut new_value = *value;

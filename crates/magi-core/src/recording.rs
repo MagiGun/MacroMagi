@@ -240,6 +240,90 @@ impl Recording {
         self.duration_ms = self.duration_ms.max(self.end_time());
     }
 
+    /// The task switches in the recording, in order: for each, the strokes
+    /// that make it up. A switch is Alt+Tab or Win+Tab (the modifier's down
+    /// and up and every Tab between them), or a click right after the
+    /// pointer moved to another display.
+    fn task_switches(&self) -> Vec<Vec<usize>> {
+        let mut switches = Vec::new();
+        let modifier = |k: &Key| matches!(k, Key::AltLeft | Key::AltRight | Key::MetaLeft | Key::MetaRight);
+        for (index, stroke) in self.strokes.iter().enumerate() {
+            match &stroke.input {
+                // A modifier held across other presses was split into down and up.
+                StrokeInput::KeyDown { key } if modifier(key) => {
+                    let up = self.strokes[index + 1..]
+                        .iter()
+                        .position(|s| matches!(&s.input, StrokeInput::KeyUp { key: k } if k == key))
+                        .map(|p| index + 1 + p);
+                    let until = up.map_or(f64::INFINITY, |u| self.strokes[u].at);
+                    let tabs: Vec<usize> = (index + 1..up.unwrap_or(self.strokes.len()))
+                        .filter(|&i| {
+                            self.strokes[i].at <= until
+                                && matches!(
+                                    &self.strokes[i].input,
+                                    StrokeInput::Key { key: Key::Tab }
+                                        | StrokeInput::KeyDown { key: Key::Tab }
+                                        | StrokeInput::KeyUp { key: Key::Tab }
+                                )
+                        })
+                        .collect();
+                    if !tabs.is_empty() {
+                        let mut parts = vec![index];
+                        parts.extend(tabs);
+                        parts.extend(up);
+                        switches.push(parts);
+                    }
+                }
+                StrokeInput::Display { .. } => {
+                    // The next press decides: a click is a click to switch.
+                    if let Some(next) =
+                        self.strokes[index + 1..].iter().position(|s| s.input.is_press()).map(|p| index + 1 + p)
+                    {
+                        match &self.strokes[next].input {
+                            StrokeInput::Mouse { .. } => switches.push(vec![next]),
+                            StrokeInput::MouseDown { button, .. } => {
+                                let up = self.strokes[next + 1..]
+                                    .iter()
+                                    .position(
+                                        |s| matches!(&s.input, StrokeInput::MouseUp { button: b, .. } if b == button),
+                                    )
+                                    .map(|p| next + 1 + p);
+                                switches.push(std::iter::once(next).chain(up).collect());
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        switches.sort_by(|a, b| self.strokes[a[0]].at.total_cmp(&self.strokes[b[0]].at));
+        switches.dedup();
+        switches
+    }
+
+    /// Leaves out task switches: the first, the last, and those in between, as chosen.
+    pub fn skip_switches(&mut self, which: SkipSwitches) {
+        let switches = self.task_switches();
+        let count = switches.len();
+        let mut drop: Vec<usize> = Vec::new();
+        for (n, parts) in switches.into_iter().enumerate() {
+            let (first, last) = (n == 0, n + 1 == count);
+            if (first && which.first) || (last && which.last) || (!first && !last && which.between) {
+                drop.extend(parts);
+            }
+        }
+        if drop.is_empty() {
+            return;
+        }
+        let mut index = 0;
+        self.strokes.retain(|_| {
+            let keep = !drop.contains(&index);
+            index += 1;
+            keep
+        });
+    }
+
     /// Removes the idle time before the first stroke.
     pub fn trim_start(&mut self) {
         let Some(first) = self.strokes.iter().map(|s| s.at).reduce(f64::min) else {
@@ -694,6 +778,26 @@ pub struct RecordOptions {
     /// Drop the idle time between starting the recording and the first input.
     pub trim_start: bool,
     pub mouse_mode: MouseRecording,
+    /// Leave out switching to another program or display.
+    pub skip_switches: SkipSwitches,
+}
+
+/// Which task switches a recording leaves out: Alt+Tab or Win+Tab, or a
+/// click on another display – what people do to get from MacroMagi to the
+/// program they record in, and back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SkipSwitches {
+    pub on: bool,
+    pub first: bool,
+    pub last: bool,
+    pub between: bool,
+}
+
+impl Default for SkipSwitches {
+    fn default() -> Self {
+        Self { on: false, first: true, last: true, between: false }
+    }
 }
 
 impl Default for RecordOptions {
@@ -706,6 +810,7 @@ impl Default for RecordOptions {
             gamepad: true,
             trim_start: true,
             mouse_mode: MouseRecording::Smart,
+            skip_switches: SkipSwitches::default(),
         }
     }
 }
@@ -948,6 +1053,13 @@ impl RecordingBuilder {
         split_overlapping(&mut self.strokes);
         let mut recording = Recording { duration_ms: t.max(0.0), screen, strokes: self.strokes };
         recording.normalize();
+        if self.options.mouse_mode == MouseRecording::Smart {
+            // The same conversion as the editor's Smart button.
+            recording.make_smart();
+        }
+        if self.options.skip_switches.on {
+            recording.skip_switches(self.options.skip_switches);
+        }
         if self.options.trim_start {
             recording.trim_start();
         }
@@ -1034,6 +1146,40 @@ fn resolve_smart(strokes: &mut Vec<Stroke>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn task_switches_can_be_left_out_first_last_and_in_between() {
+        let stroke = |at: f64, hold: f64, input: StrokeInput| Stroke { at, hold, input };
+        let alt_tab = |at: f64| {
+            vec![
+                stroke(at, 0.0, StrokeInput::KeyDown { key: Key::AltLeft }),
+                stroke(at + 10.0, 20.0, StrokeInput::Key { key: Key::Tab }),
+                stroke(at + 50.0, 0.0, StrokeInput::KeyUp { key: Key::AltLeft }),
+            ]
+        };
+        let mut strokes = alt_tab(0.0);
+        strokes.push(stroke(100.0, 30.0, StrokeInput::Key { key: Key::KeyA }));
+        strokes.push(stroke(150.0, 0.0, StrokeInput::Display { index: 1 }));
+        strokes.push(stroke(
+            160.0,
+            40.0,
+            StrokeInput::Mouse { button: MouseButton::Left, x: 5, y: 5, end: None, here: false },
+        ));
+        strokes.push(stroke(250.0, 30.0, StrokeInput::Key { key: Key::KeyB }));
+        strokes.extend(alt_tab(400.0));
+        let recording = Recording { duration_ms: 500.0, screen: None, strokes };
+        let keys = |r: &Recording| r.strokes.iter().filter(|s| s.input.is_press()).count();
+
+        let mut ends = recording.clone();
+        ends.skip_switches(SkipSwitches { on: true, first: true, last: true, between: false });
+        assert_eq!(keys(&ends), 3, "A, the click on the other display, B");
+        let mut all = recording.clone();
+        all.skip_switches(SkipSwitches { on: true, first: true, last: true, between: true });
+        assert_eq!(keys(&all), 2, "only A and B");
+        let mut first = recording;
+        first.skip_switches(SkipSwitches { on: true, first: true, last: false, between: false });
+        assert!(matches!(first.strokes.last().map(|s| &s.input), Some(StrokeInput::KeyUp { key: Key::AltLeft })));
+    }
     use crate::geom::Rect;
 
     fn builder() -> RecordingBuilder {

@@ -4,7 +4,32 @@ Notable changes to MacroMagi. The format follows [Keep a Changelog](https://keep
 
 File-format changes are called out explicitly; see [docs/FILE_FORMAT.md](docs/FILE_FORMAT.md) for the compatibility rules.
 
-## 0.1.3 – Unreleased
+## 0.1.4 – Unreleased
+
+### Added
+
+- **Files** blocks: **Read File** (all the text, one line, or a picture), **Write to File** (set the file, add to it, or change one line; a picture is saved as a PNG, replacing one of the same name), **Find in Text** (on which line a word is, what that line says, on how many lines), **Folder Contents** and **Make Folder**. Paths have a Browse button and can be wired in; relative paths go into the `files` folder in the data folder.
+- **Screenshot** block: a picture of the display the pointer is on, a chosen display or an area, kept while the macro runs. Pictures from Screenshot or Read File can be wired into **Image Detection** (its new *Picture* input) or **Write to File**.
+- **Switch to Display** block: moves the pointer to the middle of a display, and can click there.
+- **Current Window** block: the title and program of the window in front, its display, the pointer's display and its middle.
+- **Every drop-down can be searched**, the Stop block's *Continue from* included.
+- **Auto Typer**: a list of characters to leave out, with Space, Line break and Tab buttons.
+- **Recording**: *Skip task switches* (off by default) leaves out Alt+Tab, Win+Tab or a click on another display – the first, the last and those in between, each switchable. The recording editor can add *Move* and *Look* rows, and pick where a movement starts or ends on screen.
+- **Recordings** can be deleted from a Play Recording block's drop-down; recordings no block plays are deleted when the macro is saved (*Automatically delete unassigned recordings when saving*, in Settings › Recording and Options › Behaviours; on by default).
+- **File › Save as** can save a `.mp` preset – of the selected blocks, or the whole workspace. **File › Export presets** exports the workspace, the selection, or one of your presets.
+
+### Changed
+
+- A Smart recording gets the same conversion as the editor's *Smart* button when it ends, so it is as accurate as converting it by hand.
+- The Presets menu lists only your presets, without the ones stored in the open file.
+- The AI settings page looks for Python by itself, so PyTorch's status is right without visiting the Engine page; a PyTorch that is found offers *Uninstall* instead of *Install*.
+- The program picker of Switch to Window stays open while you type in its search box, and lists programs with windows first.
+
+### File format
+
+All additions are optional; earlier files load unchanged. New blocks `vision.screenshot`, `window.display`, `window.current`, `files.read`, `files.write`, `files.find`, `files.list`, `files.make_folder`; Image Detection's `picture` input; the Auto Typer's `ignore`.
+
+## 0.1.3
 
 ### Added
 

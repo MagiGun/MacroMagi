@@ -148,7 +148,8 @@ Messages are JSON, one per line, on standard input and output. They are listed a
 | Kind | Operations |
 | --- | --- |
 | Time and input | `sleep`, `actions`, `send`, `move`, `cursor`, `play_recording`, `autoclick`, `autotype`, `rate` |
-| The screen | `find_image`, `find_color`, `focus_window` |
+| The screen | `find_image`, `find_color`, `screenshot`, `focus_window`, `switch_display`, `current_window` |
+| Files | `read_file`, `write_file`, `find_text`, `list_folder`, `make_folder` |
 | Reading text | `read_text` |
 | Sound | `sound_level`, `sound_match` |
 | AI models | `ai_classify`, `ai_watch` |

@@ -13,6 +13,7 @@
 //! implement it in both engines. See `docs/ADDING_A_NODE.md`.
 
 pub mod ai;
+pub mod files;
 pub mod flow;
 pub mod input;
 pub mod logic;
@@ -52,6 +53,14 @@ pub mod ids {
     pub const AUTOCLICK: &str = "input.autoclick";
     pub const AUTOTYPE: &str = "input.autotype";
     pub const READ_TEXT: &str = "vision.read_text";
+    pub const SCREENSHOT: &str = "vision.screenshot";
+    pub const SWITCH_DISPLAY: &str = "window.display";
+    pub const CURRENT_WINDOW: &str = "window.current";
+    pub const READ_FILE: &str = "files.read";
+    pub const WRITE_FILE: &str = "files.write";
+    pub const FIND_TEXT: &str = "files.find";
+    pub const LIST_FOLDER: &str = "files.list";
+    pub const MAKE_FOLDER: &str = "files.make_folder";
     pub const FOCUS_WINDOW: &str = "window.focus";
     pub const RATE: &str = "flow.rate";
     pub const DEFINE: &str = "flow.define";
@@ -105,13 +114,14 @@ pub enum Category {
     Variables,
     Logic,
     System,
+    Files,
     Script,
     Notes,
     Addon,
 }
 
 impl Category {
-    pub const ALL: [Category; 12] = [
+    pub const ALL: [Category; 13] = [
         Category::Flow,
         Category::Input,
         Category::Vision,
@@ -121,6 +131,7 @@ impl Category {
         Category::Variables,
         Category::Logic,
         Category::System,
+        Category::Files,
         Category::Script,
         Category::Notes,
         Category::Addon,
@@ -137,6 +148,7 @@ impl Category {
             Category::Variables => "Variables",
             Category::Logic => "Logic",
             Category::System => "System",
+            Category::Files => "Files",
             Category::Script => "Script",
             Category::Notes => "Notes",
             Category::Addon => "Add-ons",
@@ -152,6 +164,8 @@ pub enum DataType {
     Number,
     Point,
     Text,
+    /// A picture, kept while a macro runs (a screenshot, a picture read from a file).
+    Image,
     #[default]
     Any,
 }
@@ -163,6 +177,7 @@ impl DataType {
             DataType::Number => "Number",
             DataType::Point => "Screen position",
             DataType::Text => "Text",
+            DataType::Image => "Picture",
             DataType::Any => "Any value",
         }
     }
@@ -300,6 +315,12 @@ pub enum ParamKind {
     /// A list of sounds, each optionally in a named group
     /// ([`sound::SoundTarget`]). The groups are the node's `groups` setting.
     Sounds,
+    /// A list of single characters (Auto Typer's characters to leave out).
+    Characters,
+    /// A path to a file or (with `folder`) a folder, chosen with a Browse button.
+    Path {
+        folder: bool,
+    },
     /// The name of a sound input device; empty for the system's default.
     AudioDevice,
     /// Id of an AI model asset (a `.magic` file).
@@ -319,6 +340,7 @@ impl ParamKind {
                 | ParamKind::Duration
                 | ParamKind::Percent
                 | ParamKind::Text { .. }
+                | ParamKind::Path { .. }
                 | ParamKind::Choice { .. }
                 | ParamKind::Point
                 | ParamKind::Region
@@ -653,6 +675,7 @@ impl Registry {
         flow::register_structure(&mut registry);
         variables::register(&mut registry);
         system::register(&mut registry);
+        files::register(&mut registry);
         notes::register(&mut registry);
         registry
     }

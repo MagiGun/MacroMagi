@@ -146,6 +146,7 @@ pub trait Host: Send + Sync {
     fn notify(&self, notification: &Notification) -> Result<(), HostError>;
     fn listen(&self, source: SoundSource, device: &str, ms: f64) -> Result<SoundClip, HostError>;  // recent sound
     fn read_text(&self, picture: &Frame, language: &str) -> Result<Vec<TextWord>, HostError>;  // OCR
+    fn active_window(&self) -> Option<ActiveWindow>;                       // the window in front
 }
 ```
 
@@ -160,6 +161,10 @@ Adding a capability a macro can use means adding a method here, implementing it 
 **Sound.** `listen` returns the most recent stretch of sound from what the computer plays (loopback capture) or a microphone – a named one, or the system's default. `SystemHost` opens a source only while a macro listens: a thread owns the audio stream, keeps the last seconds in a ring buffer and closes the stream after a quiet while. Each clip says where it ends in the stream, so a listener knows which part it has already heard. The analysis – loudness, the strongest frequency, and recognising an uploaded sound by comparing the shape of its spectrum over time, independent of volume – is pure code in `magi-audio`. Recognition keeps a running fingerprint of the stream rather than re-analysing it on every look, which keeps long sounds cheap, and can recognise a sound by its first part while it is still playing. A recognised sound counts once: what was heard before the match is not looked at again.
 
 **Text.** `read_text` recognises the words in a picture. `SystemHost` uses the text recognition built into Windows (`Windows.Media.Ocr`, [`ocr.rs`](../crates/magi-platform/src/ocr.rs)), so nothing has to be downloaded; `SimHost` returns words a test sets. The Text Scan operation captures the area, enlarges it when asked (within the size the recogniser accepts), and turns the words into the block's outputs.
+
+**Pictures in a run.** Screenshot and Read File keep their pictures in the run (`RunCx`) and pass on a value that names one (`{"$picture": id}`), so pictures travel between blocks – and over the Python engine's pipe – without copying pixels. Image Detection looks for a picture wired in, and Write to File saves one; they are gone when the run ends.
+
+**Files.** The file blocks read and write where the macro says: a full path, or a path relative to the `files` folder in the data folder (`magi_engine::set_files_dir`).
 
 **Keys on Windows** are sent as scan codes, as a keyboard sends them, because many games read the keyboard that way and ignore keys sent only as virtual keys. Extended keys (arrows, the right-hand Ctrl and Alt…) are sent as virtual keys, which marks them correctly.
 

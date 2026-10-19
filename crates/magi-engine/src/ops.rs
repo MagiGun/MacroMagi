@@ -18,12 +18,18 @@ use magi_core::host::{Frame, Host, Notification, SoundSource, TextWord, WindowIn
 use magi_core::input::{Button, InputEvent, Key};
 use magi_core::magic::Decision;
 use magi_core::nodes::ai::{AiParams, AiWatchParams};
+use magi_core::nodes::files::{
+    FindTextParams, ListFolderParams, ListKind, MakeFolderParams, ReadFileParams, ReadMode, WriteFileParams, WriteMode,
+};
 use magi_core::nodes::flow::RateParams;
 use magi_core::nodes::input::{ActionParams, AutoTypeParams, NewLines, PlayRecordingParams};
 use magi_core::nodes::sound::{SoundLevelParams, SoundMatchParams};
 use magi_core::nodes::system::NotifyParams;
 use magi_core::nodes::variables::{CounterParams, SetVariableParams};
-use magi_core::nodes::vision::{FindColorParams, FindImageParams, FindMode, ReadTextParams};
+use magi_core::nodes::vision::{
+    FindColorParams, FindImageParams, FindMode, ReadTextParams, ScreenshotParams, ShotSource,
+};
+use magi_core::nodes::window::SwitchDisplayParams;
 use magi_core::nodes::window::{FocusWindowParams, ScreenKind};
 use magi_core::options::{ProcessRules, RuleAction, Verdict};
 use magi_core::text::parse_hex_color;
@@ -214,6 +220,8 @@ pub struct RunCx {
     last_heard: HashMap<NodeId, (String, String)>,
     /// AI Watch blocks part-way through watching, between the times they act.
     watches: HashMap<NodeId, WatchState>,
+    /// Pictures taken or read while this run goes on, by id (see [`PICTURE_KEY`]).
+    pictures: HashMap<String, Arc<magi_vision::Bitmap>>,
 }
 
 impl RunCx {
@@ -235,6 +243,7 @@ impl RunCx {
             heard_until: HashMap::new(),
             last_heard: HashMap::new(),
             watches: HashMap::new(),
+            pictures: HashMap::new(),
             stop,
             stop_everything,
             held: Vec::new(),
@@ -820,6 +829,38 @@ impl RunCx {
     }
 }
 
+/// A picture as a value: `{"$picture": id, "width": …, "height": …}`. The
+/// pixels stay in the run; values only carry the id, so they travel over the
+/// Python engine's pipe like any other value.
+pub const PICTURE_KEY: &str = "$picture";
+
+/// Where file blocks' relative paths lead: the `files` folder in the data folder.
+static FILES_DIR: RwLock<Option<std::path::PathBuf>> = RwLock::new(None);
+
+/// Sets the folder relative paths of file blocks lead to.
+pub fn set_files_dir(dir: std::path::PathBuf) {
+    *FILES_DIR.write().unwrap_or_else(|p| p.into_inner()) = Some(dir);
+}
+
+/// A file block's path: its own setting, or a path wired in.
+fn resolve_path(setting: &str, wired: Option<&Value>) -> Result<std::path::PathBuf, EngineError> {
+    let text = wired.map(as_text).unwrap_or_else(|| setting.to_owned());
+    let text = text.trim().trim_matches('"');
+    if text.is_empty() {
+        return Err(EngineError::new("no file or folder has been chosen"));
+    }
+    let path = std::path::PathBuf::from(text);
+    if path.is_absolute() {
+        return Ok(path);
+    }
+    let base = FILES_DIR.read().unwrap_or_else(|p| p.into_inner()).clone().unwrap_or_else(|| ".".into());
+    Ok(base.join(path))
+}
+
+fn io_error(path: &std::path::Path, e: std::io::Error) -> EngineError {
+    EngineError::new(format!("{}: {e}", path.display()))
+}
+
 /// The longest side of a picture the system's text recognition accepts.
 const OCR_MAX_SIDE: u32 = 2600;
 
@@ -941,6 +982,272 @@ impl RunCx {
         outputs.insert("text".into(), serde_json::json!(text));
         outputs.insert("position".into(), serde_json::json!(position));
         outputs.insert("number".into(), serde_json::json!(first_number(&text)));
+        Ok(outputs)
+    }
+
+    // ---- pictures, files and folders --------------------------------------------
+
+    /// Keeps a picture for the rest of the run and returns it as a value.
+    fn keep_picture(&mut self, bitmap: magi_vision::Bitmap) -> Value {
+        let id = format!("picture-{}", self.pictures.len() + 1);
+        let (width, height) = (bitmap.width, bitmap.height);
+        self.pictures.insert(id.clone(), Arc::new(bitmap));
+        serde_json::json!({ PICTURE_KEY: id, "width": width, "height": height })
+    }
+
+    /// The picture a value stands for, if it is one of this run's pictures.
+    pub fn picture_of(&self, value: &Value) -> Option<Arc<magi_vision::Bitmap>> {
+        self.pictures.get(value.get(PICTURE_KEY)?.as_str()?).cloned()
+    }
+
+    /// Takes a picture of the screen (a **Screenshot** block).
+    pub fn screenshot(&mut self, params: &ScreenshotParams) -> OpResult<serde_json::Map<String, Value>> {
+        let displays = self.displays();
+        let area = match params.source {
+            ShotSource::Area => params.region.map(|r| self.global_rect(r)),
+            ShotSource::Display => displays.get(params.display),
+            ShotSource::Current => {
+                let pointer = self.host.cursor().map_err(EngineError::from)?;
+                displays.get(displays.to_local(pointer).display.unwrap_or(0))
+            }
+        };
+        let frame = self.host.capture(area).map_err(EngineError::from)?;
+        let (width, height) = (frame.width, frame.height);
+        let picture = self.keep_picture(magi_vision::Bitmap { width, height, rgba: frame.rgba });
+        let mut outputs = serde_json::Map::new();
+        outputs.insert("picture".into(), picture);
+        outputs.insert("width".into(), serde_json::json!(width));
+        outputs.insert("height".into(), serde_json::json!(height));
+        Ok(outputs)
+    }
+
+    /// Looks for a picture wired into an Image Detection block, instead of its list.
+    pub fn find_picture(
+        &mut self,
+        params: &FindImageParams,
+        picture: &magi_vision::Bitmap,
+    ) -> OpResult<ImagesSighting> {
+        let area = self.search_area(params.region, params.display);
+        let frame = self.host.capture(area).map_err(EngineError::from)?;
+        let factor = params.detail.factor().min((picture.width.min(picture.height) / 6).max(1)).max(1);
+        let (haystack, needle) = if factor > 1 {
+            (
+                magi_vision::shrink(ImageRef::new(frame.width, frame.height, &frame.rgba), factor),
+                magi_vision::shrink(picture.as_ref(), factor),
+            )
+        } else {
+            (
+                magi_vision::Bitmap { width: frame.width, height: frame.height, rgba: frame.rgba.clone() },
+                picture.clone(),
+            )
+        };
+        let best = magi_vision::find_template(haystack.as_ref(), needle.as_ref());
+        let threshold = params.threshold.clamp(0.0, 1.0);
+        Ok(match best {
+            Some(best) => {
+                let (cx, cy) = best.center();
+                let (x, y) = (cx * factor + factor / 2, cy * factor + factor / 2);
+                let found = f64::from(best.score) >= threshold;
+                ImagesSighting {
+                    found,
+                    position: found.then(|| Point::new(frame.origin.x + x as i32, frame.origin.y + y as i32)),
+                    score: f64::from(best.score),
+                    name: "Picture".into(),
+                    group: String::new(),
+                    count: usize::from(found),
+                }
+            }
+            None => ImagesSighting {
+                found: false,
+                position: None,
+                score: 0.0,
+                name: String::new(),
+                group: String::new(),
+                count: 0,
+            },
+        })
+    }
+
+    /// Reads a file (a **Read File** block).
+    pub fn read_file(
+        &mut self,
+        params: &ReadFileParams,
+        path: Option<&Value>,
+    ) -> OpResult<serde_json::Map<String, Value>> {
+        let path = resolve_path(&params.path, path)?;
+        let mut outputs = serde_json::Map::new();
+        let (mut text, mut lines, mut picture) = (String::new(), 0usize, Value::Null);
+        let found = path.is_file();
+        if found {
+            match params.mode {
+                ReadMode::Picture => {
+                    let bytes = std::fs::read(&path).map_err(|e| io_error(&path, e))?;
+                    let bitmap = magi_vision::decode(&bytes)
+                        .map_err(|e| EngineError::new(format!("{}: {e}", path.display())))?;
+                    picture = self.keep_picture(bitmap);
+                }
+                ReadMode::Text | ReadMode::Line => {
+                    let bytes = std::fs::read(&path).map_err(|e| io_error(&path, e))?;
+                    let all = String::from_utf8_lossy(&bytes).into_owned();
+                    lines = all.lines().count();
+                    text = match params.mode {
+                        ReadMode::Line => {
+                            all.lines().nth(params.line.max(1) as usize - 1).unwrap_or_default().to_owned()
+                        }
+                        _ => all,
+                    };
+                }
+            }
+        }
+        outputs.insert("found".into(), serde_json::json!(found));
+        outputs.insert("text".into(), serde_json::json!(text));
+        outputs.insert("lines".into(), serde_json::json!(lines));
+        outputs.insert("picture".into(), picture);
+        Ok(outputs)
+    }
+
+    /// Writes to a file (a **Write to File** block). A wired picture is saved as PNG.
+    pub fn write_file(
+        &mut self,
+        params: &WriteFileParams,
+        value: Option<&Value>,
+        path: Option<&Value>,
+    ) -> OpResult<()> {
+        let mut path = resolve_path(&params.path, path)?;
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent).map_err(|e| io_error(parent, e))?;
+        }
+        if let Some(picture) = value.and_then(|v| self.picture_of(v)) {
+            if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("png")) {
+                path.set_extension("png");
+            }
+            let png =
+                magi_vision::encode_png(picture.as_ref().as_ref()).map_err(|e| EngineError::new(e.to_string()))?;
+            return std::fs::write(&path, png).map_err(|e| io_error(&path, e).into());
+        }
+        let text = value.map(as_text).unwrap_or_else(|| params.text.clone());
+        let existing = || std::fs::read(&path).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+        let contents = match params.mode {
+            WriteMode::Replace => text,
+            WriteMode::Append => {
+                let mut all = existing();
+                if params.new_line && !all.is_empty() && !all.ends_with('\n') {
+                    all.push('\n');
+                }
+                all.push_str(&text);
+                all
+            }
+            WriteMode::Line => {
+                let all = existing();
+                let mut lines: Vec<String> = all.lines().map(str::to_owned).collect();
+                let index = params.line.max(1) as usize - 1;
+                if lines.len() <= index {
+                    lines.resize(index + 1, String::new());
+                }
+                lines[index] = text;
+                let mut joined = lines.join("\n");
+                if all.ends_with('\n') {
+                    joined.push('\n');
+                }
+                joined
+            }
+        };
+        std::fs::write(&path, contents).map_err(|e| io_error(&path, e).into())
+    }
+
+    /// Looks for text in text (a **Find in Text** block).
+    pub fn find_text(&mut self, params: &FindTextParams, text: Option<&Value>) -> serde_json::Map<String, Value> {
+        let text = text.map(as_text).unwrap_or_default();
+        let fold = |s: &str| if params.match_case { s.to_owned() } else { s.to_lowercase() };
+        let needle = fold(&params.find);
+        let hits: Vec<(usize, &str)> = if needle.is_empty() {
+            Vec::new()
+        } else {
+            text.lines().enumerate().filter(|(_, line)| fold(line).contains(&needle)).collect()
+        };
+        let mut outputs = serde_json::Map::new();
+        outputs.insert("found".into(), serde_json::json!(!hits.is_empty()));
+        outputs.insert("line".into(), serde_json::json!(hits.first().map_or(0, |(n, _)| n + 1)));
+        outputs.insert("line_text".into(), serde_json::json!(hits.first().map_or("", |(_, l)| *l)));
+        outputs.insert("count".into(), serde_json::json!(hits.len()));
+        outputs
+    }
+
+    /// Lists a folder (a **Folder Contents** block).
+    pub fn list_folder(
+        &mut self,
+        params: &ListFolderParams,
+        path: Option<&Value>,
+    ) -> OpResult<serde_json::Map<String, Value>> {
+        let path = resolve_path(&params.path, path)?;
+        let filter = params.filter.trim().to_lowercase();
+        let mut entries: Vec<(String, std::path::PathBuf)> = Vec::new();
+        if let Ok(read) = std::fs::read_dir(&path) {
+            for entry in read.flatten() {
+                let is_dir = entry.path().is_dir();
+                let wanted = match params.kind {
+                    ListKind::Files => !is_dir,
+                    ListKind::Folders => is_dir,
+                    ListKind::Both => true,
+                };
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if wanted && (filter.is_empty() || name.to_lowercase().contains(&filter)) {
+                    entries.push((name, entry.path()));
+                }
+            }
+        }
+        entries.sort_by_key(|(name, _)| name.to_lowercase());
+        let mut outputs = serde_json::Map::new();
+        outputs.insert("found".into(), serde_json::json!(path.is_dir()));
+        outputs.insert(
+            "names".into(),
+            serde_json::json!(entries.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join("\n")),
+        );
+        outputs.insert("count".into(), serde_json::json!(entries.len()));
+        outputs.insert(
+            "first".into(),
+            serde_json::json!(entries.first().map(|(_, p)| p.display().to_string()).unwrap_or_default()),
+        );
+        Ok(outputs)
+    }
+
+    /// Makes a folder (a **Make Folder** block).
+    pub fn make_folder(&mut self, params: &MakeFolderParams, path: Option<&Value>) -> OpResult<()> {
+        let path = resolve_path(&params.path, path)?;
+        std::fs::create_dir_all(&path).map_err(|e| io_error(&path, e).into())
+    }
+
+    /// Moves the pointer to the middle of a display, and clicks there if asked (**Switch to Display**).
+    pub fn switch_display(&mut self, params: &SwitchDisplayParams) -> OpResult<()> {
+        let rect = self
+            .displays()
+            .get(params.display)
+            .ok_or_else(|| EngineError::new(format!("display {} is not connected", params.display + 1)))?;
+        let (x, y) = (rect.x + rect.w as i32 / 2, rect.y + rect.h as i32 / 2);
+        self.send(&InputEvent::MoveTo { x, y })?;
+        if params.click {
+            self.perform_actions(
+                &ActionParams { actions: vec![InputAction::click(magi_core::input::MouseButton::Left)], hold_ms: 20.0 },
+                None,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The window in front and the display the pointer is on (**Current Window**).
+    pub fn current_window(&mut self) -> OpResult<serde_json::Map<String, Value>> {
+        let displays = self.displays();
+        let window = self.host.active_window();
+        let pointer = self.host.cursor().ok();
+        let display_of = |p: Point| displays.to_local(p).display.map_or(0, |d| u32::from(d) + 1);
+        let middle =
+            window.as_ref().map(|w| Point::new(w.rect.x + w.rect.w as i32 / 2, w.rect.y + w.rect.h as i32 / 2));
+        let mut outputs = serde_json::Map::new();
+        outputs.insert("title".into(), serde_json::json!(window.as_ref().map_or("", |w| w.title.as_str())));
+        outputs.insert("program".into(), serde_json::json!(window.as_ref().map_or("", |w| w.process.as_str())));
+        outputs.insert("display".into(), serde_json::json!(middle.map_or(0, display_of)));
+        outputs.insert("pointer_display".into(), serde_json::json!(pointer.map_or(0, display_of)));
+        outputs.insert("position".into(), serde_json::json!(middle));
         Ok(outputs)
     }
 

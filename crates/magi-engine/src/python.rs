@@ -490,7 +490,42 @@ fn perform(cx: &mut RunCx, op: &str, args: &Value) -> OpResult<Value> {
             cx.play_recording(&arg(args, "params")?)?;
             Ok(Value::Null)
         }
-        "find_image" => Ok(Value::Object(cx.find_image(&arg(args, "params")?)?.to_json())),
+        "find_image" => {
+            let params = arg(args, "params")?;
+            match args.get("picture").filter(|v| !v.is_null()) {
+                Some(value) => {
+                    let picture = cx.picture_of(value).ok_or_else(|| {
+                        EngineError::new("the picture wired in is not available (it is not a picture)")
+                    })?;
+                    Ok(Value::Object(cx.find_picture(&params, &picture)?.to_json()))
+                }
+                None => Ok(Value::Object(cx.find_image(&params)?.to_json())),
+            }
+        }
+        "read_file" => {
+            Ok(Value::Object(cx.read_file(&arg(args, "params")?, args.get("path").filter(|v| !v.is_null()))?))
+        }
+        "write_file" => {
+            let value = args.get("value").filter(|v| !v.is_null());
+            cx.write_file(&arg(args, "params")?, value, args.get("path").filter(|v| !v.is_null()))?;
+            Ok(Value::Null)
+        }
+        "find_text" => {
+            Ok(Value::Object(cx.find_text(&arg(args, "params")?, args.get("text").filter(|v| !v.is_null()))))
+        }
+        "list_folder" => {
+            Ok(Value::Object(cx.list_folder(&arg(args, "params")?, args.get("path").filter(|v| !v.is_null()))?))
+        }
+        "make_folder" => {
+            cx.make_folder(&arg(args, "params")?, args.get("path").filter(|v| !v.is_null()))?;
+            Ok(Value::Null)
+        }
+        "screenshot" => Ok(Value::Object(cx.screenshot(&arg(args, "params")?)?)),
+        "switch_display" => {
+            cx.switch_display(&arg(args, "params")?)?;
+            Ok(Value::Null)
+        }
+        "current_window" => Ok(Value::Object(cx.current_window()?)),
         "find_color" => Ok(Value::Object(cx.find_color(&arg(args, "params")?)?.to_json())),
         "send" => {
             cx.send(&arg::<InputEvent>(args, "event")?)?;

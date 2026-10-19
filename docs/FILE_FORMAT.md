@@ -208,6 +208,12 @@ Sound Recognition has `sounds` (`{ "sound": "snd-…", "group": "…" }`), `grou
 
 Blocks saved before 0.1.2 have a single `"image"` or `"sound"` instead. It is still read, as the first entry of the list.
 
+### Pictures and paths
+
+Screenshot and Read File output pictures, which only exist while the macro runs: a value `{"$picture": "picture-1", "width": 16, "height": 12}` names one, and the pixels stay with the run. Image Detection looks for a picture wired into its `picture` input instead of its list; Write to File saves one as a PNG.
+
+File blocks have a `path`: a full path, or one relative to the `files` folder in MacroMagi's data folder.
+
 ### AI blocks
 
 AI Watch and AI Model have `model` (the id of a `model` asset) and `settings`: values for the model's adjustable settings, by key, for this block only. A key that is missing takes the model's own value. AI Watch has two flow outputs: `acted`, followed each time the model acts, and `out`, followed when its time is up.
@@ -418,5 +424,5 @@ A model asset inside a `.magi` file is the same archive with `training`, `finetu
 `version` is a single integer per format, currently `1` for all three.
 
 - A reader **rejects** files with a higher version than it knows, with a message asking the user to update.
-- Within a version, changes are additive: new optional fields with defaults, new block types, new stroke types. Readers ignore fields they do not know. (`options`, `clicker`, `look` strokes and the extended Auto Clicker settings were added this way in 0.1.0; `variables`, bound settings, `groups`, `display` on positions and areas, the `key_down`/`key_up`/`mouse_down`/`mouse_up`/`display` strokes and `audio` assets in 0.1.1; `model` assets, image and sound lists with groups, `mode`, `detail`, `match_ms`, `device` and the variables' `reset` in 0.1.2; group `parent`, the `input.autotype` and `vision.read_text` blocks, AI Watch's `acted` output and mouse buttons as a model's key in 0.1.3. Files from earlier versions load unchanged; earlier versions may refuse files that use later additions.)
+- Within a version, changes are additive: new optional fields with defaults, new block types, new stroke types. Readers ignore fields they do not know. (`options`, `clicker`, `look` strokes and the extended Auto Clicker settings were added this way in 0.1.0; `variables`, bound settings, `groups`, `display` on positions and areas, the `key_down`/`key_up`/`mouse_down`/`mouse_up`/`display` strokes and `audio` assets in 0.1.1; `model` assets, image and sound lists with groups, `mode`, `detail`, `match_ms`, `device` and the variables' `reset` in 0.1.2; group `parent`, the `input.autotype` and `vision.read_text` blocks, AI Watch's `acted` output and mouse buttons as a model's key in 0.1.3; the `vision.screenshot`, `window.display`, `window.current` and `files.*` blocks, Image Detection's `picture` input and the Auto Typer's `ignore` in 0.1.4. Files from earlier versions load unchanged; earlier versions may refuse files that use later additions.)
 - A change that old readers would misread bumps the version, and the new reader migrates old files on load.

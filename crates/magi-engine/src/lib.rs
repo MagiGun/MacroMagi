@@ -34,7 +34,7 @@ use thiserror::Error;
 
 pub use monitor::{Activity, FinishedRun, LogEntry, LogLevel, Monitor};
 pub use native::NativeNodes;
-pub use ops::{RunCx, SharedRules};
+pub use ops::{PICTURE_KEY, RunCx, SharedRules, set_files_dir};
 pub use program::Program;
 pub use python::{PythonConfig, PythonRuntime, PythonStatus};
 pub use timing::StopToken;

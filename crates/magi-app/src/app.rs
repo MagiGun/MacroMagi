@@ -187,6 +187,8 @@ pub struct MagiApp {
     pending: Option<Pending>,
     magic_pending: Option<MagicPending>,
     export: Option<ExportChoices>,
+    /// The Export Presets dialog, with what is chosen: 0 the workspace, 1 the selection, then the library.
+    export_presets: Option<usize>,
     preset_prompt: Option<(PresetKind, String)>,
     hotkey_warning: Option<HotkeyWarning>,
     file_extras: Option<FileExtras>,
@@ -268,6 +270,7 @@ impl MagiApp {
             pending: None,
             magic_pending: None,
             export: None,
+            export_presets: None,
             preset_prompt: None,
             hotkey_warning: None,
             file_extras: None,
@@ -289,6 +292,8 @@ impl MagiApp {
         };
         app.macro_tab.view.palette_size = vec2(app.settings.palette_size[0], app.settings.palette_size[1]);
         app.start_onnxruntime();
+        // File blocks' relative paths lead into the data folder.
+        magi_engine::set_files_dir(app.paths.data_dir.join("files"));
 
         let magic = options
             .open
@@ -382,6 +387,20 @@ impl MagiApp {
         {
             self.doc.project.meta.name = stem.to_string_lossy().into_owned();
         }
+        if self.settings.delete_unused_recordings {
+            let used = self.doc.project.graph.referenced_assets(&self.registry);
+            let unused: Vec<String> = self
+                .doc
+                .project
+                .assets
+                .of_kind(magi_core::assets::AssetKind::Recording)
+                .filter(|a| !used.contains(&a.id))
+                .map(|a| a.id.clone())
+                .collect();
+            for id in unused {
+                self.doc.project.assets.remove(&id);
+            }
+        }
         match self.doc.project.save(&path) {
             Ok(()) => {
                 self.settings.remember_file(&path);
@@ -403,15 +422,138 @@ impl MagiApp {
     }
 
     /// Saves the document. Returns false if the user cancelled or it failed.
+    /// Save As can also write a preset (`.mp`): of the selected blocks, or of
+    /// the whole workspace when nothing is selected.
     fn save(&mut self, choose_path: bool) -> bool {
         let path = match (&self.doc.path, choose_path) {
             (Some(path), false) => path.clone(),
-            _ => match self.pick_save_path() {
-                Some(path) => path,
-                None => return false,
-            },
+            _ => {
+                let dialog = rfd::FileDialog::new()
+                    .add_filter(MACRO_FILTER.0, MACRO_FILTER.1)
+                    .set_file_name(format!("{}.magi", self.doc.title()));
+                let dialog = if choose_path { dialog.add_filter(PRESET_FILTER.0, PRESET_FILTER.1) } else { dialog };
+                match dialog.save_file() {
+                    Some(path) => path,
+                    None => return false,
+                }
+            }
         };
+        if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("mp")) {
+            let selected = !self.macro_tab.view.selected_blocks(&self.doc.project).is_empty();
+            return match self.workspace_preset(selected) {
+                Some(preset) => self.write_preset(&preset, &path),
+                None => false,
+            };
+        }
         self.write_document(path)
+    }
+
+    /// A preset of the open tab: its Auto Clicker settings, or the macro's
+    /// blocks (only the selected ones when `selection`).
+    fn workspace_preset(&self, selection: bool) -> Option<magi_core::preset::Preset> {
+        let body = match self.settings.tab {
+            Tab::AutoClicker => magi_core::preset::PresetBody::AutoClicker(self.settings.clicker.clone()),
+            _ => {
+                let ids = if selection {
+                    self.macro_tab.view.selected_blocks(&self.doc.project)
+                } else {
+                    self.doc.project.graph.nodes().map(|n| n.id).collect()
+                };
+                if ids.is_empty() {
+                    return None;
+                }
+                magi_core::preset::PresetBody::Nodes(NodePreset::capture(
+                    &self.doc.project.graph,
+                    &ids,
+                    &self.doc.project.assets,
+                    &self.registry,
+                ))
+            }
+        };
+        let name = if selection { format!("{} (selection)", self.doc.title()) } else { self.doc.title() };
+        Some(magi_core::preset::Preset { name, description: String::new(), body })
+    }
+
+    fn write_preset(&mut self, preset: &magi_core::preset::Preset, path: &Path) -> bool {
+        match preset.save(path) {
+            Ok(()) => {
+                let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                self.toast(format!("Saved the preset {name}"));
+                true
+            }
+            Err(error) => {
+                self.toast_error(format!("Could not save the preset: {error}"));
+                false
+            }
+        }
+    }
+
+    /// The Export Presets dialog: the workspace, the selection, or one of the user's presets.
+    fn export_presets_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut choice) = self.export_presets else { return };
+        let library: Vec<magi_core::preset::Preset> = self.presets.presets().cloned().collect();
+        let selected = !self.macro_tab.view.selected_blocks(&self.doc.project).is_empty();
+        let mut decision = None;
+        egui::Modal::new(egui::Id::new("export-presets")).show(ctx, |ui| {
+            ui.set_width(320.0);
+            ui.label(RichText::new("Export a preset").strong().size(15.0));
+            widgets::note(ui, "Saved as a .mp file, to share or to keep.");
+            ui.add_space(4.0);
+            let workspace = if self.settings.tab == Tab::AutoClicker {
+                "Current Auto Clicker settings"
+            } else {
+                "Current macro workspace"
+            };
+            ui.radio_value(&mut choice, 0, workspace);
+            ui.add_enabled_ui(selected && self.settings.tab != Tab::AutoClicker, |ui| {
+                ui.radio_value(&mut choice, 1, "Only selection").on_disabled_hover_text("Select blocks first");
+            });
+            if !library.is_empty() {
+                ui.separator();
+                ui.label(RichText::new("MY PRESETS").size(10.5).color(theme::text_faint()));
+                egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                    for (index, preset) in library.iter().enumerate() {
+                        ui.radio_value(
+                            &mut choice,
+                            2 + index,
+                            format!("{}  ·  {}", preset.name, preset.body.kind_label()),
+                        );
+                    }
+                });
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if widgets::accent_button(ui, "Export…", theme::accent(), vec2(80.0, 26.0)).clicked() {
+                    decision = Some(true);
+                }
+                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    decision = Some(false);
+                }
+            });
+        });
+        self.export_presets = Some(choice);
+        match decision {
+            Some(true) => {
+                self.export_presets = None;
+                let preset = match choice {
+                    0 => self.workspace_preset(false),
+                    1 => self.workspace_preset(true),
+                    n => library.get(n - 2).cloned(),
+                };
+                let Some(preset) = preset else {
+                    return self.toast_error("There is nothing to export.");
+                };
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter(PRESET_FILTER.0, PRESET_FILTER.1)
+                    .set_file_name(format!("{}.mp", preset.file_stem()))
+                    .save_file()
+                {
+                    self.write_preset(&preset, &path);
+                }
+            }
+            Some(false) => self.export_presets = None,
+            None => {}
+        }
     }
 
     /// Saves to a chosen file with the extras picked in the export dialog.
@@ -773,6 +915,27 @@ impl MagiApp {
                 }
                 node.set_param(&key, actions);
             }
+            (SnipTarget::RecordingMove(asset, row, end), SnipOutcome::Point(point)) => {
+                let displays = crate::displays::current();
+                let Some(recording) = self.doc.project.assets.recording_mut(&asset) else { return };
+                // Positions after a display change are relative to that display.
+                let shown =
+                    recording.strokes[..row.min(recording.strokes.len())].iter().rev().find_map(|s| match s.input {
+                        magi_core::recording::StrokeInput::Display { index } => Some(index),
+                        _ => None,
+                    });
+                let global = displays.to_global(point);
+                let origin = shown.and_then(|d| displays.get(d)).map_or((0, 0), |r| (r.x, r.y));
+                let at = Point::new(global.x - origin.0, global.y - origin.1);
+                if let Some(magi_core::recording::StrokeInput::Move { path }) =
+                    recording.strokes.get(row).map(|s| &s.input)
+                    && let (Some(first), Some(last)) = (path.first(), path.last())
+                {
+                    let (start, finish) = (Point::new(first.1, first.2), Point::new(last.1, last.2));
+                    let (start, finish) = if end { (start, at) } else { (at, finish) };
+                    recording_editor::RecordingEdit::MoveEnds(row, start, finish).apply(recording);
+                }
+            }
             (SnipTarget::ClickerPosition, SnipOutcome::Point(Point { x, y, display })) => {
                 self.settings.clicker.position = ClickPosition::Fixed { x, y, display };
             }
@@ -935,6 +1098,8 @@ impl MagiApp {
                     self.settings.pythons_found = found;
                     self.settings.python_auto = auto;
                     self.settings.python_checked = true;
+                    // What is installed in that Python (PyTorch) may now be known.
+                    self.refresh_components(ctx);
                 }
             }
         }
@@ -1305,6 +1470,7 @@ impl MagiApp {
                 &mut self.settings.options,
                 &mut self.settings.dry_run,
                 &mut self.settings.notify_on_finish,
+                &mut self.settings.delete_unused_recordings,
             );
         })
         .response
@@ -1445,6 +1611,12 @@ impl MagiApp {
             );
             item(
                 ui,
+                format!("{}  Export presets…", icon::BOOKMARK_SIMPLE),
+                "",
+                Box::new(|app| app.export_presets = Some(0)),
+            );
+            item(
+                ui,
                 format!("{}  Export…", icon::EXPORT),
                 "Ctrl+E",
                 Box::new(|app| app.export = Some(app.settings.export.clone())),
@@ -1484,9 +1656,8 @@ impl MagiApp {
             // stretch the menu as wide as the screen allows.
             ui.set_width(240.0);
             let library = self.presets.entries().iter().map(|entry| (&entry.preset, Some(&entry.path)));
-            let bundled = self.doc.project.presets.iter().map(|preset| (preset, None));
             let mut any = false;
-            for (preset, path) in library.chain(bundled) {
+            for (preset, path) in library {
                 let fits = matches!(
                     (&preset.body, tab),
                     (PresetBody::AutoClicker(_), Tab::AutoClicker) | (PresetBody::Nodes(_), Tab::Macro)
@@ -1496,8 +1667,7 @@ impl MagiApp {
                 }
                 any = true;
                 ui.horizontal(|ui| {
-                    let name =
-                        if path.is_some() { preset.name.clone() } else { format!("{}  (in this file)", preset.name) };
+                    let name = preset.name.clone();
                     let width = ui.available_width() - if path.is_some() { 30.0 } else { 0.0 };
                     let button = egui::Button::new(name).truncate().min_size(vec2(width, 22.0));
                     if ui.add_sized([width, 22.0], button).clicked() {
@@ -2020,6 +2190,7 @@ impl MagiApp {
                     self.settings.reset_all();
                     self.toast("All settings reset");
                 }
+                SettingsEvent::FindPythons => self.find_pythons(ctx),
                 SettingsEvent::CheckComponents => {
                     if !self.checking_components {
                         self.checking_components = true;
@@ -2070,7 +2241,10 @@ impl MagiApp {
             closed = close;
             new_size = rect.map(|r| [r.width().round(), r.height().round()]);
         });
-        if let Some(edit) = edit
+        if let Some(recording_editor::RecordingEdit::PickMoveEnd(row, end)) = edit {
+            let target = SnipTarget::RecordingMove(asset.clone(), row, end);
+            self.handle_request(ctx, UiRequest::Snip(crate::ui::SnipMode::Point, target));
+        } else if let Some(edit) = edit
             && let Some(target) = self.doc.project.assets.recording_mut(&asset)
         {
             edit.apply(target);
@@ -2165,6 +2339,7 @@ impl MagiApp {
     }
 
     fn dialogs(&mut self, ctx: &egui::Context) {
+        self.export_presets_dialog(ctx);
         if self.about_open {
             let response = egui::Modal::new(egui::Id::new("about")).show(ctx, |ui| {
                 ui.set_width(280.0);
@@ -2869,20 +3044,22 @@ mod tests {
     fn the_presets_menu_stays_narrow_with_presets_in_it() {
         let mut harness = app_sized(1280.0, 900.0);
         harness.state_mut().settings.tab = Tab::Macro;
-        harness.state_mut().doc.project.presets.push(magi_core::preset::Preset {
+        let preset = magi_core::preset::Preset {
             name: "A preset with a rather long name that would make the menu wide".into(),
             description: String::new(),
             body: magi_core::preset::PresetBody::Nodes(magi_core::preset::NodePreset {
                 fragment: magi_core::graph::Fragment::default(),
                 assets: Vec::new(),
             }),
-        });
+        };
+        let path = harness.state_mut().presets.save(&preset).unwrap();
         harness.run_steps(2);
         harness.get_by_label_contains("Presets").click();
         harness.run_steps(3);
-        let row = harness.get_by_label_contains("(in this file)").rect();
+        let row = harness.get_by_label_contains("rather long name").rect();
         let import = harness.get_by_label_contains("Import a .mp file").rect();
         assert!(row.width() <= 260.0 && import.width() <= 260.0, "{row:?} {import:?}");
+        harness.state_mut().presets.delete(&path);
     }
 
     /// A tiny model with one adjustable setting, as the Magic tab would hold it.

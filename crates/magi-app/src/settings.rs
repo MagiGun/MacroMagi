@@ -135,6 +135,8 @@ pub struct Settings {
     pub python_checked: bool,
     /// The Macro tab shows only Run, Stop and the console.
     pub lightweight: bool,
+    /// Recordings no block plays are deleted when the macro is saved.
+    pub delete_unused_recordings: bool,
     pub record: RecordOptions,
     /// Add a Play Recording block to the graph as soon as a recording ends.
     pub auto_insert_recording: bool,
@@ -186,6 +188,7 @@ impl Default for Settings {
             python_auto: None,
             python_checked: false,
             lightweight: false,
+            delete_unused_recordings: true,
             record: RecordOptions::default(),
             auto_insert_recording: true,
             appearance: Appearance::default(),

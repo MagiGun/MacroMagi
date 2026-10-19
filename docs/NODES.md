@@ -207,6 +207,7 @@ Types text, character by character, at a speed that can vary like a person's. Th
 | Type at most | whole number | 0 characters | 0 types everything. |
 | Line breaks | choice | Press Enter | Options: Press Enter; Press Shift+Enter – a new line in a chat box; Type a space; Leave them out. |
 | Press Enter at the end | on/off | off |  |
+| Leave out | list of characters | none | Characters that are never typed, wherever they are in the text. |
 
 ### Play Recording
 
@@ -249,6 +250,7 @@ Looks for a color on screen. “Found” is true when at least one pixel in the 
 
 Looks for an image on screen. “Found” is true when a match at least as similar as the accuracy setting exists; “Position” is the centre of the best match. Wire “Found” into a Decision or Wait Until, and “Position” into an Input to click it.
 
+- Value inputs: **Picture** (picture)
 - Value outputs: **Found** (true/false), **Position** (screen position), **Similarity** (number), **Which image** (text), **Its group** (text), **How many** (number)
 
 | Setting | Kind | Default | Notes |
@@ -276,6 +278,20 @@ Reads the text in an area of the screen (optical character recognition). “Text
 | Match upper and lower case | on/off | off |  |
 | Enlarge | choice | No | Text recognition needs letters at least about 10 pixels tall. Options: No – the text is a normal size; Twice – small text; Three times – tiny text. |
 | Language | text | empty | A language tag such as en-US or de-DE. Empty: the languages of your Windows. |
+
+### Screenshot
+
+`vision.screenshot`
+
+Takes a picture of the screen – the display the pointer is on, a chosen display, or an area. The picture is kept only while the macro runs: wire it into Write to File to save it, or into Image Detection to look for it.
+
+- Value outputs: **Picture** (picture), **Width** (number), **Height** (number)
+
+| Setting | Kind | Default | Notes |
+| --- | --- | --- | --- |
+| Capture | choice | The display the pointer is on | Options: The display the pointer is on; A display; An area. |
+| Display | display | 1 (primary) |  |
+| Area | screen area | whole screen |  |
 
 ## Sound
 
@@ -356,6 +372,28 @@ Keeps showing part of the screen to an AI model and does what the model is set u
 ## Window
 
 Working with program windows.
+
+### Current Window
+
+`window.current`
+
+The window in front: its title, its program, the display it is on and its middle – and the display the pointer is on. Displays are numbered from 1.
+
+- Value outputs: **Title** (text), **Program** (text), **Its display** (number), **Pointer's display** (number), **Middle** (screen position)
+
+### Switch to Display
+
+`window.display`
+
+Moves the pointer to the middle of a display, and can click there so what is on that display gets the keyboard – for games and programs spread over several displays.
+
+- Flow in: yes
+- Flow out: yes
+
+| Setting | Kind | Default | Notes |
+| --- | --- | --- | --- |
+| Display | display | 1 (primary) |  |
+| Click there | on/off | off | A left click in the middle of the display, so the window there comes to the front. |
 
 ### Switch to Window
 
@@ -524,6 +562,86 @@ Plays a short sound and shows a desktop notification – for example when a long
 | Message | text | Done | Whatever is wired into Value is added to the end. |
 | Play a sound | on/off | on |  |
 | Show a desktop notification | on/off | on |  |
+
+## Files
+
+Reading and writing files, searching text, and folders. Paths are full paths, or relative to the files folder in MacroMagi's data folder.
+
+### Find in Text
+
+`files.find`
+
+Looks for a word or phrase in the text wired in – say, a file from Read File – and says on which line it first is, what that line says, and on how many lines it is.
+
+- Value inputs: **Text** (text)
+- Value outputs: **Found** (true/false), **Line number** (number), **The line** (text), **Lines with it** (number)
+
+| Setting | Kind | Default | Notes |
+| --- | --- | --- | --- |
+| Look for | text | empty |  |
+| Match upper and lower case | on/off | off |  |
+
+### Folder Contents
+
+`files.list`
+
+Lists the files (or folders) in a folder, one name per line, how many there are, and the full path of the first.
+
+- Value inputs: **Path** (text)
+- Value outputs: **Exists** (true/false), **Names** (text), **Count** (number), **First** (text)
+
+| Setting | Kind | Default | Notes |
+| --- | --- | --- | --- |
+| Folder | path |  | A full path, or one inside the files folder in MacroMagi's data folder. A path wired in is used instead. |
+| Only names with | text | empty | For example .png. Empty lists everything. |
+| List | choice | Files | Options: Files; Folders; Files and folders. |
+
+### Make Folder
+
+`files.make_folder`
+
+Makes a folder, and any folders it is in.
+
+- Flow in: yes
+- Flow out: yes
+- Value inputs: **Path** (text)
+
+| Setting | Kind | Default | Notes |
+| --- | --- | --- | --- |
+| Folder | path |  | A full path, or one inside the files folder in MacroMagi's data folder. A path wired in is used instead. |
+
+### Read File
+
+`files.read`
+
+Reads a file: all its text, one line of it, or a picture. A picture can be wired into an Image Detection block to look for it on screen, or into Write to File.
+
+- Value inputs: **Path** (text)
+- Value outputs: **Exists** (true/false), **Text** (text), **Line count** (number), **Picture** (picture)
+
+| Setting | Kind | Default | Notes |
+| --- | --- | --- | --- |
+| File | path |  | A full path, or one inside the files folder in MacroMagi's data folder. A path wired in is used instead. |
+| Read | choice | All the text | Options: All the text; One line; A picture. |
+| Line | whole number | 1 |  |
+
+### Write to File
+
+`files.write`
+
+Writes to a file: replaces what it holds, adds to its end, or changes one line. What is wired into “Value” is written instead of the text setting; a picture (from Screenshot or Read File) is saved as a PNG file, replacing one of the same name. Missing folders are made.
+
+- Flow in: yes
+- Flow out: yes
+- Value inputs: **Value** (any value), **Path** (text)
+
+| Setting | Kind | Default | Notes |
+| --- | --- | --- | --- |
+| File | path |  | A full path, or one inside the files folder in MacroMagi's data folder. A path wired in is used instead. |
+| Write | choice | Set the file to it | Options: Set the file to it; Add it to the end; Change one line. |
+| Line | whole number | 1 |  |
+| On a new line | on/off | on |  |
+| Text | text | empty |  |
 
 ## Script
 

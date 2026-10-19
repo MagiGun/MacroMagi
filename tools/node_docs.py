@@ -24,12 +24,14 @@ CATEGORIES = [
      "block can also follow a variable (the link button next to it)."),
     ("logic", "Logic", "Combining and producing values: true/false, numbers and text."),
     ("system", "System", "The clipboard and notifications."),
+    ("files", "Files", "Reading and writing files, searching text, and folders. Paths are full paths, or "
+     "relative to the files folder in MacroMagi's data folder."),
     ("script", "Script", "Your own code as a step of the macro."),
     ("notes", "Notes", "Explanations on the canvas. They never run."),
     ("addon", "Add-ons", "Blocks contributed by add-ons."),
 ]
 
-TYPE_NAMES = {"bool": "true/false", "number": "number", "point": "screen position", "text": "text", "any": "any value"}
+TYPE_NAMES = {"bool": "true/false", "number": "number", "point": "screen position", "text": "text", "image": "picture", "any": "any value"}
 
 KIND_NAMES = {
     "bool": "on/off", "int": "whole number", "float": "number", "duration": "duration",
@@ -38,7 +40,7 @@ KIND_NAMES = {
     "region": "screen area", "color": "color", "image": "image", "recording": "recording",
     "actions": "list of inputs", "cases": "list of cases", "clicker": "Auto Clicker settings",
     "variable": "variable", "definition": "definition", "block": "block", "display": "display",
-    "audio": "sound", "images": "list of images", "sounds": "list of sounds",
+    "audio": "sound", "images": "list of images", "sounds": "list of sounds", "characters": "list of characters", "path": "path",
     "audio_device": "microphone", "model": "AI model", "model_settings": "model settings",
 }
 
@@ -57,6 +59,8 @@ def default_text(param):
     if kind == "region":
         return "whole screen"
     if kind in ("point", "image", "recording", "audio", "block", "model"):
+        return "none"
+    if kind == "characters":
         return "none"
     if kind in ("images", "sounds"):
         return "none yet"

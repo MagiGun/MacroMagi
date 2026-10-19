@@ -215,6 +215,7 @@ pub fn run(file: &Path, engine: Option<EnginePreference>, dry_run: bool) -> Exit
         EnginePreference::Auto => settings.engine,
         chosen => chosen,
     });
+    magi_engine::set_files_dir(paths.data_dir.join("files"));
     let native = || Session::native(Arc::clone(&program), Arc::clone(&host), Arc::clone(&monitor));
     let python = || {
         let config = PythonConfig {

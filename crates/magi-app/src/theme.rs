@@ -65,8 +65,8 @@ pub struct Palette {
     pub warning: Color32,
     pub flow: Color32,
     /// One per [`Category`], in [`Category::ALL`] order.
-    categories: [Color32; 12],
-    data: [Color32; 5],
+    categories: [Color32; 13],
+    data: [Color32; 6],
 }
 
 thread_local! {
@@ -166,11 +166,12 @@ impl Palette {
                     gray(0xC4),
                     gray(0x94),
                     gray(0xB0),
+                    gray(0xA8),
                     gray(0xC8),
                     gray(0x8E),
                     gray(0x86),
                 ],
-                data: [gray(0xE0), gray(0xB0), gray(0xC8), gray(0x98), gray(0x80)],
+                data: [gray(0xE0), gray(0xB0), gray(0xC8), gray(0x98), gray(0xD0), gray(0x80)],
             }
         } else {
             Palette {
@@ -206,11 +207,12 @@ impl Palette {
                     gray(0x40),
                     gray(0x72),
                     gray(0x52),
+                    gray(0x5E),
                     gray(0x3A),
                     gray(0x78),
                     gray(0x80),
                 ],
-                data: [gray(0x22), gray(0x50), gray(0x38), gray(0x66), gray(0x7C)],
+                data: [gray(0x22), gray(0x50), gray(0x38), gray(0x66), gray(0x30), gray(0x7C)],
             }
         };
 
@@ -224,7 +226,7 @@ impl Palette {
             palette.accent_bright =
                 if dark { mix(accent, Color32::WHITE, 0.3) } else { mix(accent, Color32::BLACK, 0.25) };
             palette.on_accent = if luminance(accent) > 0.55 { gray(0x0B) } else { Color32::WHITE };
-            // Flow, Input, Vision, Sound, AI, Window, Variables, Logic, System, Script, Notes, Add-ons.
+            // Flow, Input, Vision, Sound, AI, Window, Variables, Logic, System, Files, Script, Notes, Add-ons.
             palette.categories = [
                 around(0.0),
                 around(0.58),
@@ -235,12 +237,19 @@ impl Palette {
                 around(0.19),
                 around(0.11),
                 around(0.8),
+                around(0.5),
                 around(0.88),
                 mix(around(0.05), palette.text_dim, 0.5),
                 around(0.0).gamma_multiply(0.7),
             ];
-            palette.data =
-                [around(0.95), around(0.5), around(0.14), around(0.75), mix(around(0.0), palette.text_dim, 0.6)];
+            palette.data = [
+                around(0.95),
+                around(0.5),
+                around(0.14),
+                around(0.75),
+                around(0.3),
+                mix(around(0.0), palette.text_dim, 0.6),
+            ];
             // A hint of the theme color in the greys keeps the whole UI in one key.
             let tint = |color: Color32, amount: f32| mix(color, accent, amount);
             palette.bg_app = tint(palette.bg_app, 0.03);
@@ -355,7 +364,8 @@ pub fn data_color(ty: DataType) -> Color32 {
         DataType::Number => colors[1],
         DataType::Point => colors[2],
         DataType::Text => colors[3],
-        DataType::Any => colors[4],
+        DataType::Image => colors[4],
+        DataType::Any => colors[5],
     }
 }
 

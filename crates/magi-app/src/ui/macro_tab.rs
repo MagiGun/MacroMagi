@@ -476,6 +476,12 @@ fn record_options(ui: &mut Ui, options: &mut RecordOptions) {
     }
     ui.separator();
     ui.checkbox(&mut options.trim_start, "Skip the pause before the first input");
+    // Hovering opens the choices.
+    let skip = &mut options.skip_switches;
+    let label = if skip.on { "✓  Skip task switches" } else { "Skip task switches" };
+    ui.menu_button(label, |ui| widgets::skip_switches(ui, skip)).response.on_hover_text(
+        "Leave out Alt+Tab, Win+Tab and clicks on another display – how you get to the program you record in",
+    );
 }
 
 /// Renames a variable everywhere it is used: settings that follow it and

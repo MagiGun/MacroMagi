@@ -129,4 +129,57 @@ pub(super) fn register(registry: &mut Registry) {
             lines
         }),
     );
+
+    registry.register(
+        NodeDef::new(
+            ids::SWITCH_DISPLAY,
+            "Switch to Display",
+            Category::Window,
+            "Moves the pointer to the middle of a display, and can click there so what is on that display \
+             gets the keyboard – for games and programs spread over several displays.",
+        )
+        .keywords(&["display", "monitor", "screen", "switch", "move", "focus", "second screen"])
+        .flow_in()
+        .flow_out(ports::OUT, "")
+        .param(ParamDef::new("display", "Display", ParamKind::Display))
+        .param(
+            ParamDef::new("click", "Click there", ParamKind::Bool)
+                .help("A left click in the middle of the display, so the window there comes to the front."),
+        )
+        .defaults(&SwitchDisplayParams::default())
+        .summarize(|node, _| {
+            let p: SwitchDisplayParams = node.params_or_default();
+            let mut lines = vec![format!("Display {}", p.display + 1)];
+            if p.click {
+                lines.push("Clicks in the middle".into());
+            }
+            lines
+        }),
+    );
+
+    registry.register(
+        NodeDef::new(
+            ids::CURRENT_WINDOW,
+            "Current Window",
+            Category::Window,
+            "The window in front: its title, its program, the display it is on and its middle – and the \
+             display the pointer is on. Displays are numbered from 1.",
+        )
+        .keywords(&["window", "current", "active", "foreground", "title", "program", "display", "screen"])
+        .data_out("title", "Title", DataType::Text)
+        .data_out("program", "Program", DataType::Text)
+        .data_out("display", "Its display", DataType::Number)
+        .data_out("pointer_display", "Pointer's display", DataType::Number)
+        .data_out("position", "Middle", DataType::Point)
+        .defaults(&serde_json::Map::new())
+        .summarize(|_, _| vec!["The window in front".into()]),
+    );
+}
+
+/// Settings of a **Switch to Display** block.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SwitchDisplayParams {
+    pub display: u8,
+    pub click: bool,
 }

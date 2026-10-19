@@ -117,6 +117,17 @@ impl Host for SystemHost {
         self.listener.listen(source, device, ms)
     }
 
+    fn active_window(&self) -> Option<magi_core::host::ActiveWindow> {
+        #[cfg(windows)]
+        {
+            system::active_window()
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
+    }
+
     fn read_text(&self, picture: &Frame, language: &str) -> Result<Vec<TextWord>, HostError> {
         ocr::read_text(picture, language)
     }

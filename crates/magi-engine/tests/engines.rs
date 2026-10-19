@@ -1198,6 +1198,117 @@ Play",
     });
 }
 
+// ---- files, pictures and windows --------------------------------------------
+
+#[test]
+fn file_blocks_write_change_read_search_and_list_files() {
+    for kind in engines() {
+        let dir = std::env::temp_dir().join(format!("magi-files-{}-{kind:?}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join("notes").join("list.txt").display().to_string();
+        let mut b = Builder::new();
+        let start = b.node(ids::START, json!({}));
+        let make = b.node(ids::MAKE_FOLDER, json!({ "path": dir.join("empty").display().to_string() }));
+        let write = b.node(
+            ids::WRITE_FILE,
+            json!({ "path": file, "text": "apple
+pear
+plum" }),
+        );
+        let change = b.node(ids::WRITE_FILE, json!({ "path": file, "mode": "line", "line": 2, "text": "Peach" }));
+        let add = b.node(ids::WRITE_FILE, json!({ "path": file, "mode": "append", "text": "cherry" }));
+        let read = b.node(ids::READ_FILE, json!({ "path": file }));
+        let line = b.node(ids::READ_FILE, json!({ "path": file, "mode": "line", "line": 4 }));
+        let find = b.node(ids::FIND_TEXT, json!({ "find": "peach" }));
+        let list = b.node(ids::LIST_FOLDER, json!({ "path": dir.display().to_string(), "kind": "both" }));
+        let log_lines = b.log("lines");
+        let log_line = b.log("line");
+        let log_found = b.log("found at");
+        let log_list = b.log("folder");
+        b.chain(&[start, make, write, change, add, log_lines, log_line, log_found, log_list]);
+        b.wire(read, "lines", log_lines, "value").wire(line, "text", log_line, "value");
+        b.wire(read, "text", find, "text")
+            .wire(find, "line", log_found, "value")
+            .wire(list, "names", log_list, "value");
+        let outcome = run_on(kind, &b.project, start, SimHost::new());
+        assert!(outcome.errors.is_empty(), "{kind:?}: {:?}", outcome.errors);
+        assert_eq!(
+            outcome.logs,
+            [
+                "lines 4",
+                "line cherry",
+                "found at 2",
+                "folder empty
+notes"
+            ],
+            "{kind:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
+fn a_screenshot_saved_and_read_back_is_found_on_screen() {
+    // A dark screen with one bright mark: the screenshot of the mark's area is the picture to find.
+    let host = || {
+        let mut screen = Frame::solid(Point::new(0, 0), 200, 120, [20, 20, 30]);
+        let mut mark = Frame::solid(Point::new(0, 0), 16, 12, [240, 200, 40]);
+        mark.blit(&Frame::solid(Point::new(0, 0), 6, 4, [40, 120, 240]), Point::new(5, 4));
+        screen.blit(&mark, Point::new(150, 80));
+        SimHost::with_screen(screen)
+    };
+    for kind in engines() {
+        let dir = std::env::temp_dir().join(format!("magi-shot-{}-{kind:?}", std::process::id()));
+        let file = dir.join("mark").display().to_string();
+        let mut b = Builder::new();
+        let start = b.node(ids::START, json!({}));
+        let shot =
+            b.node(ids::SCREENSHOT, json!({ "source": "area", "region": { "x": 150, "y": 80, "w": 16, "h": 12 } }));
+        let save = b.node(ids::WRITE_FILE, json!({ "path": file }));
+        let read = b.node(ids::READ_FILE, json!({ "path": format!("{file}.png"), "mode": "picture" }));
+        let find = b.node(ids::FIND_IMAGE, json!({ "threshold": 0.9 }));
+        let click = b.node(ids::INPUT, json!({ "actions": [Action::click(MouseButton::Left)] }));
+        b.chain(&[start, save, click]);
+        b.wire(shot, "picture", save, "value")
+            .wire(read, "picture", find, "picture")
+            .wire(find, "position", click, "position");
+        let outcome = run_on(kind, &b.project, start, host());
+        assert!(outcome.errors.is_empty(), "{kind:?}: {:?}", outcome.errors);
+        assert!(dir.join("mark.png").is_file(), "{kind:?}: saved as PNG");
+        assert!(outcome.sent.contains(&InputEvent::MoveTo { x: 158, y: 86 }), "{kind:?}: {:?}", outcome.sent);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
+fn switch_to_display_moves_there_and_current_window_describes_the_front_window() {
+    let host = || {
+        let host = two_displays();
+        host.set_active_window(Some(magi_core::host::ActiveWindow {
+            title: "Notes".into(),
+            process: "notes.exe".into(),
+            rect: Rect::new(340, 20, 100, 60),
+        }));
+        host
+    };
+    let mut b = Builder::new();
+    let start = b.node(ids::START, json!({}));
+    let switch = b.node(ids::SWITCH_DISPLAY, json!({ "display": 1, "click": true }));
+    let window = b.node(ids::CURRENT_WINDOW, json!({}));
+    let program = b.log("program");
+    let display = b.log("on display");
+    let pointer = b.log("pointer on");
+    b.chain(&[start, switch, program, display, pointer]);
+    b.wire(window, "program", program, "value").wire(window, "display", display, "value");
+    b.wire(window, "pointer_display", pointer, "value");
+    on_all(&b.project, start, host, |kind, outcome| {
+        assert!(outcome.errors.is_empty(), "{kind:?}: {:?}", outcome.errors);
+        assert!(outcome.sent.contains(&InputEvent::MoveTo { x: 480, y: 100 }), "{kind:?}: the middle of display 2");
+        assert_eq!(outcome.clicks(), 1, "{kind:?}");
+        assert_eq!(outcome.logs, ["program notes.exe", "on display 2", "pointer on 2"], "{kind:?}");
+    });
+}
+
 // ---- several displays ------------------------------------------------------
 
 fn two_displays() -> SimHost {

@@ -374,6 +374,14 @@ pub fn node_icon(kind: &str) -> &'static str {
         ids::PYTHON => icon::CODE,
         ids::AUTOCLICK => icon::HAND_TAP,
         ids::AUTOTYPE => icon::KEYBOARD,
+        ids::SCREENSHOT => icon::CAMERA,
+        ids::SWITCH_DISPLAY => icon::MONITOR,
+        ids::CURRENT_WINDOW => icon::APP_WINDOW,
+        ids::READ_FILE => icon::FILE_TEXT,
+        ids::WRITE_FILE => icon::FLOPPY_DISK,
+        ids::FIND_TEXT => icon::FILE_MAGNIFYING_GLASS,
+        ids::LIST_FOLDER => icon::FOLDER_OPEN,
+        ids::MAKE_FOLDER => icon::FOLDER_PLUS,
         ids::READ_TEXT => icon::TEXT_AA,
         ids::FOCUS_WINDOW => icon::APP_WINDOW,
         ids::RATE => icon::METRONOME,
@@ -507,7 +515,7 @@ impl GraphView {
     }
 
     /// The selected blocks, and the blocks of the selected groups.
-    fn selected_blocks(&self, project: &Project) -> BTreeSet<NodeId> {
+    pub fn selected_blocks(&self, project: &Project) -> BTreeSet<NodeId> {
         let mut blocks = self.selection.clone();
         for group in &self.selected_groups {
             blocks.extend(project.graph.group_blocks(*group));

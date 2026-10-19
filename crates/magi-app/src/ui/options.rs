@@ -39,17 +39,26 @@ pub fn forget_programs() {
 pub fn program_picker(ui: &mut Ui, id: &str) -> Option<String> {
     let mut picked = None;
     let button = egui::Button::new(icon::LIST_BULLETS).min_size(vec2(26.0, 22.0));
+    // Typing in the search box must not close the menu: only a click outside it does.
+    let config =
+        egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
     egui::containers::menu::MenuButton::from_button(button)
+        .config(config)
         .ui(ui, |ui| {
             ui.set_min_width(220.0);
             let filter_id = ui.id().with((id, "filter"));
             let mut filter: String = ui.data(|d| d.get_temp(filter_id)).unwrap_or_default();
-            ui.add(egui::TextEdit::singleline(&mut filter).hint_text("Search programs").desired_width(f32::INFINITY));
+            let field = ui
+                .add(egui::TextEdit::singleline(&mut filter).hint_text("Search programs").desired_width(f32::INFINITY));
+            if filter.is_empty() && !field.has_focus() {
+                field.request_focus();
+            }
             let needle = filter.trim().to_lowercase();
+            // Programs that show a window – the ones people mean – first.
+            let mut programs = running_programs(false);
+            programs.sort_by_key(|p| (!p.has_window, p.name.to_lowercase()));
             egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
-                for program in running_programs(false)
-                    .iter()
-                    .filter(|p| needle.is_empty() || p.name.to_lowercase().contains(&needle))
+                for program in programs.iter().filter(|p| needle.is_empty() || p.name.to_lowercase().contains(&needle))
                 {
                     let glyph = if program.has_window { icon::APP_WINDOW } else { icon::GEAR };
                     if ui.button(format!("{glyph}  {}", program.name)).clicked() {
@@ -78,6 +87,7 @@ pub fn menu(
     options: &mut AutomationOptions,
     dry_run: &mut bool,
     notify_on_finish: &mut bool,
+    delete_unused_recordings: &mut bool,
 ) -> Vec<OptionsEvent> {
     let mut events = Vec::new();
     // Rows with a switch at the right end fill the width they are given.
@@ -121,6 +131,12 @@ pub fn menu(
             "Stop the auto clicker when editing a hotkey",
             "Clicking into a hotkey field stops the auto clicker, so you can press the new hotkey.",
             &mut options.stop_when_editing_hotkey,
+        );
+        widgets::toggle_row(
+            ui,
+            "Automatically delete unassigned recordings when saving",
+            "Recordings that no Play Recording block plays are left out of the file when it is saved.",
+            delete_unused_recordings,
         );
     });
     ui.separator();
@@ -292,15 +308,15 @@ impl RulesWindow {
                             if widgets::icon_button(ui, icon::TRASH, "Remove").clicked() {
                                 remove = Some(index);
                             }
-                            egui::ComboBox::from_id_salt("action")
-                                .width(70.0)
-                                .selected_text(rule.action.label())
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(&mut rule.action, RuleAction::Stop, "Stop")
-                                        .on_hover_text("End the auto clicker or macro");
-                                    ui.selectable_value(&mut rule.action, RuleAction::Pause, "Pause")
-                                        .on_hover_text("Wait, and carry on once an allowed program is in front again");
-                                });
+                            widgets::combo("action").width(70.0).selected_text(rule.action.label()).show_ui(ui, |ui| {
+                                let needle = widgets::combo_search(ui);
+                                if widgets::option(ui, &needle, rule.action == RuleAction::Stop, "Stop") {
+                                    rule.action = RuleAction::Stop;
+                                }
+                                if widgets::option(ui, &needle, rule.action == RuleAction::Pause, "Pause") {
+                                    rule.action = RuleAction::Pause;
+                                }
+                            });
                             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                                 ui.add(egui::Label::new(&rule.name).truncate());
                             });

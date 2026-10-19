@@ -112,6 +112,43 @@ impl NativeNodes {
         nodes.flow(ids::COUNTER, counter);
         nodes.flow(ids::NOTIFY, notify);
         nodes.flow(ids::AI_WATCH, ai_watch);
+        nodes.flow(ids::WRITE_FILE, |interp, node| {
+            let p: magi_core::nodes::files::WriteFileParams = interp.params(node)?;
+            let (value, path) = (interp.input(node, "value")?, interp.input(node, "path")?);
+            interp.cx.write_file(&p, value.as_ref(), path.as_ref())?;
+            Ok(Next::out())
+        });
+        nodes.flow(ids::MAKE_FOLDER, |interp, node| {
+            let p: magi_core::nodes::files::MakeFolderParams = interp.params(node)?;
+            let path = interp.input(node, "path")?;
+            interp.cx.make_folder(&p, path.as_ref())?;
+            Ok(Next::out())
+        });
+        nodes.flow(ids::SWITCH_DISPLAY, |interp, node| {
+            let p: magi_core::nodes::window::SwitchDisplayParams = interp.params(node)?;
+            interp.cx.switch_display(&p)?;
+            Ok(Next::out())
+        });
+        nodes.value(ids::READ_FILE, |interp, node| {
+            let p: magi_core::nodes::files::ReadFileParams = interp.params(node)?;
+            let path = interp.input(node, "path")?;
+            interp.cx.read_file(&p, path.as_ref())
+        });
+        nodes.value(ids::FIND_TEXT, |interp, node| {
+            let p: magi_core::nodes::files::FindTextParams = interp.params(node)?;
+            let text = interp.input(node, "text")?;
+            Ok(interp.cx.find_text(&p, text.as_ref()))
+        });
+        nodes.value(ids::LIST_FOLDER, |interp, node| {
+            let p: magi_core::nodes::files::ListFolderParams = interp.params(node)?;
+            let path = interp.input(node, "path")?;
+            interp.cx.list_folder(&p, path.as_ref())
+        });
+        nodes.value(ids::SCREENSHOT, |interp, node| {
+            let p: magi_core::nodes::vision::ScreenshotParams = interp.params(node)?;
+            interp.cx.screenshot(&p)
+        });
+        nodes.value(ids::CURRENT_WINDOW, |interp, _| interp.cx.current_window());
         nodes.flow(ids::AUTOTYPE, |interp, node| {
             let p: AutoTypeParams = interp.params(node)?;
             let wired = interp.input(node, "text")?;
@@ -563,6 +600,14 @@ fn notify(interp: &mut Interp<'_>, node: &Node) -> OpResult<Next> {
 
 fn find_image(interp: &mut Interp<'_>, node: &Node) -> OpResult<Map<String, Value>> {
     let p: FindImageParams = interp.params(node)?;
+    // A picture wired in is looked for instead of the block's list.
+    if let Some(value) = interp.input(node, "picture")? {
+        let picture = interp
+            .cx
+            .picture_of(&value)
+            .ok_or_else(|| EngineError::new("the picture wired in is not available (it is not a picture)"))?;
+        return Ok(interp.cx.find_picture(&p, &picture)?.to_json());
+    }
     Ok(interp.cx.find_image(&p)?.to_json())
 }
 

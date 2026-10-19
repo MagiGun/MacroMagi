@@ -670,9 +670,10 @@ fn input_card(ui: &mut Ui, model: &mut MagicModel) {
     ui.horizontal(|ui| {
         widgets::fixed_label(ui, RichText::new("Normalisation").color(theme::text_dim()), 110.0);
         let current = NORMALISATIONS.iter().find(|(_, m, s)| *m == input.mean && *s == input.std).map(|(n, ..)| *n);
-        egui::ComboBox::from_id_salt("normalisation").selected_text(current.unwrap_or("Custom")).show_ui(ui, |ui| {
+        widgets::combo("normalisation").selected_text(current.unwrap_or("Custom")).show_ui(ui, |ui| {
+            let needle = widgets::combo_search(ui);
             for (name, mean, std) in NORMALISATIONS {
-                if ui.selectable_label(current == Some(name), name).clicked() {
+                if widgets::option(ui, &needle, current == Some(name), name) {
                     (input.mean, input.std) = (mean, std);
                 }
             }

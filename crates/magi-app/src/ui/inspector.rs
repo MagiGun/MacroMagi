@@ -389,16 +389,14 @@ fn edit_param(
             let current: String = read(node, param);
             let shown = options.iter().find(|o| o.value == current).map_or(current.as_str(), |o| o.label.as_str());
             let mut picked = None;
-            egui::ComboBox::from_id_salt("choice").width(ui.available_width() - 8.0).selected_text(shown).show_ui(
-                ui,
-                |ui| {
-                    for option in options {
-                        if ui.selectable_label(option.value == current, &option.label).clicked() {
-                            picked = Some(option.value.clone());
-                        }
+            widgets::combo("choice").width(ui.available_width() - 8.0).selected_text(shown).show_ui(ui, |ui| {
+                let needle = widgets::combo_search(ui);
+                for option in options {
+                    if widgets::option(ui, &needle, option.value == current, &option.label) {
+                        picked = Some(option.value.clone());
                     }
-                },
-            );
+                }
+            });
             if let Some(value) = picked {
                 node.set_param(key, value);
             }
@@ -523,19 +521,17 @@ fn edit_param(
         ParamKind::Definition => {
             let current: String = read(node, param);
             let shown = if current.is_empty() { "Not chosen".to_owned() } else { current.clone() };
-            egui::ComboBox::from_id_salt("definition").width(ui.available_width() - 8.0).selected_text(shown).show_ui(
-                ui,
-                |ui| {
-                    if definitions.is_empty() {
-                        ui.weak("No Definition blocks yet – add one to build a function.");
+            widgets::combo("definition").width(ui.available_width() - 8.0).selected_text(shown).show_ui(ui, |ui| {
+                let needle = widgets::combo_search(ui);
+                if definitions.is_empty() {
+                    ui.weak("No Definition blocks yet – add one to build a function.");
+                }
+                for name in &definitions {
+                    if widgets::option(ui, &needle, *name == current, name) {
+                        node.set_param(key, name);
                     }
-                    for name in &definitions {
-                        if ui.selectable_label(*name == current, name).clicked() {
-                            node.set_param(key, name);
-                        }
-                    }
-                },
-            );
+                }
+            });
             if !current.is_empty() && !definitions.contains(&current) {
                 widgets::notice(ui, icon::WARNING, "No Definition block has this name.", theme::warning());
             }
@@ -545,43 +541,63 @@ fn edit_param(
             let shown = current
                 .and_then(|id| blocks.iter().find(|(b, _)| *b == id))
                 .map_or_else(|| "Not chosen".to_owned(), |(_, title)| title.clone());
-            egui::ComboBox::from_id_salt("block").width(ui.available_width() - 8.0).selected_text(shown).show_ui(
-                ui,
-                |ui| {
-                    if ui.selectable_label(current.is_none(), "Not chosen").clicked() {
-                        node.set_param(key, Value::Null);
+            widgets::combo("block").width(ui.available_width() - 8.0).selected_text(shown).show_ui(ui, |ui| {
+                let needle = widgets::combo_search(ui);
+                if widgets::option(ui, &needle, current.is_none(), "Not chosen") {
+                    node.set_param(key, Value::Null);
+                }
+                for (id, title) in &blocks {
+                    if widgets::option(ui, &needle, current == Some(*id), title) {
+                        node.set_param(key, *id);
                     }
-                    for (id, title) in &blocks {
-                        if ui.selectable_label(current == Some(*id), title).clicked() {
-                            node.set_param(key, *id);
-                        }
-                    }
-                },
-            );
+                }
+            });
         }
         ParamKind::Images => super::lists::edit_images(ui, project, env.registry, node_id, env.images, requests),
         ParamKind::Sounds => super::lists::edit_sounds(ui, project, env.registry, node_id, requests),
+        ParamKind::Characters => edit_characters(ui, project, node_id, key),
+        ParamKind::Path { folder } => {
+            let mut path: String = read(node, param);
+            let mut changed = false;
+            ui.horizontal(|ui| {
+                let field = egui::TextEdit::singleline(&mut path)
+                    .hint_text(if *folder { "Folder path" } else { "File path" })
+                    .desired_width(ui.available_width() - 72.0);
+                changed |= ui.add(field).changed();
+                if ui.button(format!("{}  Browse", icon::FOLDER_OPEN)).clicked() {
+                    let dialog = rfd::FileDialog::new();
+                    let chosen = if *folder { dialog.pick_folder() } else { dialog.pick_file() };
+                    if let Some(chosen) = chosen {
+                        path = chosen.display().to_string();
+                        changed = true;
+                    }
+                }
+            });
+            if changed {
+                node.set_param(key, path);
+            }
+        }
         ParamKind::AudioDevice => {
             let current: String = read(node, param);
             let shown = if current.is_empty() { "System default".to_owned() } else { current.clone() };
             let names = crate::displays::microphones();
-            egui::ComboBox::from_id_salt("device")
-                .width(ui.available_width() - 8.0)
-                .selected_text(shown)
-                .truncate()
-                .show_ui(ui, |ui| {
-                    if ui.selectable_label(current.is_empty(), "System default").clicked() {
+            widgets::combo("device").width(ui.available_width() - 8.0).selected_text(shown).truncate().show_ui(
+                ui,
+                |ui| {
+                    let needle = widgets::combo_search(ui);
+                    if widgets::option(ui, &needle, current.is_empty(), "System default") {
                         node.set_param(key, "");
                     }
                     for name in &names {
-                        if ui.selectable_label(*name == current, name).clicked() {
+                        if widgets::option(ui, &needle, *name == current, name) {
                             node.set_param(key, name);
                         }
                     }
                     if names.is_empty() {
                         ui.weak("No microphones found");
                     }
-                });
+                },
+            );
             if !current.is_empty() && !names.contains(&current) {
                 widgets::notice(ui, icon::WARNING, "This microphone is not connected.", theme::warning());
             }
@@ -647,19 +663,17 @@ fn variable_picker(ui: &mut Ui, project: &mut Project, node_id: NodeId, key: &st
     let mut picked = None;
     ui.horizontal(|ui| {
         let shown = if current.is_empty() { "Not chosen".to_owned() } else { current.clone() };
-        egui::ComboBox::from_id_salt("variable").width(ui.available_width() - 34.0).selected_text(shown).show_ui(
-            ui,
-            |ui| {
-                if ui.selectable_label(current.is_empty(), "Not chosen").clicked() {
-                    picked = Some(String::new());
+        widgets::combo("variable").width(ui.available_width() - 34.0).selected_text(shown).show_ui(ui, |ui| {
+            let needle = widgets::combo_search(ui);
+            if widgets::option(ui, &needle, current.is_empty(), "Not chosen") {
+                picked = Some(String::new());
+            }
+            for variable in &project.variables {
+                if widgets::option(ui, &needle, variable.name == current, &variable.name) {
+                    picked = Some(variable.name.clone());
                 }
-                for variable in &project.variables {
-                    if ui.selectable_label(variable.name == current, &variable.name).clicked() {
-                        picked = Some(variable.name.clone());
-                    }
-                }
-            },
-        );
+            }
+        });
         if widgets::icon_button(ui, icon::PLUS, "New variable").clicked() {
             typing = Some(String::new());
         }
@@ -708,24 +722,44 @@ fn pad_unit(unit: &str) -> String {
 fn asset_picker(ui: &mut Ui, project: &mut Project, node_id: NodeId, key: &str, kind: AssetKind, none_label: &str) {
     let current: String = project.graph.node(node_id).and_then(|n| n.param(key)).unwrap_or_default();
     let shown = project.assets.get(&current).map_or(none_label.to_owned(), |asset| asset.name.clone());
-    let mut picked: Option<String> = None;
-    egui::ComboBox::from_id_salt(("asset", key)).width(ui.available_width() - 8.0).selected_text(shown).show_ui(
-        ui,
-        |ui| {
-            if ui.selectable_label(current.is_empty(), none_label).clicked() {
-                picked = Some(String::new());
+    let (mut picked, mut deleted): (Option<String>, Option<String>) = (None, None);
+    widgets::combo(("asset", key)).width(ui.available_width() - 8.0).selected_text(shown).show_ui(ui, |ui| {
+        let needle = widgets::combo_search(ui);
+        if widgets::option(ui, &needle, current.is_empty(), none_label) {
+            picked = Some(String::new());
+        }
+        for asset in project.assets.of_kind(kind) {
+            if !needle.is_empty() && !asset.name.to_lowercase().contains(&needle) {
+                continue;
             }
-            for asset in project.assets.of_kind(kind) {
-                if ui.selectable_label(asset.id == current, &asset.name).clicked() {
+            ui.horizontal(|ui| {
+                // Recordings can be deleted from the project right here.
+                if kind == AssetKind::Recording
+                    && widgets::icon_button(ui, icon::TRASH, "Delete this recording from the macro").clicked()
+                {
+                    deleted = Some(asset.id.clone());
+                }
+                if widgets::option(ui, &needle, asset.id == current, &asset.name) {
                     picked = Some(asset.id.clone());
                 }
-            }
-        },
-    );
+            });
+        }
+    });
     if let Some(id) = picked
         && let Some(node) = project.graph.node_mut(node_id)
     {
         node.set_param(key, id);
+    }
+    if let Some(id) = deleted {
+        // Blocks that played it play nothing now.
+        for node in project.graph.nodes_mut() {
+            for value in node.params.values_mut() {
+                if value.as_str() == Some(id.as_str()) {
+                    *value = Value::String(String::new());
+                }
+            }
+        }
+        project.assets.remove(&id);
     }
     if let Some(asset) = project.assets.get(&current) {
         let mut name = asset.name.clone();
@@ -795,6 +829,61 @@ fn edit_model(ui: &mut Ui, project: &mut Project, node_id: NodeId, key: &str, re
             requests.push(UiRequest::OpenModel(current));
         }
     });
+}
+
+/// A list of characters: each shown as a chip that removes it, and a field to add more.
+fn edit_characters(ui: &mut Ui, project: &mut Project, node_id: NodeId, key: &str) {
+    let Some(node) = project.graph.node(node_id) else { return };
+    let mut list: Vec<String> = node.param(key).unwrap_or_default();
+    let name = |c: &str| match c {
+        " " => "Space".to_owned(),
+        "\n" => "Line break".to_owned(),
+        "\t" => "Tab".to_owned(),
+        other => other.to_owned(),
+    };
+    let mut changed = false;
+    let mut remove = None;
+    widgets::button_row(ui, |ui| {
+        if list.is_empty() {
+            ui.weak("None");
+        }
+        for (index, entry) in list.iter().enumerate() {
+            let chip = format!("{}  {}", name(entry), icon::X);
+            if ui.small_button(chip).on_hover_text("Type this character again").clicked() {
+                remove = Some(index);
+            }
+        }
+    });
+    if let Some(index) = remove {
+        list.remove(index);
+        changed = true;
+    }
+    let field_id = ui.id().with(("characters", key));
+    let mut typed: String = ui.data(|d| d.get_temp(field_id)).unwrap_or_default();
+    widgets::button_row(ui, |ui| {
+        let field = ui.add(egui::TextEdit::singleline(&mut typed).hint_text("Characters").desired_width(80.0));
+        let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if (ui.small_button(format!("{}  Add", icon::PLUS)).clicked() || enter) && !typed.is_empty() {
+            for c in typed.chars() {
+                let c = c.to_string();
+                if !list.contains(&c) {
+                    list.push(c);
+                }
+            }
+            typed.clear();
+            changed = true;
+        }
+        for (label, c) in [("Space", " "), ("Line break", "\n"), ("Tab", "\t")] {
+            if !list.iter().any(|e| e == c) && ui.small_button(format!("+ {label}")).clicked() {
+                list.push(c.to_owned());
+                changed = true;
+            }
+        }
+    });
+    ui.data_mut(|d| d.insert_temp(field_id, typed));
+    if changed && let Some(node) = project.graph.node_mut(node_id) {
+        node.set_param(key, list);
+    }
 }
 
 /// The description inside a model asset, read once per asset.
@@ -901,9 +990,10 @@ fn edit_recording(
 
 fn press_mode_picker(ui: &mut Ui, mode: &mut PressMode) -> bool {
     let mut changed = false;
-    egui::ComboBox::from_id_salt("mode").width(92.0).selected_text(mode.label()).show_ui(ui, |ui| {
+    widgets::combo("mode").width(92.0).selected_text(mode.label()).show_ui(ui, |ui| {
+        let needle = widgets::combo_search(ui);
         for option in PressMode::ALL {
-            if ui.selectable_label(option == *mode, option.label()).clicked() {
+            if widgets::option(ui, &needle, option == *mode, option.label()) {
                 *mode = option;
                 changed = true;
             }
@@ -932,14 +1022,14 @@ pub fn edit_actions(ui: &mut Ui, node: &mut Node, key: &str, displays: &Displays
                         ui.label(RichText::new(format!("{}.", index + 1)).color(theme::text_faint()));
                     }
                     let mut kind = action.kind();
-                    egui::ComboBox::from_id_salt("kind").width(118.0).selected_text(Action::kind_label(kind)).show_ui(
-                        ui,
-                        |ui| {
-                            for option in Action::KINDS {
-                                ui.selectable_value(&mut kind, option, Action::kind_label(option));
+                    widgets::combo("kind").width(118.0).selected_text(Action::kind_label(kind)).show_ui(ui, |ui| {
+                        let needle = widgets::combo_search(ui);
+                        for option in Action::KINDS {
+                            if widgets::option(ui, &needle, kind == option, Action::kind_label(option)) {
+                                kind = option;
                             }
-                        },
-                    );
+                        }
+                    });
                     if kind != action.kind()
                         && let Some(fresh) = Action::default_of(kind)
                     {

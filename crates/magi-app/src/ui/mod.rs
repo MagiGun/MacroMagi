@@ -68,6 +68,8 @@ pub enum SnipTarget {
     ImageGroupRegion(NodeId, usize),
     /// The fixed screen area of the model open in the Magic tab.
     MagicArea,
+    /// One end of a movement in a recording (asset, row, `true` for the end).
+    RecordingMove(String, usize, bool),
 }
 
 pub enum UiRequest {

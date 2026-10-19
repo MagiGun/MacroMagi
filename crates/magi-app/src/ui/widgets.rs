@@ -260,9 +260,10 @@ fn unit_picker_named(
     name: fn(TimeUnit) -> &'static str,
 ) -> bool {
     let mut changed = false;
-    egui::ComboBox::from_id_salt(id).width(46.0).selected_text(unit.short()).show_ui(ui, |ui| {
+    combo(id).width(46.0).selected_text(unit.short()).show_ui(ui, |ui| {
+        let needle = combo_search(ui);
         for &option in allowed {
-            if ui.selectable_label(option == *unit, name(option)).clicked() && option != *unit {
+            if crate::ui::widgets::option(ui, &needle, option == *unit, name(option)) && option != *unit {
                 *unit = option;
                 changed = true;
             }
@@ -300,6 +301,44 @@ pub fn duration_in_unit(
         changed |= unit_picker(ui, id, unit, &TimeUnit::ALL);
     });
     changed
+}
+
+/// A drop-down whose options can be searched: fill it with [`combo_search`]
+/// and [`option`]s. It stays open while the search box is used.
+pub fn combo(id: impl std::hash::Hash + std::fmt::Debug) -> egui::ComboBox {
+    egui::ComboBox::from_id_salt(id).height(360.0).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+}
+
+/// The search box at the top of a drop-down's list. Returns what to look for.
+pub fn combo_search(ui: &mut Ui) -> String {
+    let id = ui.id().with("combo-search");
+    let mut search: String = ui.data(|d| d.get_temp(id)).unwrap_or_default();
+    let field = ui.add(
+        egui::TextEdit::singleline(&mut search)
+            .hint_text(format!("{}  Search", icon::MAGNIFYING_GLASS))
+            .desired_width(f32::INFINITY),
+    );
+    if search.is_empty() && !field.has_focus() {
+        field.request_focus();
+    }
+    let needle = search.trim().to_lowercase();
+    ui.data_mut(|d| d.insert_temp(id, search));
+    needle
+}
+
+/// One option of a searchable drop-down: left out unless it matches
+/// `needle`; picking it closes the list. Returns whether it was picked.
+pub fn option(ui: &mut Ui, needle: &str, selected: bool, label: impl ToString) -> bool {
+    let label = label.to_string();
+    if !needle.is_empty() && !label.to_lowercase().contains(needle) {
+        return false;
+    }
+    let picked = ui.selectable_label(selected, label).clicked();
+    if picked {
+        ui.data_mut(|d| d.remove::<String>(ui.id().with("combo-search")));
+        ui.close();
+    }
+    picked
 }
 
 /// A drop-down for choosing a key: searchable, with a button that takes the
@@ -444,9 +483,10 @@ fn key_from_egui(key: egui::Key) -> Option<Key> {
 
 pub fn mouse_button_picker(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, button: &mut MouseButton) -> bool {
     let mut changed = false;
-    egui::ComboBox::from_id_salt(id).width(96.0).selected_text(button.label()).show_ui(ui, |ui| {
+    combo(id).width(96.0).selected_text(button.label()).show_ui(ui, |ui| {
+        let needle = combo_search(ui);
         for &option in MouseButton::ALL {
-            if ui.selectable_label(option == *button, option.label()).clicked() {
+            if crate::ui::widgets::option(ui, &needle, option == *button, option.label()) {
                 *button = option;
                 changed = true;
             }
@@ -525,6 +565,20 @@ pub fn button_row<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
     .inner
 }
 
+/// Which task switches recordings leave out.
+pub fn skip_switches(ui: &mut Ui, skip: &mut magi_core::recording::SkipSwitches) {
+    ui.checkbox(&mut skip.on, "Skip task switches").on_hover_text(
+        "Leave out Alt+Tab, Win+Tab and clicks on another display – how you get to the program you record in, and back",
+    );
+    ui.add_enabled_ui(skip.on, |ui| {
+        ui.indent("skip-switches", |ui| {
+            ui.checkbox(&mut skip.first, "First task switch");
+            ui.checkbox(&mut skip.last, "Last task switch");
+            ui.checkbox(&mut skip.between, "In between task switches");
+        });
+    });
+}
+
 /// A slim progress bar. With no share known, a band moves along it instead.
 pub fn progress_bar(ui: &mut Ui, share: Option<f32>) {
     let width = ui.available_width().min(320.0);
@@ -574,10 +628,11 @@ pub fn display_picker(
     };
     let mut changed = false;
     let count = (displays.len() as u8).max(display.map_or(1, |d| d + 1)).max(1);
-    egui::ComboBox::from_id_salt(id)
+    combo(id)
         .width(58.0)
         .selected_text(short(*display))
         .show_ui(ui, |ui| {
+            let needle = combo_search(ui);
             ui.set_min_width(220.0);
             if global
                 && ui
@@ -589,7 +644,7 @@ pub fn display_picker(
                 changed = true;
             }
             for d in 0..count {
-                if ui.selectable_label(*display == Some(d), shown(Some(d))).clicked() && *display != Some(d) {
+                if crate::ui::widgets::option(ui, &needle, *display == Some(d), shown(Some(d))) && *display != Some(d) {
                     *display = Some(d);
                     changed = true;
                 }
