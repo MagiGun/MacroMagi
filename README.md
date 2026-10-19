@@ -1,5 +1,7 @@
 # MacroMagi
 
+[![Release](https://github.com/MagiGun/MacroMagi/actions/workflows/release.yml/badge.svg)](https://github.com/MagiGun/MacroMagi/actions/workflows/release.yml)
+
 **An auto clicker when you want one click repeated, a visual macro editor when you want a bot.**
 
 MacroMagi is a small, portable desktop tool for automating keyboard, mouse and controller input. Use the one-screen **Auto Clicker**, or switch to the **Macro** tab and wire up blocks that click, type, wait, loop, switch windows, replay recordings, keep variables and react to what is on screen – or to what it hears. The **Magic** tab prepares small AI models that recognise what is on screen, for macros to act on.
