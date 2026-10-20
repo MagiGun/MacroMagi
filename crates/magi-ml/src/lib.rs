@@ -368,9 +368,202 @@ fn fastest(onnx: &[u8], spec: &InputSpec, candidates: &[Engine]) -> Engine {
     best.1
 }
 
+// ---- text models ---------------------------------------------------------------
+
+enum TextBackend {
+    BuiltIn(std::sync::Arc<TypedRunnableModel>),
+    OnnxRuntime(ort::session::Session),
+}
+
+/// How a text model writes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Generation {
+    pub max_tokens: usize,
+    /// 0 always takes the likeliest token.
+    pub temperature: f32,
+    /// Only the `top_k` likeliest tokens are drawn from (0: all).
+    pub top_k: usize,
+    /// Tokens that end the answer (not included in it).
+    pub stop: Vec<u32>,
+    pub seed: u64,
+}
+
+/// A text model ready to run: token ids in (`tokens`, [1, length]), a score
+/// for every possible next token out (`logits`, [1, length, vocabulary]).
+pub struct TextModel {
+    backend: TextBackend,
+    context: usize,
+}
+
+impl TextModel {
+    /// Loads a text model on ONNX Runtime when it is installed, else on the built-in engine.
+    pub fn load(onnx: &[u8], context: usize) -> Result<TextModel, MlError> {
+        let backend = match RUNTIME.get().and_then(|r| r.as_ref().ok()) {
+            Some(runtime) => {
+                let error = |e: ort::Error| MlError::new(format!("ONNX Runtime cannot run this model: {e}"));
+                let mut builder = ort::session::Session::builder(&runtime.environment).map_err(error)?;
+                TextBackend::OnnxRuntime(builder.commit_from_memory(onnx).map_err(error)?)
+            }
+            None => {
+                let mut model = tract_onnx::onnx()
+                    .model_for_read(&mut std::io::Cursor::new(onnx))
+                    .map_err(|e| MlError::new(format!("this is not a text model MacroMagi can read: {e}")))?;
+                // Always the full context: see `next_scores`.
+                let fact = i64::fact([1, context.max(1)]);
+                model.set_input_fact(0, fact.into()).map_err(|e| MlError::new(e.to_string()))?;
+                let runnable = model
+                    .into_optimized()
+                    .and_then(|m| m.into_runnable())
+                    .map_err(|e| MlError::new(format!("the built-in engine cannot run this model: {e}")))?;
+                TextBackend::BuiltIn(runnable)
+            }
+        };
+        Ok(TextModel { backend, context: context.max(1) })
+    }
+
+    /// The scores for the token after `tokens` (the last `context` of them).
+    ///
+    /// The model always reads its full context: the tokens, then padding.
+    /// It reads causally, so padding after a token never changes the scores
+    /// at it – and one fixed size runs fastest.
+    pub fn next_scores(&mut self, tokens: &[u32]) -> Result<Vec<f32>, MlError> {
+        let window = &tokens[tokens.len().saturating_sub(self.context)..];
+        if window.is_empty() {
+            return Err(MlError::new("there is nothing to continue"));
+        }
+        let last = window.len() - 1;
+        let mut ids: Vec<i64> = window.iter().map(|&t| i64::from(t)).collect();
+        ids.resize(self.context, 0);
+        let all: Vec<f32> = match &mut self.backend {
+            TextBackend::BuiltIn(model) => {
+                let tensor = Tensor::from_shape(&[1, ids.len()], &ids).map_err(|e| MlError::new(e.to_string()))?;
+                let outputs = model.run(tvec!(tensor.into())).map_err(|e| MlError::new(e.to_string()))?;
+                outputs[0]
+                    .to_plain_array_view::<f32>()
+                    .map_err(|e| MlError::new(e.to_string()))?
+                    .iter()
+                    .copied()
+                    .collect()
+            }
+            TextBackend::OnnxRuntime(session) => {
+                let error = |e: ort::Error| MlError::new(e.to_string());
+                let tensor =
+                    ort::value::Tensor::from_array((vec![1i64, ids.len() as i64], ids.clone())).map_err(error)?;
+                let outputs = session.run(ort::inputs!["tokens" => tensor]).map_err(error)?;
+                outputs[0].try_extract_tensor::<f32>().map_err(error)?.1.to_vec()
+            }
+        };
+        let vocab = all.len() / self.context;
+        Ok(all[last * vocab..(last + 1) * vocab].to_vec())
+    }
+
+    /// Writes an answer after `prompt`. Returns its tokens, without the stop token.
+    pub fn generate(&mut self, prompt: &[u32], how: &Generation) -> Result<Vec<u32>, MlError> {
+        let mut tokens = prompt.to_vec();
+        let mut answer = Vec::new();
+        let mut state = how.seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        let mut random = move || {
+            // xorshift64*: enough for drawing tokens.
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            (state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for _ in 0..how.max_tokens {
+            let scores = self.next_scores(&tokens)?;
+            let next = pick(&scores, how.temperature, how.top_k, random());
+            if how.stop.contains(&next) {
+                break;
+            }
+            tokens.push(next);
+            answer.push(next);
+        }
+        Ok(answer)
+    }
+}
+
+/// What a text model said to a request.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Answer {
+    /// Everything it wrote, tags and all.
+    pub raw: String,
+    /// What it says, without its thinking and tool calls.
+    pub text: String,
+    /// What it thought (inside the thinking tags).
+    pub thinking: String,
+    /// The tool calls it made, in order.
+    pub tools: Vec<magi_core::magic::ToolCall>,
+}
+
+/// Asks a text model something, the way its spec says to: the chat template
+/// around the request, its own way of writing, stopping at the end of its turn.
+/// `max_tokens` 0 and `temperature` below 0 use the spec's.
+pub fn ask(
+    model: &mut TextModel,
+    spec: &magi_core::magic::TextSpec,
+    request: &str,
+    max_tokens: usize,
+    temperature: f32,
+    seed: u64,
+) -> Result<Answer, MlError> {
+    let prompt = spec.encode(&spec.prompt(request));
+    let how = Generation {
+        max_tokens: if max_tokens == 0 { spec.max_tokens as usize } else { max_tokens },
+        temperature: if temperature < 0.0 { spec.temperature } else { temperature },
+        top_k: spec.top_k as usize,
+        stop: spec.special_id(&spec.end_tag).into_iter().collect(),
+        seed,
+    };
+    let raw = spec.decode(&model.generate(&prompt, &how)?);
+    Ok(Answer { text: spec.visible(&raw), thinking: spec.thinking(&raw), tools: spec.tool_calls(&raw), raw })
+}
+
+/// The next token: the likeliest (temperature 0), or one drawn from the `top_k` likeliest.
+fn pick(scores: &[f32], temperature: f32, top_k: usize, draw: f64) -> u32 {
+    let mut order: Vec<usize> = (0..scores.len()).collect();
+    order.sort_by(|a, b| scores[*b].total_cmp(&scores[*a]));
+    if temperature <= 0.0 || order.len() == 1 {
+        return order[0] as u32;
+    }
+    let keep = if top_k == 0 { order.len() } else { top_k.min(order.len()) };
+    let best = scores[order[0]];
+    let weights: Vec<f64> = order[..keep].iter().map(|&i| f64::from((scores[i] - best) / temperature).exp()).collect();
+    let total: f64 = weights.iter().sum();
+    let mut target = draw * total;
+    for (index, weight) in order[..keep].iter().zip(&weights) {
+        if target < *weight {
+            return *index as u32;
+        }
+        target -= weight;
+    }
+    order[keep - 1] as u32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_trained_text_model_answers_on_the_built_in_engine() {
+        // Trained in MacroMagi's trainer to answer "hi" with "yo".
+        let onnx = include_bytes!("../tests/data/tiny_text.onnx");
+        let spec = magi_core::magic::TextSpec { context: 32, ..magi_core::magic::TextSpec::default() };
+        let mut model = TextModel::load(onnx, 32).unwrap();
+        let prompt = spec.encode(&spec.prompt("hi"));
+        // Different lengths go through the same model.
+        assert_eq!(model.next_scores(&prompt).unwrap().len(), spec.vocab_size());
+        assert_eq!(model.next_scores(&prompt[..3]).unwrap().len(), spec.vocab_size());
+        let how = Generation {
+            max_tokens: 10,
+            temperature: 0.0,
+            top_k: 0,
+            stop: vec![spec.special_id(&spec.end_tag).unwrap()],
+            seed: 1,
+        };
+        let answer = model.generate(&prompt, &how).unwrap();
+        assert_eq!(spec.decode(&answer), "yo");
+        assert_eq!(pick(&[0.1, 3.0, 0.2], 0.0, 0, 0.5), 1);
+    }
 
     /// A tiny ONNX model, built by hand: the average of each color channel of
     /// a 4×4 picture – three "classes" that are red, green and blue.

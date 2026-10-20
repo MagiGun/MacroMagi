@@ -357,6 +357,7 @@ impl Layout {
 
 /// The icon shown in a node's header and in the palette.
 pub fn node_icon(kind: &str) -> &'static str {
+    use magi_core::nodes::studio::kinds as studio;
     match kind {
         ids::START => icon::FLAG,
         ids::DELAY => icon::TIMER,
@@ -400,6 +401,36 @@ pub fn node_icon(kind: &str) -> &'static str {
         ids::SOUND_MATCH => icon::EAR,
         ids::AI_WATCH => icon::EYE,
         ids::AI_CLASSIFY => icon::BRAIN,
+        ids::AI_AGENT => icon::ROBOT,
+        studio::ZERO => icon::PLANT,
+        studio::BASE => icon::STACK,
+        studio::CONFIG => icon::SLIDERS,
+        studio::INFO => icon::INFO,
+        studio::INPUT => icon::SELECTION,
+        studio::ANSWERS => icon::LIST_CHECKS,
+        studio::ACTION => icon::LIGHTNING,
+        studio::SETTINGS => icon::SLIDERS_HORIZONTAL,
+        studio::PREP => icon::IMAGE_SQUARE,
+        studio::TEXT => icon::TEXT_AA,
+        studio::TRY => icon::PLAY,
+        studio::SIZE => icon::RULER,
+        studio::TRANSFORMER => icon::CUBE,
+        studio::SPARSE => icon::DOTS_NINE,
+        studio::MOE => icon::TREE_STRUCTURE,
+        studio::SPLIT => icon::ARROWS_LEFT_RIGHT,
+        studio::SSM => icon::WAVE_SINE,
+        studio::PERSONA => icon::USERS,
+        studio::CONV => icon::EYE,
+        studio::TEXT_DATA => icon::FILE_TEXT,
+        studio::IMAGE_DATA => icon::IMAGES,
+        studio::PRETRAIN => icon::BOOKS,
+        studio::FINETUNE => icon::TARGET,
+        studio::RL => icon::TROPHY,
+        studio::COMPACTION => icon::ARROWS_IN,
+        studio::VISION_TRAIN => icon::EYE,
+        studio::OPTIMIZER => icon::GAUGE,
+        studio::COMPILE => icon::PACKAGE,
+        studio::USE => icon::ARROW_SQUARE_OUT,
         _ => icon::SPARKLE,
     }
 }

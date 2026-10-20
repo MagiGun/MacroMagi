@@ -2,7 +2,7 @@
 
 **An auto clicker when you want one click repeated, a visual macro editor when you want a bot.**
 
-MacroMagi is a small, portable desktop tool for automating keyboard, mouse and controller input. Use the one-screen **Auto Clicker**, or switch to the **Macro** tab and wire up blocks that click, type, wait, loop, switch windows, replay recordings, keep variables and react to what is on screen – or to what it hears. The **Magic** tab prepares small AI models that recognise what is on screen, for macros to act on.
+MacroMagi is a small, portable desktop tool for automating keyboard, mouse and controller input. Use the one-screen **Auto Clicker**, or switch to the **Macro** tab and wire up blocks that click, type, wait, loop, switch windows, replay recordings, keep variables and react to what is on screen – or to what it hears. The **Magic** tab builds, trains and sets up small AI models on a canvas of its own – text models that answer and call tools, and vision models that recognise what is on screen – for macros to use.
 
 <p>
   <img src="docs/images/macro-editor.png" alt="The Macro tab: a node graph that watches for two buttons and reacts to each, with the settings of an Image Detection block open on the right" width="500">
@@ -12,7 +12,7 @@ MacroMagi is a small, portable desktop tool for automating keyboard, mouse and c
   <img src="docs/images/recording.png" alt="A Play Recording block with its information card, and its timeline, Trim and Cut in the block settings" width="500">
 </p>
 
-> **Status: early development (0.1.4, unreleased).** The features below work and are covered by tests, but things will change. Windows is the tested platform; see [Platform support](#platform-support).
+> **Status: early development (0.1.5, unreleased).** The features below work and are covered by tests, but things will change. Windows is the tested platform; see [Platform support](#platform-support).
 
 ## Contents
 
@@ -64,7 +64,7 @@ MacroMagi is a small, portable desktop tool for automating keyboard, mouse and c
 **Macro editor**
 
 - A node graph that reads like a flowchart: *flow goes down, values go across*.
-- 42 blocks for flow (Start, Wait, Repeat, Decision, Wait Until, Stop, Rate, Definition, Function, Log), input (Input, Auto Click, Auto Typer, Play Recording), the screen (Image and Color Detection, Text Scan, Screenshot), sound (Sound Detection and Recognition), AI (AI Watch, AI Model), windows (Switch to Window, Switch to Display, Current Window), variables (Variable, Set Variable, Counter), logic (Logic, Random Chance, Math, Compare, Text), the system (Clipboard, Notification), files (Read File, Write to File, Find in Text, Folder Contents, Make Folder), Python Script and Comment. Every drop-down can be searched. See the [block reference](docs/NODES.md).
+- 43 blocks for flow (Start, Wait, Repeat, Decision, Wait Until, Stop, Rate, Definition, Function, Log), input (Input, Auto Click, Auto Typer, Play Recording), the screen (Image and Color Detection, Text Scan, Screenshot), sound (Sound Detection and Recognition), AI (AI Watch, AI Model, AI Agent), windows (Switch to Window, Switch to Display, Current Window), variables (Variable, Set Variable, Counter), logic (Logic, Random Chance, Math, Compare, Text), the system (Clipboard, Notification), files (Read File, Write to File, Find in Text, Folder Contents, Make Folder), Python Script and Comment. Every drop-down can be searched. See the [block reference](docs/NODES.md).
 - **Variables** that any block setting can follow, a Variables panel with their live values, and Python scripts that read and change them. A variable can start fresh every run or keep its value from the last one.
 - **Functions**: build a piece of a macro once under a Definition block and run it from anywhere.
 - Any number of **Start** blocks, each with its own hotkey, running side by side.
@@ -91,8 +91,9 @@ MacroMagi is a small, portable desktop tool for automating keyboard, mouse and c
 
 **Magic: AI models**
 
-- A **Magic** tab for small vision models: import an ONNX model or the project it comes in, configure what it looks at, what its answers mean and what to press, try it live on your screen, and save it as a `.magic` file.
-- **AI Watch** and **AI Model** blocks run a model inside any macro, with its adjustable settings (confidence, delays) changeable per block.
+- A **Magic** tab with a node canvas for AI models: start from zero or from a trained model, pick architecture blocks (transformer, compressed sparse attention, mixture of experts, Mamba-2, a dual-persona router), wire in datasets, and run pretraining, fine-tuning (LoRA, DoRA), reinforcement learning with reward rules and context compaction – on your own computer, with PyTorch.
+- **Text models** that think, answer and call tools in one syntax; **vision models** that watch the screen. Datasets are edited and checked in the app. Models from elsewhere (ONNX, or the project they come in) import and are set up on the same canvas.
+- **AI Agent** runs a text model in a macro and can carry out its press, type and click tool calls; **AI Watch** and **AI Model** run a vision model, with its adjustable settings (confidence, delays) changeable per block.
 - Models run on the CPU or a graphics card – automatically on whichever is faster for that model. Optional parts (ONNX Runtime, Python, PyTorch) are installed and removed from the settings.
 
 **Control and safety**
@@ -247,18 +248,31 @@ Wire *Detected* or *Found* into a **Wait Until** to wait for a sound, or into a 
 
 ### Magic: AI models
 
-Some things on screen are too varied for Image Detection – a gauge that is never drawn the same way twice, an indicator over a moving picture. A small **vision model**, trained to tell such pictures apart, recognises them. The **Magic** tab prepares such models for macros; training them is planned for a later version.
+The **Magic** tab is a canvas for AI models, like the Macro tab's. A model travels along a *Model* wire: where it starts, its architecture blocks, its training stages fed by datasets, and the package. Its setup – name, answers, screen area, tools – is in *inspector* blocks that open their settings on the right. [docs/MAGIC.md](docs/MAGIC.md) describes every block.
+
+**Text models** read a request and write an answer; they can think first and call tools, written one way: `<tool>{"name": "press", "args": {"key": "Enter"}}</tool>`.
+
+1. **New → Text model** starts a pipeline: Start from Zero → Model Size → Transformer → Pretraining → Fine-Tuning → Compile. Add or swap architecture blocks (Compressed Sparse Attention, Micro-MoE Router, Mamba-2 / SSM, Encoder/Decoder Split, Dual-Persona Router) from *Add block*.
+2. **Give it data**: select the **Text Dataset** block, add `.jsonl`, `.md` or `.txt` files or start new ones, and edit them in the dataset editor, which checks every sample and tool call. *What to do* teaches answers; *What not to do* makes answers less likely.
+3. **Train**. The console shows each stage, the loss and any warnings. Add **Reinforcement Learning** with reward rules (right answer, valid tool calls, short answers, no loops) after fine-tuning if you like. Training needs PyTorch (*Settings → AI*) and uses a graphics card when PyTorch can.
+4. **Try It**: ask it something; see its answer, its thinking and its tool calls. Then **Use in Macro**: the model goes into the macro with an **AI Agent** block.
+
+**Vision models** tell pictures apart – a gauge that is never drawn the same way twice, an indicator over a moving picture – where Image Detection cannot. **New → Vision model** trains one from pictures in the **Vision Dataset** block: pictures of each answer, and pictures an answer was mistaken for. Or bring one made elsewhere:
 
 1. **Import** an ONNX model (`.onnx`), or the folder or ZIP of the project it comes from. MacroMagi reads the project's files – it never runs them – for what the answers mean, which ones call for action, how pictures are prepared, the screen area and the key, and lists what it found and what it guessed.
 2. **Check and adjust**: the screen area (a square in the middle of a display, which scales with the display, or a fixed area you pick), each answer's name, whether it acts, how sure the model must be and how long to wait, the key with its hold time and cooldown, and *adjustable settings* – sliders that move several values at once, offered again in every block that uses the model.
 3. **Try it**: *Watch the screen* shows what the model sees and how sure it is of each answer, live. The key is only pressed when *Press the key when it acts* is on. *Picture…* tries a picture file.
 4. **Save** a `.magic` file, and/or press **Use in Macro**: the model goes into the open macro with a Start and an **AI Watch** block ready to run. Using it again after a change updates the model in the macro.
 
+An imported model opens on the canvas with *Inference / Config Only* and its setup blocks. It can be set up and used, but not trained further: that needs its weights, which only models trained in MacroMagi carry. To train one of those further, start from *Load Base Model*.
+
+**AI Agent** asks a text model – its own request, or a value wired in – and gives the answer, the thinking, the first tool call and its arguments. With *Carry out its tool calls* on, it presses, types, clicks, moves, waits and logs as the model says; other tools are left to the blocks after it.
+
 **AI Watch** keeps looking and presses the model's key (or clicks its mouse button) when one of the acting answers is sure enough – or only watches. Each time it acts, the blocks under its *Acted* output run, with *Times acted* and *Last answer* up to date, and then it watches again; when its time is up it continues from *Done*. **AI Model** looks once and gives the answer, how sure the model is and whether to act. Each block's *Model settings* sliders change the model's adjustable settings for that block only; *Open in Magic* opens its model in the tab.
 
 Projects made for **DBD Auto Skill Check** – its repository or its packaged app, as a folder or ZIP – import with their ten answers, the five that press Space, their 51% confidence, the 5 ms delay of the frontier answer, and the three sliders that project offers, and run as they do there.
 
-**Where models run** (*Settings → AI*): *Automatic* measures the CPU and each graphics card on the model and keeps the fastest – for tiny models that is often the CPU – or choose one. MacroMagi runs models with a built-in engine; the optional downloads on the same page add **ONNX Runtime** (faster on the CPU) and **ONNX Runtime for graphics cards** (any DirectX 12 card, Windows). The page also downloads **PyTorch** (for training, later) into the Python macros use, detects copies already on your computer, and uninstalls what it installed (also from *Options → Downloads…*).
+**Where models run** (*Settings → AI*): *Automatic* measures the CPU and each graphics card on the model and keeps the fastest – for tiny models that is often the CPU – or choose one. MacroMagi runs models with a built-in engine; the optional downloads on the same page add **ONNX Runtime** (faster on the CPU) and **ONNX Runtime for graphics cards** (any DirectX 12 card, Windows). The page also downloads **PyTorch** (with onnx, for training in the Magic tab) into the Python macros use, detects copies already on your computer, and uninstalls what it installed (also from *Options → Downloads…*).
 
 > A model keeps the licence of the project it came from; the Magic tab shows the licence an import found. Check it before you share a `.magic` file or a macro that contains a model.
 
@@ -384,7 +398,7 @@ presets/….mp        presets bundled with the macro (optional)
 
 A **`.mp`** file is a preset: a small JSON file holding either Auto Clicker settings or a group of configured blocks (with the images, recordings, sounds and models they use embedded). Presets live in `data/presets`.
 
-A **`.magic`** file is an AI model: a ZIP archive with the model (ONNX), a readable `magic.json` describing how to use it, the blocks that go with it, and – if you keep them – pictures for training and fine-tuning. What it includes is chosen in the Magic tab.
+A **`.magic`** file is an AI model: a ZIP archive with the model (ONNX), a readable `magic.json` describing how to use it (its answers or its tokens, chat tags and tools, its architecture, the Magic tab's canvas), the blocks that go with it, and – if you keep them – its weights for further training, its text datasets and its pictures. What it includes is chosen in the Compile block.
 
 All three formats are specified in [docs/FILE_FORMAT.md](docs/FILE_FORMAT.md). Files from 0.1.0 and 0.1.1 open unchanged.
 
@@ -484,7 +498,8 @@ Each layer only depends on the ones below it, and everything a block *is* (its p
 Not promises, but the direction:
 
 - **Add-ons.** User-made blocks, written in Python, described by the same definition format the built-in blocks use.
-- **Training in the Magic tab**: label pictures, then train or fine-tune a model on your own computer, without sending anything to a server.
+- **Faster text models**: a key-value cache while generating, and smaller weights, so larger models answer quickly.
+- **More model inputs**: text recognition and sound as blocks a model reads from, beside pictures.
 - **Sending gamepad input.** This needs a virtual controller device, which on Windows means a driver – at odds with being portable. The plan is to use one if it is already installed.
 - **Editor**: a minimap, aligning and tidying, highlighting the path a run took.
 - **Recording**: window-relative coordinates, rescaling to another screen size, merging and splitting recordings.
@@ -504,7 +519,7 @@ Contributions are welcome – bug reports, platform testing (especially Linux an
 MacroMagi sends real input to your computer.
 
 - Know your stop hotkey (`F8`) before you run a macro that loops. Try unfamiliar macros with **Dry run** first.
-- A `.magi` file from someone else can contain a Python Script block, which is code that runs with your permissions. Read it before you run it, exactly as you would any script. A `.magic` file contains no code, but an AI Watch block presses keys on its own – try a new model with *Press the key* off first.
+- A `.magi` file from someone else can contain a Python Script block, which is code that runs with your permissions. Read it before you run it, exactly as you would any script. A `.magic` file contains no code (its weights are plain numbers, never pickled Python), but an AI Watch block presses keys on its own, and so does an AI Agent with *Carry out its tool calls* on – try a new model with those off first.
 - Sound blocks can listen to your microphone while a macro runs them. Nothing heard is stored or sent anywhere.
 - Automation is against the rules of many online games and services. Whether you may use it is between you and them.
 

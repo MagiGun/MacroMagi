@@ -65,7 +65,7 @@ pub struct Palette {
     pub warning: Color32,
     pub flow: Color32,
     /// One per [`Category`], in [`Category::ALL`] order.
-    categories: [Color32; 13],
+    categories: [Color32; 19],
     data: [Color32; 6],
 }
 
@@ -170,6 +170,12 @@ impl Palette {
                     gray(0xC8),
                     gray(0x8E),
                     gray(0x86),
+                    gray(0xE8),
+                    gray(0xB8),
+                    gray(0xD0),
+                    gray(0xA0),
+                    gray(0xC0),
+                    gray(0xF4),
                 ],
                 data: [gray(0xE0), gray(0xB0), gray(0xC8), gray(0x98), gray(0xD0), gray(0x80)],
             }
@@ -211,6 +217,12 @@ impl Palette {
                     gray(0x3A),
                     gray(0x78),
                     gray(0x80),
+                    gray(0x20),
+                    gray(0x4C),
+                    gray(0x34),
+                    gray(0x62),
+                    gray(0x44),
+                    gray(0x14),
                 ],
                 data: [gray(0x22), gray(0x50), gray(0x38), gray(0x66), gray(0x30), gray(0x7C)],
             }
@@ -226,7 +238,8 @@ impl Palette {
             palette.accent_bright =
                 if dark { mix(accent, Color32::WHITE, 0.3) } else { mix(accent, Color32::BLACK, 0.25) };
             palette.on_accent = if luminance(accent) > 0.55 { gray(0x0B) } else { Color32::WHITE };
-            // Flow, Input, Vision, Sound, AI, Window, Variables, Logic, System, Files, Script, Notes, Add-ons.
+            // Flow, Input, Vision, Sound, AI, Window, Variables, Logic, System, Files, Script, Notes, Add-ons,
+            // then the Magic tab's Start, Model, Architecture, Data, Training, Package.
             palette.categories = [
                 around(0.0),
                 around(0.58),
@@ -241,6 +254,12 @@ impl Palette {
                 around(0.88),
                 mix(around(0.05), palette.text_dim, 0.5),
                 around(0.0).gamma_multiply(0.7),
+                around(0.03),
+                around(0.62),
+                around(0.7),
+                around(0.45),
+                around(0.25),
+                around(0.9),
             ];
             palette.data = [
                 around(0.95),

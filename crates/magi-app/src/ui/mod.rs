@@ -7,6 +7,7 @@
 
 pub mod autoclicker;
 pub mod clicker_form;
+pub mod dataset_editor;
 pub mod graph;
 pub mod images;
 pub mod inspector;

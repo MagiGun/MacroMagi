@@ -169,6 +169,13 @@ impl NativeNodes {
         nodes.value(ids::COMPARE, compare);
         nodes.value(ids::TEXT, text);
         nodes.value(ids::CLIPBOARD, clipboard);
+        nodes.flow(ids::AI_AGENT, |interp, node| {
+            let p: magi_core::nodes::ai::AiAgentParams = interp.params(node)?;
+            let wired = interp.input(node, "request")?;
+            let outputs = interp.cx.ai_agent(&p, wired, node.id)?;
+            interp.outputs.insert(node.id, outputs);
+            Ok(Next::out())
+        });
         nodes.value(ids::AI_CLASSIFY, |interp, node| {
             let p: AiParams = interp.params(node)?;
             interp.cx.ai_classify(&p)

@@ -1752,3 +1752,43 @@ fn ai_watch_runs_the_blocks_under_acted_each_time_it_acts() {
         assert_eq!(ours, ["saw red", "times 1", "done"], "{kind:?}: the branch ran with the answer, then left");
     });
 }
+
+/// A text model trained in MacroMagi's trainer to answer "hi" with "yo".
+fn text_model(project: &mut Project) -> String {
+    use magi_core::magic::*;
+    let model = MagicModel {
+        name: "Greeter".into(),
+        kind: ModelKind::Text,
+        text: Some(TextSpec { context: 32, ..TextSpec::default() }),
+        ..MagicModel::default()
+    };
+    let onnx = include_bytes!("../../magi-ml/tests/data/tiny_text.onnx").to_vec();
+    let file = MagicFile { model, onnx, ..MagicFile::default() };
+    project.assets.add_model("Greeter", file.for_macro().unwrap())
+}
+
+#[test]
+fn an_ai_agent_asks_a_text_model() {
+    let mut b = Builder::new();
+    let model = text_model(&mut b.project);
+    let start = b.node(ids::START, json!({}));
+    let agent = b.node(ids::AI_AGENT, json!({ "model": model, "request": "hi", "temperature": 0.0, "max_tokens": 10 }));
+    let report = b.log("said");
+    b.chain(&[start, agent, report]);
+    b.wire(agent, "answer", report, "value");
+    on_all(&b.project, start, colored([0, 0, 0]), |kind, outcome| {
+        assert!(outcome.logs.iter().any(|l| l == "said yo"), "{kind:?}: {:?}", outcome.logs);
+    });
+
+    // A vision block cannot run a text model, and says so.
+    let mut wrong = Builder::new();
+    let model = text_model(&mut wrong.project);
+    let start = wrong.node(ids::START, json!({}));
+    let ask = wrong.node(ids::AI_CLASSIFY, json!({ "model": model }));
+    let report = wrong.log("saw");
+    wrong.chain(&[start, report]);
+    wrong.wire(ask, "label", report, "value");
+    on_all(&wrong.project, start, colored([0, 0, 0]), |kind, outcome| {
+        assert!(outcome.errors.iter().any(|e| e.contains("AI Agent")), "{kind:?}: {:?}", outcome.errors);
+    });
+}

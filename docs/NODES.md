@@ -336,6 +336,25 @@ Listens for particular sounds – a notification, an alarm, a voice line – tha
 
 Small vision models prepared in the Magic tab, run on what is on screen.
 
+### AI Agent
+
+`ai.agent`
+
+Asks a text model made in the Magic tab and gives its answer, what it thought, and the tool it called with its arguments. Set to, it carries out the tool calls MacroMagi knows – press, type, click, move, wait and log – and other tools are left to the blocks after it.
+
+- Flow in: yes
+- Flow out: **Then**
+- Value inputs: **Request** (text)
+- Value outputs: **Answer** (text), **Thinking** (text), **Tool** (text), **Arguments** (text), **Tool calls** (number), **Everything it wrote** (text)
+
+| Setting | Kind | Default | Notes |
+| --- | --- | --- | --- |
+| Model | AI model | none | A model prepared in the Magic tab. Use “Use in Macro” there, or load a .magic file. |
+| Request | text | empty | Used when nothing is wired into “Request”. |
+| Carry out its tool calls | on/off | off | press {key}, type {text}, click {x, y, button}, move {x, y}, wait {ms} and log {text}. Off: the block only reports them. |
+| Longest answer | whole number | 0 tokens | 0: the model's own setting. |
+| Temperature | number | -1 | 0 always writes the likeliest; higher is freer. Below 0: the model's own setting. |
+
 ### AI Model
 
 `ai.classify`

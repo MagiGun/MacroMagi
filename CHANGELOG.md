@@ -4,7 +4,29 @@ Notable changes to MacroMagi. The format follows [Keep a Changelog](https://keep
 
 File-format changes are called out explicitly; see [docs/FILE_FORMAT.md](docs/FILE_FORMAT.md) for the compatibility rules.
 
-## 0.1.4 – Unreleased
+## 0.1.5 – Unreleased
+
+### Added
+
+- **The Magic tab is a node canvas** for building, training, setting up and trying AI models, with the Macro tab's panning, zooming, wires, groups and searchable block list, a settings panel for the selected block, and a console with the loss as a chart.
+- **Text models**: they read a request and write an answer, can think inside thinking tags, and call tools in one syntax (`<tool>{"name": …, "args": {…}}</tool>`). Text & Tools sets the system prompt, the tools (with *Add MacroMagi's tools*), personas, chat tags and how it writes; Try It asks it something and shows its answer, thinking and tool calls.
+- **Training on your computer** with PyTorch: *Start from Zero*, *Load Base Model* or *Inference / Config Only*; architecture blocks (Model Size, Transformer, Compressed Sparse Attention, Micro-MoE Router, Encoder/Decoder Split, Mamba-2 / SSM, Dual-Persona Router, Vision Encoder); stages (Pretraining with a context curriculum, Fine-Tuning with all weights or LoRA/DoRA adapters and “what not to do” samples, Reinforcement Learning with reward rules, Context Compaction, Vision Training with negative pictures); Optimizer & Memory (AdamW, Muon, SGD, recomputed activations, optimizer state in system memory, accumulation, CPU or graphics card). See [docs/MAGIC.md](docs/MAGIC.md).
+- **Text Dataset** block and **dataset editor**: `.jsonl`, `.md` and `.txt` files in the `.magic` file, searched, filtered, checked (JSON, sample shape, every tool call) and edited in place. **Vision Dataset** block: pictures per answer and pictures it was mistaken for, with thumbnails.
+- **AI Agent** block: asks a text model and gives its answer, thinking, first tool call and arguments; optionally carries out press, type, click, move, wait and log calls. **Use in Macro** adds a text model with Start → AI Agent → Log.
+- **Compile .magic Package** and **Use in Macro** blocks on the canvas.
+
+### Changed
+
+- Opening a `.magic` file from an earlier version builds its canvas from it: its setup as inspector blocks, ready to use.
+- *Settings → AI* installs onnx along with PyTorch, which training needs to export models; PyTorch counts as installed only with it.
+- AI Watch and AI Model report an error when given a text model.
+- On the Magic tab, Ctrl+S and Ctrl+Shift+S save the model and Ctrl+O opens one.
+
+### File format
+
+`.magic` additions, all optional; earlier files load unchanged: `kind`, `text`, `architecture`, `studio` (the canvas), `datasets` and `trained` in `magic.json`; `model/weights.safetensors` and `data/text/…` in the archive; `negative` on pictures; `weights` and `datasets` under `include`. New macro block `ai.agent`.
+
+## 0.1.4
 
 ### Added
 

@@ -8,11 +8,17 @@
 //! fine-tuned on.
 //!
 //! ```text
-//! magic.json        required – the description below
-//! model/model.onnx  the model (left out when "include the model" is off)
-//! data/train/…      training pictures, one folder per class (optional)
-//! data/tune/…       fine-tuning pictures, one folder per class (optional)
+//! magic.json                 required – the description below
+//! model/model.onnx           the model (left out when "include the model" is off)
+//! model/weights.safetensors  its weights, to train further (optional)
+//! data/train/…               training pictures, one folder per class (optional)
+//! data/tune/…                fine-tuning pictures, one folder per class (optional)
+//! data/text/…                text datasets: .jsonl, .md, .txt (optional)
 //! ```
+//!
+//! A model is a *vision* model (a picture in, an answer out) or a *text*
+//! model (text in, text out, with tools and personas). Both are made, trained
+//! and tried in the Magic tab, whose canvas (`studio`) is saved in the file.
 //!
 //! Macros embed a model as an asset: the `.magic` file without its data.
 
@@ -34,6 +40,7 @@ pub const FORMAT_VERSION: u32 = 1;
 pub const EXTENSION: &str = "magic";
 const MANIFEST: &str = "magic.json";
 const MODEL_FILE: &str = "model/model.onnx";
+const WEIGHTS_FILE: &str = "model/weights.safetensors";
 
 /// The standard ImageNet color statistics most vision models are trained with.
 pub const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
@@ -220,6 +227,303 @@ pub struct DataItem {
     /// Its path inside the archive.
     pub file: String,
     pub class: usize,
+    /// A picture of what the class is *not* (a false positive to unlearn).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub negative: bool,
+}
+
+/// What a model takes in and gives out.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelKind {
+    /// A picture in, an answer (a class) out.
+    #[default]
+    Vision,
+    /// Text in, text out – with tools and personas: an agent.
+    Text,
+}
+
+impl ModelKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            ModelKind::Vision => "Vision",
+            ModelKind::Text => "Text / agent",
+        }
+    }
+}
+
+/// One voice of a text model's reasoning, marked by its own tag.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Persona {
+    pub name: String,
+    /// The tag that opens its turn, such as `<gun>`; `</gun>` closes it.
+    pub tag: String,
+    /// What it is for.
+    pub role: String,
+}
+
+/// A tool a text model may call.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToolSpec {
+    pub name: String,
+    pub description: String,
+    /// Its arguments, as a JSON Schema object.
+    pub parameters: Value,
+}
+
+/// A tool call found in a text model's answer: `<tool>{"name": …, "args": {…}}</tool>`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolCall {
+    pub name: String,
+    pub args: Value,
+}
+
+/// How a text model reads and writes: its tokens, its chat tags, its personas
+/// and tools, and how it generates.
+///
+/// Tokens are the 256 byte values of UTF-8 text, then the special tags in
+/// `specials`, in order – simple, and the same in MacroMagi and in training.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TextSpec {
+    /// Special tags, each one token (ids from 256 on, in this order).
+    pub specials: Vec<String>,
+    /// The longest text, in tokens, the model reads at once.
+    pub context: u32,
+    pub system_tag: String,
+    pub user_tag: String,
+    pub assistant_tag: String,
+    /// Ends a turn; generation stops at it.
+    pub end_tag: String,
+    pub think_tags: (String, String),
+    /// The one way of writing a tool call: `<tool>{"name": …, "args": {…}}</tool>`.
+    pub tool_tags: (String, String),
+    pub compact_tags: (String, String),
+    pub personas: Vec<Persona>,
+    pub tools: Vec<ToolSpec>,
+    /// What the model is told before every request.
+    pub system: String,
+    pub temperature: f32,
+    pub top_k: u32,
+    pub max_tokens: u32,
+}
+
+impl Default for TextSpec {
+    fn default() -> Self {
+        let mut spec = Self {
+            specials: Vec::new(),
+            context: 256,
+            system_tag: "<|system|>".into(),
+            user_tag: "<|user|>".into(),
+            assistant_tag: "<|assistant|>".into(),
+            end_tag: "<|end|>".into(),
+            think_tags: ("<think>".into(), "</think>".into()),
+            tool_tags: ("<tool>".into(), "</tool>".into()),
+            compact_tags: ("<compact>".into(), "</compact>".into()),
+            personas: Vec::new(),
+            tools: Vec::new(),
+            system: String::new(),
+            temperature: 0.7,
+            top_k: 40,
+            max_tokens: 200,
+        };
+        spec.ensure_specials();
+        spec
+    }
+}
+
+impl TextSpec {
+    /// Every tag the template and the personas use is a special token.
+    pub fn ensure_specials(&mut self) {
+        let mut wanted = vec![
+            self.end_tag.clone(),
+            self.system_tag.clone(),
+            self.user_tag.clone(),
+            self.assistant_tag.clone(),
+            self.think_tags.0.clone(),
+            self.think_tags.1.clone(),
+            self.tool_tags.0.clone(),
+            self.tool_tags.1.clone(),
+            self.compact_tags.0.clone(),
+            self.compact_tags.1.clone(),
+        ];
+        for persona in &self.personas {
+            let name = persona.tag.trim_start_matches('<').trim_end_matches('>');
+            if !name.is_empty() {
+                wanted.push(format!("<{name}>"));
+                wanted.push(format!("</{name}>"));
+            }
+        }
+        for tag in wanted {
+            if !tag.is_empty() && !self.specials.contains(&tag) {
+                self.specials.push(tag);
+            }
+        }
+    }
+
+    pub fn vocab_size(&self) -> usize {
+        256 + self.specials.len()
+    }
+
+    /// Text as token ids: special tags first (longest match), else UTF-8 bytes.
+    pub fn encode(&self, text: &str) -> Vec<u32> {
+        let mut order: Vec<(usize, &String)> = self.specials.iter().enumerate().collect();
+        order.sort_by_key(|(_, tag)| std::cmp::Reverse(tag.len()));
+        let bytes = text.as_bytes();
+        let mut ids = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        'outer: while i < bytes.len() {
+            if bytes[i] == b'<' {
+                for (index, tag) in &order {
+                    if !tag.is_empty() && bytes[i..].starts_with(tag.as_bytes()) {
+                        ids.push(256 + *index as u32);
+                        i += tag.len();
+                        continue 'outer;
+                    }
+                }
+            }
+            ids.push(u32::from(bytes[i]));
+            i += 1;
+        }
+        ids
+    }
+
+    /// Token ids as text. Unknown ids are left out.
+    pub fn decode(&self, ids: &[u32]) -> String {
+        let mut bytes = Vec::with_capacity(ids.len());
+        for &id in ids {
+            match id {
+                0..=255 => bytes.push(id as u8),
+                _ => {
+                    if let Some(tag) = self.specials.get(id as usize - 256) {
+                        bytes.extend_from_slice(tag.as_bytes());
+                    }
+                }
+            }
+        }
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// The id of a special tag.
+    pub fn special_id(&self, tag: &str) -> Option<u32> {
+        self.specials.iter().position(|s| s == tag).map(|i| 256 + i as u32)
+    }
+
+    /// A request as the model reads it: the system text, the request, and the
+    /// tag after which it answers.
+    pub fn prompt(&self, user: &str) -> String {
+        let mut text = String::new();
+        if !self.system.trim().is_empty() {
+            text.push_str(&format!("{}{}{}", self.system_tag, self.system.trim(), self.end_tag));
+        }
+        text.push_str(&format!("{}{}{}{}", self.user_tag, user, self.end_tag, self.assistant_tag));
+        text
+    }
+
+    /// The tool calls in an answer, in order. Calls that are not well formed are left out.
+    pub fn tool_calls(&self, text: &str) -> Vec<ToolCall> {
+        let (open, close) = (&self.tool_tags.0, &self.tool_tags.1);
+        let mut calls = Vec::new();
+        let mut rest = text;
+        while let Some(start) = rest.find(open.as_str()) {
+            let after = &rest[start + open.len()..];
+            let Some(end) = after.find(close.as_str()) else { break };
+            if let Ok(Value::Object(call)) = serde_json::from_str::<Value>(after[..end].trim())
+                && let Some(name) = call.get("name").and_then(Value::as_str)
+            {
+                calls.push(ToolCall { name: name.to_owned(), args: call.get("args").cloned().unwrap_or(Value::Null) });
+            }
+            rest = &after[end + close.len()..];
+        }
+        calls
+    }
+
+    /// What an answer thought: the text inside its thinking tags (and its personas' tags).
+    pub fn thinking(&self, text: &str) -> String {
+        let mut tags = vec![self.think_tags.clone()];
+        for persona in &self.personas {
+            let name = persona.tag.trim_start_matches('<').trim_end_matches('>');
+            if !name.is_empty() {
+                tags.push((format!("<{name}>"), format!("</{name}>")));
+            }
+        }
+        let mut parts = Vec::new();
+        for (open, close) in &tags {
+            let mut rest = text;
+            while let Some(start) = rest.find(open.as_str()) {
+                let after = &rest[start + open.len()..];
+                let end = after.find(close.as_str()).unwrap_or(after.len());
+                let part = after[..end].trim();
+                if !part.is_empty() {
+                    parts.push(part.to_owned());
+                }
+                rest = &after[(end + close.len()).min(after.len())..];
+            }
+        }
+        parts.join("\n")
+    }
+
+    /// The answer without its thinking and tool calls: what it says.
+    pub fn visible(&self, text: &str) -> String {
+        let mut out = text.to_owned();
+        let mut spans = vec![self.think_tags.clone(), self.tool_tags.clone(), self.compact_tags.clone()];
+        // A persona's turn is reasoning, too.
+        for persona in &self.personas {
+            let name = persona.tag.trim_start_matches('<').trim_end_matches('>');
+            if !name.is_empty() {
+                spans.push((format!("<{name}>"), format!("</{name}>")));
+            }
+        }
+        for (open, close) in &spans {
+            while let (Some(a), Some(b)) = (out.find(open.as_str()), out.find(close.as_str())) {
+                if b < a {
+                    break;
+                }
+                out.replace_range(a..b + close.len(), "");
+            }
+        }
+        out.replace(&self.end_tag, "").trim().to_owned()
+    }
+}
+
+/// One block of a model's architecture, as the Magic tab's canvas put it
+/// together: `kind` (such as `transformer`, `moe`, `sparse_attention`) and its settings.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ArchBlock {
+    pub kind: String,
+    pub params: Map<String, Value>,
+}
+
+/// The shape of a model trained in MacroMagi.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Architecture {
+    /// The width of the model: numbers per token (text) or per pixel feature (vision).
+    pub width: u32,
+    pub heads: u32,
+    pub blocks: Vec<ArchBlock>,
+}
+
+impl Default for Architecture {
+    fn default() -> Self {
+        Self { width: 128, heads: 4, blocks: Vec::new() }
+    }
+}
+
+/// What training a model went through, for the record.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TrainingRecord {
+    /// The stages run, in order (`pretrain`, `sft`, `rl`…).
+    pub stages: Vec<String>,
+    pub steps: u64,
+    /// The loss at the end of the last stage.
+    pub loss: f64,
+    /// The size of the model, in parameters.
+    pub parameters: u64,
 }
 
 /// What a `.magic` file carries besides its description.
@@ -230,11 +534,15 @@ pub struct Includes {
     pub blocks: bool,
     pub training: bool,
     pub finetune: bool,
+    /// The weights to train further (`model/weights.safetensors`).
+    pub weights: bool,
+    /// Text datasets (`data/text/…`).
+    pub datasets: bool,
 }
 
 impl Default for Includes {
     fn default() -> Self {
-        Self { model: true, blocks: true, training: true, finetune: true }
+        Self { model: true, blocks: true, training: true, finetune: true, weights: true, datasets: true }
     }
 }
 
@@ -242,6 +550,7 @@ impl Default for Includes {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MagicModel {
+    pub kind: ModelKind,
     pub name: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub description: String,
@@ -265,11 +574,26 @@ pub struct MagicModel {
     pub training: Vec<DataItem>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub finetune: Vec<DataItem>,
+    /// How a text model reads, writes and calls tools.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<TextSpec>,
+    /// The shape of a model trained in MacroMagi.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub architecture: Option<Architecture>,
+    /// The Magic tab's canvas: the blocks that set up, train and try the model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub studio: Option<Fragment>,
+    /// Text datasets in the file (`data/text/…`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub datasets: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trained: Option<TrainingRecord>,
 }
 
 impl Default for MagicModel {
     fn default() -> Self {
         Self {
+            kind: ModelKind::Vision,
             name: "New model".into(),
             description: String::new(),
             author: String::new(),
@@ -284,6 +608,11 @@ impl Default for MagicModel {
             include: Includes::default(),
             training: Vec::new(),
             finetune: Vec::new(),
+            text: None,
+            architecture: None,
+            studio: None,
+            datasets: Vec::new(),
+            trained: None,
         }
     }
 }
@@ -361,8 +690,10 @@ pub struct MagicFile {
     pub model: MagicModel,
     /// The ONNX model. Empty when the file does not include it.
     pub onnx: Vec<u8>,
-    /// Training and fine-tuning pictures, by path inside the archive.
+    /// Training and fine-tuning pictures and text datasets, by path inside the archive.
     pub data: BTreeMap<String, Vec<u8>>,
+    /// The weights (safetensors), to train the model further. Empty when there are none.
+    pub weights: Vec<u8>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -386,8 +717,17 @@ impl MagicFile {
             zip.start_file(MODEL_FILE, text)?;
             zip.write_all(&self.onnx)?;
         }
+        if include.weights && !self.weights.is_empty() {
+            zip.start_file(WEIGHTS_FILE, stored)?;
+            zip.write_all(&self.weights)?;
+        }
         if !include.blocks {
             model.blocks = None;
+        }
+        model.datasets.retain(|file| include.datasets && self.data.contains_key(file));
+        for file in &model.datasets {
+            zip.start_file(file.as_str(), text)?;
+            zip.write_all(&self.data[file])?;
         }
         let keep = |item: &DataItem, on: bool| on && self.data.contains_key(&item.file);
         model.training.retain(|item| keep(item, include.training));
@@ -421,12 +761,14 @@ impl MagicFile {
         let manifest: Manifest = serde_json::from_value(header)?;
         let onnx = read(&mut zip, MODEL_FILE).unwrap_or_default();
         let mut data = BTreeMap::new();
-        for item in manifest.model.training.iter().chain(&manifest.model.finetune) {
-            if let Ok(bytes) = read(&mut zip, &item.file) {
-                data.insert(item.file.clone(), bytes);
+        let files = manifest.model.training.iter().chain(&manifest.model.finetune).map(|item| &item.file);
+        for file in files.chain(&manifest.model.datasets) {
+            if let Ok(bytes) = read(&mut zip, file) {
+                data.insert(file.clone(), bytes);
             }
         }
-        Ok(Self { model: manifest.model, onnx, data })
+        let weights = read(&mut zip, WEIGHTS_FILE).unwrap_or_default();
+        Ok(Self { model: manifest.model, onnx, data, weights })
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
@@ -443,7 +785,10 @@ impl MagicFile {
     /// the training data.
     pub fn for_macro(&self) -> Result<Vec<u8>> {
         let mut copy = self.clone();
-        copy.model.include = Includes { model: true, blocks: true, training: false, finetune: false };
+        copy.model.include =
+            Includes { model: true, blocks: true, training: false, finetune: false, weights: false, datasets: false };
+        // The canvas is for making the model, not for using it.
+        copy.model.studio = None;
         copy.to_bytes()
     }
 
@@ -466,6 +811,53 @@ fn read<R: Read + Seek>(zip: &mut ZipArchive<R>, name: &str) -> Result<Vec<u8>> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_is_bytes_and_special_tags_and_comes_back_the_same() {
+        let spec = TextSpec {
+            personas: vec![Persona { name: "Gun".into(), tag: "<gun>".into(), role: String::new() }],
+            ..TextSpec::default()
+        };
+        let mut spec = spec;
+        spec.ensure_specials();
+        let text = "<|user|>héllo<|end|><gun>ok</gun>";
+        let ids = spec.encode(text);
+        assert_eq!(ids[0], spec.special_id("<|user|>").unwrap());
+        assert_eq!(ids.len(), 1 + "héllo".len() + 1 + 1 + 2 + 1);
+        assert_eq!(spec.decode(&ids), text);
+        assert_eq!(spec.vocab_size(), 256 + spec.specials.len());
+        assert!(spec.encode("<notatag>").iter().all(|id| *id < 256));
+    }
+
+    #[test]
+    fn tool_calls_are_read_and_the_visible_answer_has_none() {
+        let spec = TextSpec::default();
+        let answer = r#"<think>press it</think>Sure.<tool>{"name": "press", "args": {"key": "Space"}}</tool><tool>broken</tool><|end|>"#;
+        let calls = spec.tool_calls(answer);
+        assert_eq!(calls, vec![ToolCall { name: "press".into(), args: serde_json::json!({ "key": "Space" }) }]);
+        assert_eq!(spec.visible(answer), "Sure.");
+    }
+
+    #[test]
+    fn a_text_model_keeps_its_weights_datasets_and_canvas() {
+        let mut file = MagicFile::default();
+        file.model.kind = ModelKind::Text;
+        file.model.text = Some(TextSpec::default());
+        file.model.datasets = vec!["data/text/chat.jsonl".into()];
+        file.data.insert("data/text/chat.jsonl".into(), br#"{"prompt": "hi", "response": "hello"}"#.to_vec());
+        file.weights = vec![1, 2, 3];
+        file.model.studio = Some(Fragment::default());
+        let back = MagicFile::from_bytes(&file.to_bytes().unwrap()).unwrap();
+        assert_eq!(back.model.kind, ModelKind::Text);
+        assert_eq!(back.weights, [1, 2, 3]);
+        assert!(back.data.contains_key("data/text/chat.jsonl"));
+        // A macro keeps neither the weights, the datasets nor the canvas.
+        let in_macro = MagicFile::from_bytes(&file.for_macro().unwrap()).unwrap();
+        assert!(in_macro.weights.is_empty() && in_macro.data.is_empty() && in_macro.model.studio.is_none());
+        // Files from before text models open as vision models.
+        let old: MagicModel = serde_json::from_str(r#"{ "name": "Old" }"#).unwrap();
+        assert_eq!(old.kind, ModelKind::Vision);
+    }
 
     #[test]
     fn the_key_to_press_may_be_a_mouse_button_and_old_files_keep_their_key() {
@@ -521,9 +913,9 @@ mod tests {
 
     #[test]
     fn files_round_trip_and_leave_out_what_is_switched_off() {
-        let mut file = MagicFile { model: two_classes(), onnx: vec![1, 2, 3], data: BTreeMap::new() };
+        let mut file = MagicFile { model: two_classes(), onnx: vec![1, 2, 3], ..MagicFile::default() };
         file.data.insert("data/train/1/a.png".into(), vec![9; 10]);
-        file.model.training.push(DataItem { file: "data/train/1/a.png".into(), class: 1 });
+        file.model.training.push(DataItem { file: "data/train/1/a.png".into(), class: 1, negative: false });
         let back = MagicFile::from_bytes(&file.to_bytes().unwrap()).unwrap();
         assert_eq!(back, file);
 

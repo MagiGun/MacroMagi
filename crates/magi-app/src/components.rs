@@ -63,8 +63,8 @@ impl Component {
                 "Python for the Python engine and Python Script blocks, on computers that do not have it."
             }
             Component::PyTorch => {
-                "For training and fine-tuning models, coming to the Magic tab. Installed into the Python chosen \
-                 under Settings › Engine."
+                "For training and fine-tuning models in the Magic tab, with onnx to export them. Installed into \
+                 the Python chosen under Settings › Engine."
             }
         }
     }
@@ -312,7 +312,8 @@ impl Components {
         match component {
             Component::PyTorch => {
                 let Some(python) = python else { return Status::Missing };
-                match python_output(python, &["-c", "import torch; print(torch.__version__)"]) {
+                // Training exports models with onnx, so PyTorch counts as there only with it.
+                match python_output(python, &["-c", "import torch, onnx; print(torch.__version__)"]) {
                     Ok(version) => {
                         let ours = self.python().is_some_and(|p| p == python);
                         let detail = format!("version {version}, in {}", python.display());
@@ -483,6 +484,12 @@ impl Components {
                     ],
                 )
                 .map_err(|e| format!("pip could not install PyTorch: {e}"))?;
+                progress("Installing onnx, which training exports models with…", None);
+                python_output(
+                    python,
+                    &["-m", "pip", "install", "--disable-pip-version-check", "--no-warn-script-location", "onnx"],
+                )
+                .map_err(|e| format!("pip could not install onnx: {e}"))?;
                 Ok(format!("PyTorch installed into {}.", python.display()))
             }
         }

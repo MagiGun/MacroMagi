@@ -66,6 +66,50 @@ fn summary(node: &Node, assets: &AssetStore) -> Vec<String> {
     lines
 }
 
+/// An AI Agent block: asks a text model and, if set to, does what it calls for.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AiAgentParams {
+    pub model: String,
+    /// The request, when none is wired in.
+    pub request: String,
+    /// Carry out the tool calls MacroMagi knows: press, type, click, move, wait and log.
+    pub run_tools: bool,
+    /// The longest answer, in tokens; 0 uses the model's own setting.
+    pub max_tokens: u32,
+    /// How freely it writes; below 0 uses the model's own setting.
+    pub temperature: f64,
+}
+
+impl Default for AiAgentParams {
+    fn default() -> Self {
+        Self { model: String::new(), request: String::new(), run_tools: false, max_tokens: 0, temperature: -1.0 }
+    }
+}
+
+/// The tools an AI Agent block can carry out itself, with their arguments.
+pub const AGENT_TOOLS: [(&str, &str); 6] = [
+    ("press", "{\"key\": \"Enter\"} – taps a key"),
+    ("type", "{\"text\": \"…\"} – types text"),
+    ("click", "{\"x\": 10, \"y\": 20, \"button\": \"left\"} – clicks, where given"),
+    ("move", "{\"x\": 10, \"y\": 20} – moves the pointer"),
+    ("wait", "{\"ms\": 500} – waits"),
+    ("log", "{\"text\": \"…\"} – writes to the console"),
+];
+
+fn agent_summary(node: &Node, assets: &AssetStore) -> Vec<String> {
+    let p: AiAgentParams = node.params_or_default();
+    let mut lines = vec![model_name(assets, &p.model)];
+    if !p.request.trim().is_empty() {
+        let request: String = p.request.trim().chars().take(40).collect();
+        lines.push(format!("“{request}”"));
+    }
+    if p.run_tools {
+        lines.push("Carries out its tool calls".into());
+    }
+    lines
+}
+
 /// AI Watch's flow output taken each time it acts.
 pub const ACTED: &str = "acted";
 
@@ -139,5 +183,45 @@ pub(super) fn register(registry: &mut Registry) {
         .param(display_param())
         .defaults(&AiParams::default())
         .summarize(summary),
+    );
+
+    registry.register(
+        NodeDef::new(
+            ids::AI_AGENT,
+            "AI Agent",
+            Category::Ai,
+            "Asks a text model made in the Magic tab and gives its answer, what it thought, and the tool it \
+             called with its arguments. Set to, it carries out the tool calls MacroMagi knows – press, type, \
+             click, move, wait and log – and other tools are left to the blocks after it.",
+        )
+        .keywords(&["ai", "agent", "text", "llm", "language model", "chat", "tool", "magic", "prompt", "ask"])
+        .flow_in()
+        .flow_out(ports::OUT, "Then")
+        .data_in("request", "Request", DataType::Text)
+        .data_out("answer", "Answer", DataType::Text)
+        .data_out("thinking", "Thinking", DataType::Text)
+        .data_out("tool", "Tool", DataType::Text)
+        .data_out("args", "Arguments", DataType::Text)
+        .data_out("calls", "Tool calls", DataType::Number)
+        .data_out("raw", "Everything it wrote", DataType::Text)
+        .param(model_param())
+        .param(
+            ParamDef::new("request", "Request", ParamKind::Text { multiline: true })
+                .help("Used when nothing is wired into “Request”."),
+        )
+        .param(ParamDef::new("run_tools", "Carry out its tool calls", ParamKind::Bool).help(
+            "press {key}, type {text}, click {x, y, button}, move {x, y}, wait {ms} and log {text}. Off: the \
+             block only reports them.",
+        ))
+        .param(
+            ParamDef::new("max_tokens", "Longest answer", ParamKind::int(0, 8192, "tokens"))
+                .help("0: the model's own setting."),
+        )
+        .param(
+            ParamDef::new("temperature", "Temperature", ParamKind::float(-1.0, 2.0, ""))
+                .help("0 always writes the likeliest; higher is freer. Below 0: the model's own setting."),
+        )
+        .defaults(&AiAgentParams::default())
+        .summarize(agent_summary),
     );
 }

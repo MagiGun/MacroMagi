@@ -162,6 +162,21 @@ One Python process is started on first use and kept for as long as MacroMagi run
 
 The runtime's source is built into the MacroMagi executable. On first use it is unpacked to `data/runtime/python-<hash>/`; a new MacroMagi version unpacks a fresh copy and removes the old one.
 
+## The trainer
+
+`runtime/python/magi_train` trains the Magic tab's models. It is a separate package: the macro runtime above uses only the standard library, and the trainer needs **PyTorch** and **onnx**, which *Settings → AI → Downloads* installs into the same Python. The Magic tab starts it as `python -u magi_train_run.py plan.json` and reads one JSON object per line from it.
+
+| Module | Holds |
+| --- | --- |
+| `tokens.py` | The byte-level tokenizer and chat template, the same as `TextSpec` in Rust. |
+| `data.py` | Reading `.jsonl`, `.md` and `.txt` datasets into samples. |
+| `blocks.py` | The architecture blocks, the text and vision models, LoRA and DoRA adapters. |
+| `optim.py` | AdamW, Muon (Newton–Schulz orthogonalised updates) and SGD; moving optimizer state to system memory. |
+| `safetensors.py` | Reading and writing weights without the `safetensors` package, and without pickle. |
+| `train.py` | The stages – pretraining, fine-tuning, reinforcement learning, compaction, vision – and the ONNX export. |
+
+The plan format and what each stage does are in [MAGIC.md](MAGIC.md).
+
 ## Working on the runtime
 
 The source is in [`runtime/python`](../runtime/python):

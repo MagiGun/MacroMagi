@@ -20,6 +20,7 @@ pub mod logic;
 pub mod notes;
 pub mod script;
 pub mod sound;
+pub mod studio;
 pub mod system;
 pub mod variables;
 pub mod vision;
@@ -78,6 +79,7 @@ pub mod ids {
     pub const SOUND_MATCH: &str = "sound.match";
     pub const AI_WATCH: &str = "ai.watch";
     pub const AI_CLASSIFY: &str = "ai.classify";
+    pub const AI_AGENT: &str = "ai.agent";
 }
 
 /// Ids of ports that engines and the editor refer to by name.
@@ -118,10 +120,17 @@ pub enum Category {
     Script,
     Notes,
     Addon,
+    // The Magic tab's blocks (see [`studio`]).
+    Start,
+    ModelSetup,
+    Architecture,
+    Data,
+    Training,
+    Package,
 }
 
 impl Category {
-    pub const ALL: [Category; 13] = [
+    pub const ALL: [Category; 19] = [
         Category::Flow,
         Category::Input,
         Category::Vision,
@@ -135,6 +144,12 @@ impl Category {
         Category::Script,
         Category::Notes,
         Category::Addon,
+        Category::Start,
+        Category::ModelSetup,
+        Category::Architecture,
+        Category::Data,
+        Category::Training,
+        Category::Package,
     ];
 
     pub fn label(self) -> &'static str {
@@ -152,6 +167,12 @@ impl Category {
             Category::Script => "Script",
             Category::Notes => "Notes",
             Category::Addon => "Add-ons",
+            Category::Start => "Start",
+            Category::ModelSetup => "Model",
+            Category::Architecture => "Architecture",
+            Category::Data => "Data",
+            Category::Training => "Training",
+            Category::Package => "Package",
         }
     }
 }

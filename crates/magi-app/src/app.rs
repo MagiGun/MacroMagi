@@ -69,6 +69,7 @@ enum Pending {
 #[derive(Clone)]
 enum MagicPending {
     New,
+    NewModel { text: bool },
     Open,
     Import { folder: bool },
     OpenModel(String),
@@ -315,6 +316,12 @@ impl MagiApp {
             && let Some(node) = app.doc.project.graph.nodes().find(|n| n.kind == *kind).map(|n| n.id)
         {
             app.macro_tab.view.focus_node(node);
+        }
+        if let Some(kind) = &options.select_kind
+            && let Some(doc) = &app.magic_tab.doc
+            && let Some(node) = doc.studio.graph.nodes().find(|n| n.kind == *kind).map(|n| n.id)
+        {
+            app.magic_tab.view.selection = [node].into();
         }
         if options.show_cards {
             let recordings: Vec<NodeId> =
@@ -618,6 +625,15 @@ impl MagiApp {
     fn magic_perform(&mut self, action: MagicPending) {
         match action {
             MagicPending::New => self.set_magic_doc(None),
+            MagicPending::NewModel { text } => {
+                let doc = MagicDoc::new(crate::magic::new_model(text), None, Vec::new());
+                self.set_magic_doc(Some(doc));
+                self.toast(if text {
+                    "A new text model: give it datasets, then press Train"
+                } else {
+                    "A new vision model: give it answers and pictures, then press Train"
+                });
+            }
             MagicPending::Open => {
                 let Some(path) = rfd::FileDialog::new().add_filter(MAGIC_FILTER.0, MAGIC_FILTER.1).pick_file() else {
                     return;
@@ -661,8 +677,7 @@ impl MagiApp {
 
     /// Puts a model in the Magic tab, stopping anything running on the old one.
     fn set_magic_doc(&mut self, doc: Option<MagicDoc>) {
-        self.magic_tab.tester = None;
-        self.magic_tab.picture = None;
+        self.magic_tab.reset();
         self.magic_tab.doc = doc;
     }
 
@@ -1904,6 +1919,41 @@ impl MagiApp {
     fn magic_event(&mut self, ctx: &egui::Context, event: MagicEvent, displays: &magi_core::geom::Displays) {
         match event {
             MagicEvent::New => self.magic_guarded(MagicPending::New),
+            MagicEvent::NewModel { text } => self.magic_guarded(MagicPending::NewModel { text }),
+            MagicEvent::Toast(text) => self.toast(text),
+            MagicEvent::Train => self.start_training(ctx),
+            MagicEvent::StopTraining => {
+                if let Some(job) = &self.magic_tab.job {
+                    job.stop();
+                }
+            }
+            MagicEvent::AddDatasetFiles { node, negative } => {
+                let dialog = rfd::FileDialog::new().add_filter("Text datasets", &["jsonl", "json", "md", "txt"]);
+                let Some(paths) = dialog.pick_files() else { return };
+                let Some(doc) = &mut self.magic_tab.doc else { return };
+                let mut added = Vec::new();
+                for path in paths {
+                    let Ok(bytes) = std::fs::read(&path) else { continue };
+                    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    let file = std::iter::once(format!("data/text/{name}"))
+                        .chain((2..).map(|n| format!("data/text/{n}-{name}")))
+                        .find(|f| !doc.file.data.contains_key(f))
+                        .expect("a free name");
+                    doc.file.data.insert(file.clone(), bytes);
+                    added.push(file);
+                }
+                if let Some(block) = doc.studio.graph.node_mut(node) {
+                    let mut params: magi_core::nodes::studio::TextDataParams = block.params_or_default();
+                    let count = added.len();
+                    if negative {
+                        params.negative.extend(added)
+                    } else {
+                        params.positive.extend(added)
+                    }
+                    block.set_params(&params);
+                    self.toast(format!("{count} dataset files added"));
+                }
+            }
             MagicEvent::Open => self.magic_guarded(MagicPending::Open),
             MagicEvent::Import { folder } => self.magic_guarded(MagicPending::Import { folder }),
             MagicEvent::Save | MagicEvent::SaveAs => {
@@ -1924,23 +1974,23 @@ impl MagiApp {
             MagicEvent::PickArea => {
                 self.handle_request(ctx, UiRequest::Snip(crate::ui::SnipMode::Region, SnipTarget::MagicArea))
             }
-            MagicEvent::AddData { finetune, class } => {
+            MagicEvent::AddPictures { class, negative } => {
                 let dialog = rfd::FileDialog::new().add_filter("Pictures", &["png", "jpg", "jpeg", "bmp", "webp"]);
                 let Some(paths) = dialog.pick_files() else { return };
                 let Some(doc) = &mut self.magic_tab.doc else { return };
-                let folder = if finetune { "tune" } else { "train" };
+                let folder = if negative { "not" } else { "train" };
                 let mut added = 0;
                 for path in paths {
                     let Ok(bytes) = std::fs::read(&path) else { continue };
                     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                    let file = format!("data/{folder}/{class}/{added:04}-{name}");
+                    let Some(file) = (0..)
+                        .map(|n| format!("data/{folder}/{class}/{n:04}-{name}"))
+                        .find(|f| !doc.file.data.contains_key(f))
+                    else {
+                        continue;
+                    };
                     doc.file.data.insert(file.clone(), bytes);
-                    let item = magi_core::magic::DataItem { file, class };
-                    if finetune {
-                        doc.file.model.finetune.push(item)
-                    } else {
-                        doc.file.model.training.push(item)
-                    }
+                    doc.file.model.training.push(magi_core::magic::DataItem { file, class, negative });
                     added += 1;
                 }
                 self.toast(format!("{added} pictures added"));
@@ -1982,6 +2032,38 @@ impl MagiApp {
         }
     }
 
+    /// Trains the Magic tab's model as its canvas says, in the background.
+    fn start_training(&mut self, ctx: &egui::Context) {
+        if self.magic_tab.training() {
+            return;
+        }
+        let Some(doc) = &self.magic_tab.doc else { return };
+        if let Some(problem) = doc.training_problem() {
+            return self.toast_error(problem);
+        }
+        let Ok(pipeline) = magi_core::nodes::studio::pipeline(&doc.studio.graph) else { return };
+        let python = self
+            .python_for_packages()
+            .or_else(|| magi_engine::python::resolve_interpreter(&self.python_config()).map(|(path, _)| path));
+        let Some(python) = python else {
+            return self.toast_error("Training needs Python with PyTorch. Install them under Settings › AI.");
+        };
+        let runtime = match magi_engine::python::runtime_dir(&self.paths.data_dir) {
+            Ok(dir) => dir,
+            Err(error) => return self.toast_error(format!("The trainer could not be unpacked: {error}")),
+        };
+        let request = crate::magic::train::Request {
+            python,
+            runtime,
+            work: self.paths.data_dir.join("training"),
+            file: doc.file.clone(),
+            graph: doc.studio.graph.clone(),
+            pipeline,
+        };
+        let repaint = ctx.clone();
+        self.magic_tab.job = Some(crate::magic::train::TrainJob::start(request, move || repaint.request_repaint()));
+    }
+
     /// Puts the Magic tab's model into the open macro – replacing an earlier
     /// version of it, if the macro has one – with blocks that run it.
     fn use_model_in_macro(&mut self) {
@@ -2004,7 +2086,7 @@ impl MagiApp {
         let id = project.assets.add_model(name.clone(), bytes);
         let mut updated = 0;
         for node in project.graph.nodes_mut() {
-            if matches!(node.kind.as_str(), ids::AI_WATCH | ids::AI_CLASSIFY)
+            if matches!(node.kind.as_str(), ids::AI_WATCH | ids::AI_CLASSIFY | ids::AI_AGENT)
                 && let Some(current) = node.param::<String>("model")
                 && previous.contains(&current)
                 && current != id
@@ -2020,14 +2102,14 @@ impl MagiApp {
             }
         }
         let uses = project.graph.nodes().any(|n| {
-            matches!(n.kind.as_str(), ids::AI_WATCH | ids::AI_CLASSIFY)
+            matches!(n.kind.as_str(), ids::AI_WATCH | ids::AI_CLASSIFY | ids::AI_AGENT)
                 && n.param::<String>("model").as_deref() == Some(id.as_str())
         });
         if !uses {
             let mut blocks =
                 model.blocks.clone().unwrap_or_else(|| crate::magic::starter_blocks(&model, &id, &self.registry));
             for node in &mut blocks.nodes {
-                if matches!(node.kind.as_str(), ids::AI_WATCH | ids::AI_CLASSIFY) {
+                if matches!(node.kind.as_str(), ids::AI_WATCH | ids::AI_CLASSIFY | ids::AI_AGENT) {
                     node.set_param("model", &id);
                 }
             }
@@ -2062,6 +2144,16 @@ impl MagiApp {
                 cmd && (i.key_pressed(egui::Key::Y) || (i.modifiers.shift && i.key_pressed(egui::Key::Z))),
             )
         });
+        // On the Magic tab they are about the model.
+        if self.settings.tab == Tab::Magic {
+            if (save || save_as) && self.magic_tab.doc.is_some() {
+                self.save_magic(save_as);
+            }
+            if open {
+                self.magic_guarded(MagicPending::Open);
+            }
+            return;
+        }
         if save {
             self.save(false);
         }
@@ -3060,6 +3152,40 @@ mod tests {
         let import = harness.get_by_label_contains("Import a .mp file").rect();
         assert!(row.width() <= 260.0 && import.width() <= 260.0, "{row:?} {import:?}");
         harness.state_mut().presets.delete(&path);
+    }
+
+    #[test]
+    fn every_block_of_the_magic_canvas_opens_its_settings() {
+        let mut harness = app_sized(1280.0, 900.0);
+        harness.state_mut().settings.tab = Tab::Magic;
+        for text in [true, false] {
+            let doc = MagicDoc::new(crate::magic::new_model(text), None, Vec::new());
+            harness.state_mut().set_magic_doc(Some(doc));
+            harness.run_steps(4);
+            // Every kind of block, added to the canvas and selected.
+            let kinds: Vec<String> = crate::ui::magic_tab::registry().iter().map(|def| def.id.clone()).collect();
+            for kind in kinds {
+                let state = harness.state_mut();
+                let tab = &mut state.magic_tab;
+                let doc = tab.doc.as_mut().unwrap();
+                let at = tab.view.view_center();
+                let node = tab.view.add_node(&mut doc.studio, crate::ui::magic_tab::registry(), &kind, at).unwrap();
+                tab.view.selection = [node].into();
+                harness.run_steps(3);
+            }
+        }
+        // A model from before the canvas opens with its setup as blocks.
+        let old = magic_doc().file;
+        harness.state_mut().set_magic_doc(Some(MagicDoc::new(old, Some("old.magic".into()), Vec::new())));
+        harness.run_steps(3);
+        let doc = harness.state().magic_tab.doc.as_ref().unwrap();
+        assert!(doc.studio.graph.nodes().any(|n| n.kind == magi_core::nodes::studio::kinds::ANSWERS));
+        assert!(!doc.is_dirty(), "opening it changes nothing");
+        // A change to a dataset's text is a change to the model.
+        let doc = harness.state_mut().magic_tab.doc.as_mut().unwrap();
+        doc.file.data.insert("data/text/a.jsonl".into(), b"{}".to_vec());
+        doc.files_changed();
+        assert!(doc.is_dirty() && doc.would_lose_changes());
     }
 
     /// A tiny model with one adjustable setting, as the Magic tab would hold it.

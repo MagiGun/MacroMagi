@@ -222,6 +222,12 @@ AI Watch and AI Model have `model` (the id of a `model` asset) and `settings`: v
 "params": { "model": "mdl-3a…", "settings": { "thresh": 60 }, "display": 0, "press": true, "duration_ms": 0, "max_fps": 0 }
 ```
 
+AI Agent (`ai.agent`) runs a text model. `max_tokens` 0 and `temperature` below 0 use the model's own settings.
+
+```json
+"params": { "model": "mdl-7c…", "request": "Say hello", "run_tools": false, "max_tokens": 0, "temperature": -1 }
+```
+
 ### Recordings
 
 A recording is a list of **strokes** – one per thing the user did – rather than a raw event log.
@@ -353,14 +359,19 @@ A nodes preset may also carry `groups` whose blocks are all in it. When it is in
 
 ## `.magic` – AI models
 
-A `.magic` file is a ZIP archive holding a small vision model and everything needed to use it. The Magic tab reads and writes it; macros embed it as a `model` asset.
+A `.magic` file is a ZIP archive holding a small AI model – a vision model or a text model – and everything needed to use it and train it further. The Magic tab reads and writes it; macros embed it as a `model` asset.
 
 ```text
 magic.json                    required – the description below
 model/model.onnx              the model, in ONNX format (left out when include.model is false)
-data/train/<class>/<file>     training pictures, one folder per class (optional)
-data/tune/<class>/<file>      fine-tuning pictures, one folder per class (optional)
+model/weights.safetensors     its weights, to train it further (models trained in MacroMagi; optional)
+data/text/<file>              text datasets: .jsonl, .md or .txt (optional)
+data/train/<class>/<file>     pictures of each answer, one folder per class (optional)
+data/not/<class>/<file>       pictures an answer was mistaken for (optional)
+data/tune/<class>/<file>      fine-tuning pictures of earlier versions (optional)
 ```
+
+The weights are in the [safetensors](https://github.com/huggingface/safetensors) layout: an 8-byte header length, a JSON header, then raw little-endian tensors. They are data only; loading them runs no code.
 
 ### `magic.json`
 
@@ -399,9 +410,33 @@ data/tune/<class>/<file>      fine-tuning pictures, one folder per class (option
 | `settings` | Adjustable settings, shown as sliders in the Magic tab and in each AI block. `kind` is `percent` or `milliseconds`. Each sets its `targets`: `{ "kind": "threshold", "class": n }`, `{ "kind": "delay", "class": n }`, `{ "kind": "cooldown" }` or `{ "kind": "hold" }`. A setting's `value` is applied over the values it targets. |
 | `blocks` | Optional. Blocks to use the model with – `nodes`, `wires` and `groups` as in a [nodes preset](#kind-nodes), without assets; added to a macro along with the model. |
 | `include` | What the archive holds besides `magic.json`: the model, the blocks, training pictures, fine-tuning pictures. |
-| `training`, `finetune` | The pictures under `data/`, each with the class it shows. |
+| `training`, `finetune` | The pictures under `data/`, each with the class it shows. `negative: true` marks a picture of what the class is *not*. |
+| `kind` | `vision` (the default, and what files without it are) or `text`. |
+| `text` | Text models: how they read and write – see below. |
+| `architecture` | The shape of a model trained in MacroMagi: `width`, `heads` and `blocks`, each `{ "kind": …, "params": {…} }` with `kind` one of `transformer`, `sparse_attention`, `moe`, `prefix_split`, `ssm`, `persona_router`, `conv`. |
+| `studio` | The Magic tab's canvas: `nodes`, `wires` and `groups` as in a [nodes preset](#kind-nodes), with the Magic tab's block types (`magic.*`, listed in [MAGIC.md](MAGIC.md#blocks)). Files without it get a canvas built from their description. |
+| `datasets` | The text datasets in the archive, by path (`data/text/…`). |
+| `trained` | What training the model went through: `stages` (`pretrain`, `sft`, `rl`, `compaction`, `vision`), `steps`, the final `loss`, `parameters`. |
+| `include` | Also `weights` (`model/weights.safetensors`) and `datasets`. |
 
-A model asset inside a `.magi` file is the same archive with `training`, `finetune` and their pictures left out.
+A text model's `text`:
+
+```json
+"text": {
+  "specials": ["<|end|>", "<|system|>", "<|user|>", "<|assistant|>", "<think>", "</think>", "<tool>", "</tool>", "<compact>", "</compact>"],
+  "context": 256,
+  "system_tag": "<|system|>", "user_tag": "<|user|>", "assistant_tag": "<|assistant|>", "end_tag": "<|end|>",
+  "think_tags": ["<think>", "</think>"], "tool_tags": ["<tool>", "</tool>"], "compact_tags": ["<compact>", "</compact>"],
+  "personas": [ { "name": "Gun", "tag": "<gun>", "role": "Strict code and tool execution" } ],
+  "tools": [ { "name": "press", "description": "taps a key", "parameters": { "type": "object", "properties": { "key": { "type": "string" } } } } ],
+  "system": "You press keys for the user.",
+  "temperature": 0.7, "top_k": 40, "max_tokens": 200
+}
+```
+
+Tokens are the 256 byte values of UTF-8 text (ids 0–255), then each of `specials` in order (ids 256 on); special tags are matched longest first. A request is `system_tag system end_tag user_tag request end_tag assistant_tag` (the system part only when there is one), and the answer ends at `end_tag`. Tool calls are `tool_tags.0` + `{"name": …, "args": {…}}` + `tool_tags.1`. The ONNX model takes `tokens` (int64, `[1, length]`) and gives `logits` (`[1, length, vocabulary]`).
+
+A model asset inside a `.magi` file is the same archive with `training`, `finetune`, the datasets, the weights and their files left out.
 
 ## Shared vocabulary
 
@@ -424,5 +459,5 @@ A model asset inside a `.magi` file is the same archive with `training`, `finetu
 `version` is a single integer per format, currently `1` for all three.
 
 - A reader **rejects** files with a higher version than it knows, with a message asking the user to update.
-- Within a version, changes are additive: new optional fields with defaults, new block types, new stroke types. Readers ignore fields they do not know. (`options`, `clicker`, `look` strokes and the extended Auto Clicker settings were added this way in 0.1.0; `variables`, bound settings, `groups`, `display` on positions and areas, the `key_down`/`key_up`/`mouse_down`/`mouse_up`/`display` strokes and `audio` assets in 0.1.1; `model` assets, image and sound lists with groups, `mode`, `detail`, `match_ms`, `device` and the variables' `reset` in 0.1.2; group `parent`, the `input.autotype` and `vision.read_text` blocks, AI Watch's `acted` output and mouse buttons as a model's key in 0.1.3; the `vision.screenshot`, `window.display`, `window.current` and `files.*` blocks, Image Detection's `picture` input and the Auto Typer's `ignore` in 0.1.4. Files from earlier versions load unchanged; earlier versions may refuse files that use later additions.)
+- Within a version, changes are additive: new optional fields with defaults, new block types, new stroke types. Readers ignore fields they do not know. (`options`, `clicker`, `look` strokes and the extended Auto Clicker settings were added this way in 0.1.0; `variables`, bound settings, `groups`, `display` on positions and areas, the `key_down`/`key_up`/`mouse_down`/`mouse_up`/`display` strokes and `audio` assets in 0.1.1; `model` assets, image and sound lists with groups, `mode`, `detail`, `match_ms`, `device` and the variables' `reset` in 0.1.2; group `parent`, the `input.autotype` and `vision.read_text` blocks, AI Watch's `acted` output and mouse buttons as a model's key in 0.1.3; the `vision.screenshot`, `window.display`, `window.current` and `files.*` blocks, Image Detection's `picture` input and the Auto Typer's `ignore` in 0.1.4; the `ai.agent` block and the `.magic` fields `kind`, `text`, `architecture`, `studio`, `datasets`, `trained`, `negative` and the weights in 0.1.5. Files from earlier versions load unchanged; earlier versions may refuse files that use later additions.)
 - A change that old readers would misread bumps the version, and the new reader migrates old files on load.

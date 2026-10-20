@@ -597,6 +597,11 @@ fn perform(cx: &mut RunCx, op: &str, args: &Value) -> OpResult<Value> {
         "clipboard" => Ok(Value::String(cx.clipboard()?)),
         "sound_level" => Ok(Value::Object(cx.sound_level(&arg(args, "params")?)?)),
         "ai_classify" => Ok(Value::Object(cx.ai_classify(&arg(args, "params")?)?)),
+        "ai_agent" => {
+            let wired: Option<bool> = arg(args, "wired")?;
+            let value = wired.unwrap_or(false).then(|| args.get("value").cloned().unwrap_or(Value::Null));
+            Ok(Value::Object(cx.ai_agent(&arg(args, "params")?, value, arg(args, "node")?)?))
+        }
         "ai_watch" => {
             let returning: Option<bool> = arg(args, "returning")?;
             let step = cx.ai_watch(&arg(args, "params")?, arg(args, "node")?, returning.unwrap_or(false))?;
@@ -674,7 +679,7 @@ pub fn resolve_interpreter(config: &PythonConfig) -> Option<(PathBuf, String)> {
 }
 
 /// Where the runtime sources live, unpacking the built-in copy if needed.
-fn runtime_dir(data_dir: &Path) -> std::io::Result<PathBuf> {
+pub fn runtime_dir(data_dir: &Path) -> std::io::Result<PathBuf> {
     if let Some(dir) = std::env::var_os(RUNTIME_OVERRIDE_ENV) {
         return Ok(PathBuf::from(dir));
     }

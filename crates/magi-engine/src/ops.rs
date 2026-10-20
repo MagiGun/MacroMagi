@@ -17,7 +17,7 @@ use magi_core::graph::NodeId;
 use magi_core::host::{Frame, Host, Notification, SoundSource, TextWord, WindowInfo, WindowQuery};
 use magi_core::input::{Button, InputEvent, Key};
 use magi_core::magic::Decision;
-use magi_core::nodes::ai::{AiParams, AiWatchParams};
+use magi_core::nodes::ai::{AiAgentParams, AiParams, AiWatchParams};
 use magi_core::nodes::files::{
     FindTextParams, ListFolderParams, ListKind, MakeFolderParams, ReadFileParams, ReadMode, WriteFileParams, WriteMode,
 };
@@ -1273,6 +1273,92 @@ impl RunCx {
             .classify(&frame.rgba, frame.width, frame.height)
             .map_err(|e| EngineError::new(e.0))?;
         Ok(config.decide(&probabilities))
+    }
+
+    /// Asks a text model (an **AI Agent** block) and, if set to, carries out
+    /// the tool calls it knows. `wired` is the request wired into the block.
+    pub fn ai_agent(
+        &mut self,
+        params: &AiAgentParams,
+        wired: Option<Value>,
+        node: NodeId,
+    ) -> OpResult<serde_json::Map<String, Value>> {
+        let loaded = self.program.text_model(&params.model)?;
+        let request = match wired {
+            Some(value) => as_text(&value),
+            None => params.request.clone(),
+        };
+        if request.trim().is_empty() {
+            return Err(EngineError::new("the AI Agent block has no request").into());
+        }
+        let seed =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64);
+        let answer = {
+            let mut model = loaded.model.lock().unwrap_or_else(|p| p.into_inner());
+            magi_ml::ask(
+                &mut model,
+                &loaded.spec,
+                &request,
+                params.max_tokens as usize,
+                params.temperature as f32,
+                seed,
+            )
+            .map_err(|e| EngineError::new(e.0))?
+        };
+        if params.run_tools {
+            for call in &answer.tools {
+                self.agent_tool(call, node)?;
+            }
+        }
+        let first = answer.tools.first();
+        let mut outputs = serde_json::Map::new();
+        outputs.insert("answer".into(), Value::String(answer.text.clone()));
+        outputs.insert("thinking".into(), Value::String(answer.thinking.clone()));
+        outputs.insert("tool".into(), Value::String(first.map(|c| c.name.clone()).unwrap_or_default()));
+        outputs.insert("args".into(), Value::String(first.map(|c| c.args.to_string()).unwrap_or_default()));
+        outputs.insert("calls".into(), serde_json::json!(answer.tools.len()));
+        outputs.insert("raw".into(), Value::String(answer.raw));
+        Ok(outputs)
+    }
+
+    /// Carries out one tool call of an AI Agent block. Tools MacroMagi does
+    /// not know are left to the blocks after it.
+    fn agent_tool(&mut self, call: &magi_core::magic::ToolCall, node: NodeId) -> OpResult<()> {
+        let text = |key: &str| call.args.get(key).map(as_text).unwrap_or_default();
+        let number = |key: &str| call.args.get(key).and_then(as_number);
+        match call.name.as_str() {
+            "press" => {
+                let name = text("key");
+                let key = serde_json::from_value::<Key>(Value::String(name.clone()))
+                    .ok()
+                    .or_else(|| Key::ALL.iter().copied().find(|k| k.label().eq_ignore_ascii_case(name.trim())))
+                    .ok_or_else(|| {
+                        EngineError::new(format!("the model asked to press “{name}”, which is not a key"))
+                    })?;
+                self.perform_actions(&ActionParams { actions: vec![InputAction::tap(key)], hold_ms: 30.0 }, None)?;
+            }
+            "type" => self.send(&InputEvent::Text { text: text("text") })?,
+            "move" | "click" => {
+                if let (Some(x), Some(y)) = (number("x"), number("y")) {
+                    self.send(&InputEvent::MoveTo { x: x as i32, y: y as i32 })?;
+                }
+                if call.name == "click" {
+                    let button = match text("button").to_lowercase().as_str() {
+                        "right" => magi_core::input::MouseButton::Right,
+                        "middle" => magi_core::input::MouseButton::Middle,
+                        _ => magi_core::input::MouseButton::Left,
+                    };
+                    self.perform_actions(
+                        &ActionParams { actions: vec![InputAction::click(button)], hold_ms: 20.0 },
+                        None,
+                    )?;
+                }
+            }
+            "wait" => self.sleep_ms(number("ms").unwrap_or(0.0).clamp(0.0, 60_000.0))?,
+            "log" => self.monitor.log(LogLevel::Info, Some(node), text("text")),
+            _ => {}
+        }
+        Ok(())
     }
 
     /// Asks an AI model about the screen once (an **AI Model** block).

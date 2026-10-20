@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use magi_audio::Fingerprint;
 use magi_core::assets::AssetStore;
 use magi_core::graph::{Graph, Node, NodeId};
-use magi_core::magic::{MagicFile, MagicModel};
+use magi_core::magic::{MagicFile, MagicModel, ModelKind};
 use magi_core::nodes::flow::DefineParams;
 use magi_core::nodes::{EngineSupport, NodePorts, Registry, ids};
 use magi_core::project::Project;
@@ -31,6 +31,8 @@ pub struct Program {
     images: Mutex<HashMap<(String, u32), Arc<Bitmap>>>,
     /// AI models, loaded on first use.
     models: Mutex<HashMap<String, Arc<LoadedModel>>>,
+    /// Text models, loaded on first use.
+    text_models: Mutex<HashMap<String, Arc<LoadedText>>>,
     /// Fingerprints of the sounds listened for, by id and how much of the
     /// sound is used (whole milliseconds; 0 for all of it), filled in on first use.
     sounds: Mutex<HashMap<(String, u64), Arc<Fingerprint>>>,
@@ -46,6 +48,7 @@ impl Program {
             images: Mutex::new(HashMap::new()),
             sounds: Mutex::new(HashMap::new()),
             models: Mutex::new(HashMap::new()),
+            text_models: Mutex::new(HashMap::new()),
         }
     }
 
@@ -144,9 +147,34 @@ impl Program {
         if file.onnx.is_empty() {
             return Err(EngineError::new("this .magic file does not include the model itself"));
         }
+        if file.model.kind == ModelKind::Text {
+            return Err(EngineError::new("this is a text model: run it with an AI Agent block"));
+        }
         let model = magi_ml::Model::load(&file.onnx, &file.model.input).map_err(|e| EngineError::new(e.0))?;
         let loaded = Arc::new(LoadedModel { spec: file.model, model: Mutex::new(model) });
         self.models.lock().unwrap_or_else(|p| p.into_inner()).insert(id.to_owned(), Arc::clone(&loaded));
+        Ok(loaded)
+    }
+
+    /// A text model, loaded on first use.
+    pub fn text_model(&self, id: &str) -> Result<Arc<LoadedText>, EngineError> {
+        if id.is_empty() {
+            return Err(EngineError::new("no AI model has been chosen"));
+        }
+        if let Some(model) = self.text_models.lock().unwrap_or_else(|p| p.into_inner()).get(id) {
+            return Ok(Arc::clone(model));
+        }
+        let bytes = self.assets.model(id).ok_or_else(|| EngineError::new(format!("model `{id}` is missing")))?;
+        let file = MagicFile::from_bytes(bytes).map_err(|e| EngineError::new(e.to_string()))?;
+        let Some(spec) = file.model.text.clone().filter(|_| file.model.kind == ModelKind::Text) else {
+            return Err(EngineError::new("this is a vision model: run it with an AI Watch or AI Model block"));
+        };
+        if file.onnx.is_empty() {
+            return Err(EngineError::new("this .magic file does not include the model itself; train it first"));
+        }
+        let model = magi_ml::TextModel::load(&file.onnx, spec.context as usize).map_err(|e| EngineError::new(e.0))?;
+        let loaded = Arc::new(LoadedText { spec, model: Mutex::new(model) });
+        self.text_models.lock().unwrap_or_else(|p| p.into_inner()).insert(id.to_owned(), Arc::clone(&loaded));
         Ok(loaded)
     }
 
@@ -192,6 +220,11 @@ impl Program {
 }
 
 /// An AI model of the macro, loaded.
+pub struct LoadedText {
+    pub spec: magi_core::magic::TextSpec,
+    pub model: Mutex<magi_ml::TextModel>,
+}
+
 pub struct LoadedModel {
     /// Its configuration, as saved (before a block's own settings).
     pub spec: MagicModel,
