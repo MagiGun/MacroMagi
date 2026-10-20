@@ -574,6 +574,75 @@ fn apply_settings(magic: &mut MagicModel, map: &serde_json::Map<String, serde_js
     *magic = magic.configured(&serde_json::Map::new());
 }
 
+/// A GGUF model (from LM Studio, Hugging Face, Ollama… or trained here): it
+/// stays where it is, and the `.magic` file points at it. It runs with
+/// llama.cpp (Settings › Runtime).
+pub fn import_gguf(path: &Path) -> Result<Imported, String> {
+    use std::io::Read;
+    let mut head = Vec::new();
+    // The metadata is at the start; a vocabulary can take a few megabytes of it.
+    std::fs::File::open(path)
+        .and_then(|f| f.take(96 * 1024 * 1024).read_to_end(&mut head))
+        .map_err(|e| format!("could not read {}: {e}", path.display()))?;
+    let (meta, tensors) = magi_core::export::read_gguf_metadata(&head).map_err(|e| e.to_string())?;
+    let text = |key: &str| meta.get(key).and_then(|v| v.as_str()).map(str::to_owned).unwrap_or_default();
+    let architecture = text("general.architecture");
+    let context = meta.get(&format!("{architecture}.context_length")).and_then(|v| v.as_u64()).unwrap_or(4096);
+    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = Some(text("general.name")).filter(|n| !n.trim().is_empty()).unwrap_or(stem);
+    let mut spec = magi_core::magic::TextSpec {
+        context: context.min(8192) as u32,
+        temperature: 0.7,
+        max_tokens: 512,
+        ..Default::default()
+    };
+    for (tool, about) in magi_core::nodes::ai::AGENT_TOOLS {
+        spec.tools.push(super::agent_tool(tool, about));
+    }
+    // A model MacroMagi exported carries its own text settings and shape: it is asked in its own tokens.
+    let own_text: Option<magi_core::magic::TextSpec> = serde_json::from_str(&text("macromagi.text")).ok();
+    let own_architecture: Option<magi_core::magic::Architecture> =
+        serde_json::from_str(&text("macromagi.architecture")).ok();
+    if let Some(own) = &own_text {
+        spec = own.clone();
+    }
+    let mut model = magi_core::magic::MagicModel {
+        kind: magi_core::magic::ModelKind::Text,
+        architecture: own_architecture.filter(|_| own_text.is_some()),
+        name: name.clone(),
+        description: text("general.description"),
+        author: text("general.author"),
+        license: text("general.license"),
+        source: path.display().to_string(),
+        text: Some(spec),
+        gguf: Some(path.display().to_string()),
+        ..Default::default()
+    };
+    model.studio = Some(magi_core::nodes::studio::default_canvas(&model, false, true, &[]));
+    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let mut notes = if own_text.is_some() {
+        vec!["Trained in MacroMagi: it keeps its own chat tags, tools and tokens.".to_owned()]
+    } else {
+        Vec::new()
+    };
+    notes.extend([
+        format!("A {architecture} model with {tensors} tensors ({:.1} GB). It stays where it is; the .magic file points at it.", size as f64 / 1e9),
+        format!("It reads up to {context} tokens; MacroMagi gives it {} at a time.", context.min(8192)),
+        if own_text.is_some() {
+            "It answers in MacroMagi's own way: thinking, tool calls and all.".to_owned()
+        } else {
+            "It answers through its own chat template; MacroMagi's tools are explained to it in its system prompt (Text & Tools).".to_owned()
+        },
+    ]);
+    if !meta.contains_key("tokenizer.chat_template") {
+        notes.push("It has no chat template, so it may answer oddly to requests.".to_owned());
+    }
+    if !text("general.license").is_empty() {
+        notes.push(format!("Licence: {}.", text("general.license")));
+    }
+    Ok(Imported { file: MagicFile { model, ..MagicFile::default() }, notes })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

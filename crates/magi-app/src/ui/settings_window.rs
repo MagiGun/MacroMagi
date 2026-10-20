@@ -1,6 +1,6 @@
 //! The settings window: movable and resizable, one page per topic.
 
-use egui::{Color32, RichText, Ui, vec2};
+use egui::{Color32, DragValue, RichText, Ui, vec2};
 use egui_phosphor::regular as icon;
 use magi_core::graph::NodeId;
 use magi_core::hotkey::Hotkey;
@@ -53,8 +53,12 @@ pub struct SettingsEnv<'a> {
     /// The Python downloaded from this page, if there is one.
     pub python_downloaded: Option<std::path::PathBuf>,
     pub gpus: &'a [magi_platform::gpu::Gpu],
-    /// The optional downloads and where each stands (empty until worked out).
-    pub components: &'a [(Component, ComponentStatus)],
+    pub machine: &'a magi_platform::system::Machine,
+    /// Where the optional parts stand, and what PyTorch and llama.cpp see (`None` until worked out).
+    pub runtime: Option<&'a crate::components::RuntimeReport>,
+    pub checking_runtime: bool,
+    /// The Python AI uses: the one macros use.
+    pub ai_python: Option<&'a (std::path::PathBuf, String)>,
     /// The part being installed or removed, what it is doing, and the share done when known.
     pub installing: Option<(Component, String, Option<f32>)>,
 }
@@ -129,7 +133,7 @@ impl SettingsWindow {
         }
         let mut open = true;
         let screen = ctx.content_rect();
-        let default = settings.settings_size.map_or(vec2(480.0, 540.0), |[w, h]| vec2(w, h));
+        let default = settings.settings_size.map_or(vec2(600.0, 620.0), |[w, h]| vec2(w, h));
         let response = egui::Window::new(format!("{}  Settings", icon::GEAR))
             .id(egui::Id::new("settings-window"))
             .open(&mut open)
@@ -166,7 +170,8 @@ impl SettingsWindow {
                     SettingsPage::Hotkeys => hotkeys(ui, settings, env, events),
                     SettingsPage::Recording => recording(ui, settings),
                     SettingsPage::Engine => engine(ui, settings, env, events),
-                    SettingsPage::Ai => ai(ui, settings, env, events),
+                    SettingsPage::Runtime => runtime(ui, settings, env, events),
+                    SettingsPage::Hardware => hardware(ui, settings, env, events),
                 }
                 ui.add_space(8.0);
             });
@@ -196,7 +201,8 @@ impl SettingsWindow {
                             SettingsPage::Hotkeys => icon::KEYBOARD,
                             SettingsPage::Recording => icon::RECORD,
                             SettingsPage::Engine => icon::LIGHTNING,
-                            SettingsPage::Ai => icon::BRAIN,
+                            SettingsPage::Runtime => icon::PULSE,
+                            SettingsPage::Hardware => icon::CPU,
                         };
                         let selected = settings.settings_page == page;
                         let text = RichText::new(format!("{glyph}  {}", page.label())).color(if selected {
@@ -747,7 +753,10 @@ fn engine(ui: &mut Ui, settings: &mut Settings, env: &SettingsEnv<'_>, events: &
         }
         None => {
             // Without the full check (which the AI page runs), whether the folder is there is enough.
-            let known = env.components.iter().find(|(c, _)| *c == Component::Python).map(|(_, s)| s.clone());
+            let known = env
+                .runtime
+                .and_then(|r| r.statuses.iter().find(|(c, _)| *c == Component::Python))
+                .map(|(_, s)| s.clone());
             let status = known.unwrap_or_else(|| match &env.python_downloaded {
                 Some(path) => ComponentStatus::Installed { bytes: 0, detail: path.display().to_string() },
                 None => ComponentStatus::Missing,
@@ -798,9 +807,7 @@ fn component_card(
                 let idle = installing.is_none();
                 ui.horizontal_wrapped(|ui| {
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                    // PyTorch found in the Python macros use can be uninstalled from it too.
-                    let installed = matches!(status, Some(ComponentStatus::Installed { .. }))
-                        || (component == Component::PyTorch && matches!(status, Some(ComponentStatus::OnSystem(_))));
+                    let installed = matches!(status, Some(ComponentStatus::Installed { .. }));
                     let found = matches!(status, Some(ComponentStatus::OnSystem(_)));
                     if !installed && !found {
                         let label = format!("{}  Install ({})", icon::DOWNLOAD_SIMPLE, component.size());
@@ -819,16 +826,388 @@ fn component_card(
     });
 }
 
-fn ai(ui: &mut Ui, settings: &mut Settings, env: &SettingsEnv<'_>, events: &mut Vec<SettingsEvent>) {
-    // PyTorch lives in the Python macros use: find that first (the statuses follow).
+/// The Python AI training uses: the one macros use.
+fn ai_python_card(ui: &mut Ui, settings: &mut Settings, env: &SettingsEnv<'_>, events: &mut Vec<SettingsEvent>) {
+    egui::Frame::new().fill(theme::bg_raised()).corner_radius(theme::RADIUS).inner_margin(8).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(format!("{}  Python for AI", icon::FILE_PY)).strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let busy = env.checking_runtime || env.looking_for_python;
+                if ui
+                    .add_enabled(!busy, egui::Button::new(format!("{}  Check again", icon::ARROWS_CLOCKWISE)))
+                    .clicked()
+                {
+                    events.push(SettingsEvent::CheckComponents);
+                }
+                if ui.button("Change…").on_hover_text("Settings › Engine: the Python macros and training use").clicked()
+                {
+                    settings.settings_page = SettingsPage::Engine;
+                }
+                if busy {
+                    ui.spinner();
+                }
+            });
+        });
+        let text = match env.ai_python {
+            Some((path, version)) => format!("Python {version} – {}", path.display()),
+            None if env.looking_for_python => "Looking for Python…".to_owned(),
+            None => "No Python found. Download one under Settings › Engine.".to_owned(),
+        };
+        ui.add(egui::Label::new(RichText::new(text).size(11.5).color(theme::text_dim())).wrap());
+        widgets::note(
+            ui,
+            "Training runs in this Python, and PyTorch and onnx below are installed into it – the same Python \
+             macros use. Change it on the Engine page.",
+        );
+    });
+}
+
+/// One part, in the style of a list of engines: what it is, its version, and Install or Uninstall.
+fn runtime_row(
+    ui: &mut Ui,
+    component: Component,
+    env: &SettingsEnv<'_>,
+    recommended: bool,
+    events: &mut Vec<SettingsEvent>,
+) {
+    let status = env.runtime.and_then(|r| r.statuses.iter().find(|(c, _)| *c == component)).map(|(_, s)| s);
+    egui::Frame::new().fill(theme::bg_raised()).corner_radius(theme::RADIUS).inner_margin(8).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal_wrapped(|ui| {
+            let glyph = if component.kind() == "Engine" { icon::PULSE } else { icon::CUBE };
+            ui.label(RichText::new(glyph).color(theme::text_dim()));
+            ui.label(RichText::new(component.name()).strong());
+            let version = match status {
+                Some(ComponentStatus::Installed { detail, .. }) | Some(ComponentStatus::OnSystem(detail)) => {
+                    detail.split(" · ").next().unwrap_or_default().to_owned()
+                }
+                _ => String::new(),
+            };
+            if !version.is_empty() {
+                egui::Frame::new()
+                    .fill(theme::bg_widget())
+                    .corner_radius(4)
+                    .inner_margin(egui::Margin::symmetric(5, 1))
+                    .show(ui, |ui| {
+                        ui.label(RichText::new(version).monospace().size(10.5).color(theme::text_dim()));
+                    });
+            }
+            if recommended && !status.is_some_and(ComponentStatus::present) {
+                ui.label(RichText::new("Recommended here").size(10.5).color(theme::accent()));
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let idle = env.installing.is_none();
+                match (&env.installing, component.unavailable(), status) {
+                    (Some((busy, ..)), _, _) if *busy == component => {
+                        ui.spinner();
+                    }
+                    (_, Some(_), _) => {
+                        ui.label(RichText::new("Not offered here").size(11.0).color(theme::text_faint()));
+                    }
+                    (_, None, Some(ComponentStatus::RemovedAfterRestart)) => {
+                        ui.label(RichText::new("Removed at the next start").size(11.0).color(theme::warning()));
+                    }
+                    (_, None, Some(s)) if s.present() => {
+                        ui.menu_button(icon::DOTS_THREE_VERTICAL, |ui| {
+                            if ui.add_enabled(idle, egui::Button::new(format!("{}  Uninstall", icon::TRASH))).clicked()
+                            {
+                                events.push(SettingsEvent::Remove(component));
+                                ui.close();
+                            }
+                            if ui
+                                .add_enabled(
+                                    idle,
+                                    egui::Button::new(format!("{}  Install again (latest)", icon::ARROWS_CLOCKWISE)),
+                                )
+                                .clicked()
+                            {
+                                events.push(SettingsEvent::Install(component));
+                                ui.close();
+                            }
+                        });
+                        ui.label(
+                            RichText::new(format!("{}  Installed", icon::CHECK)).size(11.5).color(theme::success()),
+                        );
+                    }
+                    (_, None, None) if env.runtime.is_none() => {
+                        ui.label(RichText::new("…").color(theme::text_faint()));
+                    }
+                    _ => {
+                        let label = format!("{}  Install ({})", icon::DOWNLOAD_SIMPLE, component.size());
+                        if ui.add_enabled(idle, egui::Button::new(label)).clicked() {
+                            events.push(SettingsEvent::Install(component));
+                        }
+                    }
+                }
+            });
+        });
+        ui.add(egui::Label::new(RichText::new(component.description()).size(11.5).color(theme::text_dim())).wrap());
+        if let Some(Some((busy, message, share))) = Some(&env.installing)
+            && *busy == component
+        {
+            widgets::progress_bar(ui, *share);
+            ui.label(RichText::new(message).size(11.0).color(theme::text_dim()));
+        }
+        if let Some(reason) = component.unavailable() {
+            widgets::note(ui, reason);
+        }
+    });
+    ui.add_space(4.0);
+}
+
+fn runtime(ui: &mut Ui, settings: &mut Settings, env: &SettingsEnv<'_>, events: &mut Vec<SettingsEvent>) {
+    // Rows fit the window: their text wraps rather than running off to the side.
+    ui.set_max_width((ui.clip_rect().width() - 16.0).max(260.0));
+    // The packages live in the AI Python: find it first (the statuses follow).
     if env.pythons.is_none() && settings.python_path.is_none() {
         if !env.looking_for_python {
             events.push(SettingsEvent::FindPythons);
         }
-    } else if env.components.is_empty() {
+    } else if env.runtime.is_none() && !env.checking_runtime {
         events.push(SettingsEvent::CheckComponents);
     }
-    section(ui, "Where AI models run");
+    ui.horizontal(|ui| {
+        section(ui, "Runtime");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Max), |ui| {
+            let busy = env.checking_runtime || env.looking_for_python;
+            let label = if busy { "Checking…".to_owned() } else { format!("{}  Check again", icon::ARROWS_CLOCKWISE) };
+            if ui
+                .add_enabled(!busy, egui::Button::new(label))
+                .on_hover_text("Looks again at what is installed. MacroMagi also does this when it starts, and when something that needs these fails.")
+                .clicked()
+            {
+                events.push(SettingsEvent::CheckComponents);
+            }
+        });
+    });
+    widgets::note(
+        ui,
+        "What trains and runs AI models. Install what you need; uninstall it any time. Everything comes from its \
+         publisher: PyTorch's and Python's package indexes, Microsoft, and llama.cpp's releases.",
+    );
+    ai_python_card(ui, settings, env, events);
+    let nvidia = env.gpus.iter().find(|g| g.name.to_lowercase().contains("nvidia")).map(|g| g.name.clone());
+    let rtx50 = nvidia.as_ref().is_some_and(|n| n.contains("RTX 50"));
+
+    section(ui, "Training models");
+    for component in Component::TRAINING {
+        let recommended = match component {
+            Component::PyTorchCuda => nvidia.is_some(),
+            Component::PyTorch => nvidia.is_none(),
+            _ => true,
+        };
+        runtime_row(ui, component, env, recommended, events);
+    }
+    if let Some(torch) = env.runtime.and_then(|r| r.torch.as_ref())
+        && torch.cuda.is_none()
+        && let Some(card) = &nvidia
+    {
+        widgets::note(
+            ui,
+            format!(
+                "PyTorch here is the CPU build. With PyTorch for NVIDIA graphics cards, training uses your {card}."
+            ),
+        );
+    }
+
+    section(ui, "Running GGUF models (llama.cpp)");
+    widgets::note(
+        ui,
+        "GGUF is the format of LM Studio and Ollama models, and of text models trained here from Transformer Layers. \
+         One build is enough; Settings › Hardware chooses which one runs and on which cards.",
+    );
+    for component in Component::LLAMA {
+        let recommended = match component {
+            Component::LlamaCuda13 => rtx50,
+            Component::LlamaCuda12 => nvidia.is_some() && !rtx50,
+            Component::LlamaVulkan => nvidia.is_none() && !env.gpus.is_empty(),
+            _ => env.gpus.is_empty(),
+        };
+        runtime_row(ui, component, env, recommended, events);
+    }
+
+    section(ui, "Running ONNX models");
+    widgets::note(
+        ui,
+        "Models trained here and imported ONNX models run without these, on the built-in engine; these make them faster.",
+    );
+    for component in Component::ONNX {
+        runtime_row(ui, component, env, false, events);
+    }
+}
+
+fn hardware(ui: &mut Ui, settings: &mut Settings, env: &SettingsEnv<'_>, events: &mut Vec<SettingsEvent>) {
+    ui.set_max_width((ui.clip_rect().width() - 16.0).max(260.0));
+    if env.runtime.is_none() && !env.checking_runtime && (env.pythons.is_some() || settings.python_path.is_some()) {
+        events.push(SettingsEvent::CheckComponents);
+    }
+    ui.horizontal(|ui| {
+        section(ui, "This computer");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Max), |ui| {
+            let busy = env.checking_runtime;
+            let label =
+                if busy { "Checking…".to_owned() } else { format!("{}  Check again", icon::ARROWS_CLOCKWISE) };
+            if ui.add_enabled(!busy, egui::Button::new(label)).clicked() {
+                events.push(SettingsEvent::CheckComponents);
+            }
+        });
+    });
+    egui::Frame::new().fill(theme::bg_raised()).corner_radius(theme::RADIUS).inner_margin(8).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        egui::Grid::new("machine").num_columns(2).spacing([16.0, 4.0]).show(ui, |ui| {
+            ui.label(RichText::new("Processor").color(theme::text_dim()));
+            ui.label(format!("{} · {} threads", env.machine.cpu, env.machine.threads));
+            ui.end_row();
+            ui.label(RichText::new("Memory").color(theme::text_dim()));
+            ui.label(format!("{:.1} GB", env.machine.memory_mb as f64 / 1024.0));
+            ui.end_row();
+            for gpu in env.gpus {
+                ui.label(RichText::new("Graphics card").color(theme::text_dim()));
+                ui.label(format!("{} · {:.1} GB", gpu.name, gpu.memory_mb as f64 / 1024.0));
+                ui.end_row();
+            }
+            if env.gpus.is_empty() {
+                ui.label(RichText::new("Graphics card").color(theme::text_dim()));
+                ui.label(RichText::new("None found").color(theme::text_faint()));
+                ui.end_row();
+            }
+        });
+    });
+
+    section(ui, "Training");
+    let torch = env.runtime.and_then(|r| r.torch.as_ref());
+    let cards: Vec<String> = torch.map(|t| t.devices.clone()).unwrap_or_default();
+    match torch {
+        None if env.checking_runtime => widgets::note(ui, "Looking at PyTorch…"),
+        None => widgets::notice(
+            ui,
+            icon::INFO,
+            "Install PyTorch under Settings › Runtime to train models.",
+            theme::text_faint(),
+        ),
+        Some(t) if t.cuda.is_none() => widgets::notice(
+            ui,
+            icon::INFO,
+            "PyTorch here is the CPU build: training runs on the processor. Install PyTorch for NVIDIA graphics cards \
+             (Runtime) to train on a graphics card.",
+            theme::text_faint(),
+        ),
+        Some(_) if cards.is_empty() => widgets::notice(
+            ui,
+            icon::WARNING,
+            "PyTorch for NVIDIA is installed, but sees no NVIDIA graphics card.",
+            theme::warning(),
+        ),
+        Some(_) => {}
+    }
+    let mut mode = match &settings.train_gpus {
+        None => 0,
+        Some(list) if list.is_empty() => 1,
+        Some(_) => 2,
+    };
+    let before = mode;
+    widgets::segmented(ui, &mut mode, &[(0, "Automatic"), (1, "The CPU"), (2, "Chosen cards")]);
+    if mode != before {
+        settings.train_gpus = match mode {
+            0 => None,
+            1 => Some(Vec::new()),
+            _ => Some(if cards.is_empty() { Vec::new() } else { vec![0] }),
+        };
+    }
+    match &mut settings.train_gpus {
+        None => widgets::note(
+            ui,
+            match cards.first() {
+                Some(card) => format!("Trains on the {card}."),
+                None => "Trains on a graphics card when PyTorch can use one, else on the processor.".to_owned(),
+            },
+        ),
+        Some(list) if mode == 1 => {
+            list.clear();
+            widgets::note(ui, "Trains on the processor, even with a graphics card.");
+        }
+        Some(list) => {
+            if cards.is_empty() {
+                widgets::note(ui, "No graphics card PyTorch can use.");
+            }
+            for (index, card) in cards.iter().enumerate() {
+                let mut on = list.contains(&(index as u32));
+                if ui.checkbox(&mut on, format!("CUDA {index}: {card}")).changed() {
+                    if on {
+                        list.push(index as u32);
+                        list.sort_unstable();
+                    } else {
+                        list.retain(|i| *i != index as u32);
+                    }
+                }
+            }
+            if list.len() > 1 {
+                widgets::note(ui, "Several cards share each batch (data parallel): bigger batches train faster.");
+            }
+        }
+    }
+
+    section(ui, "GGUF models (llama.cpp)");
+    let installed: Vec<Component> = Component::LLAMA
+        .into_iter()
+        .filter(|c| env.runtime.is_some_and(|r| r.statuses.iter().any(|(x, s)| x == c && s.present())))
+        .collect();
+    if installed.is_empty() {
+        widgets::notice(
+            ui,
+            icon::INFO,
+            "Install llama.cpp under Settings › Runtime to run GGUF models.",
+            theme::text_faint(),
+        );
+    } else {
+        ui.horizontal(|ui| {
+            widgets::fixed_label(ui, RichText::new("Run with").color(theme::text_dim()), 140.0);
+            let shown = settings.llama_build.map_or("The most capable installed", |c| c.name());
+            widgets::combo("llama-build").selected_text(shown).show_ui(ui, |ui| {
+                let needle = widgets::combo_search(ui);
+                if widgets::option(ui, &needle, settings.llama_build.is_none(), "The most capable installed") {
+                    settings.llama_build = None;
+                }
+                for component in &installed {
+                    if widgets::option(ui, &needle, settings.llama_build == Some(*component), component.name()) {
+                        settings.llama_build = Some(*component);
+                    }
+                }
+            });
+        });
+        ui.horizontal(|ui| {
+            widgets::fixed_label(ui, RichText::new("On graphics cards").color(theme::text_dim()), 140.0);
+            let mut all = settings.llama_gpu_layers >= 999;
+            if ui.checkbox(&mut all, "The whole model").changed() {
+                settings.llama_gpu_layers = if all { 999 } else { 20 };
+            }
+            if !all {
+                ui.add(DragValue::new(&mut settings.llama_gpu_layers).range(0..=998).suffix(" layers"))
+                    .on_hover_text("0 keeps the model in system memory, on the processor");
+            }
+        });
+        let devices = env.runtime.map(|r| r.llama_devices.clone()).unwrap_or_default();
+        if !devices.is_empty() {
+            widgets::caption(ui, "Graphics cards to use (none ticked: llama.cpp chooses)");
+            for (id, description) in &devices {
+                let mut on = settings.llama_devices.contains(id);
+                if ui.checkbox(&mut on, format!("{id}: {description}")).changed() {
+                    if on {
+                        settings.llama_devices.push(id.clone());
+                    } else {
+                        settings.llama_devices.retain(|d| d != id);
+                    }
+                }
+            }
+            if settings.llama_devices.len() > 1 {
+                widgets::note(ui, "The model is split between the ticked cards by their memory.");
+            }
+        }
+        widgets::note(ui, "Changes apply the next time a GGUF model is asked something.");
+    }
+
+    section(ui, "ONNX models");
     let runtime = magi_ml::onnxruntime();
     let gpu_ready = runtime.as_ref().is_some_and(|(_, gpu)| *gpu);
     let label = |device: magi_ml::Device| match device {
@@ -863,39 +1242,15 @@ fn ai(ui: &mut Ui, settings: &mut Settings, env: &SettingsEnv<'_>, events: &mut 
         });
     widgets::note(
         ui,
-        "Automatic measures each way on every model and keeps the fastest – for tiny models that is often the \
-         CPU. Image Detection always runs on the CPU, where its coarse-to-fine search is fastest.",
-    );
-    widgets::note(
-        ui,
         match &runtime {
-            Some((path, true)) => format!("Using ONNX Runtime with graphics card support ({}).", path.display()),
-            Some((path, false)) => format!("Using ONNX Runtime on the CPU ({}).", path.display()),
-            None => "Using the built-in engine (CPU). ONNX Runtime makes models faster, and can use a graphics card."
-                .to_owned(),
+            Some((path, true)) => format!("Vision models and ONNX text models run with ONNX Runtime for graphics cards ({}).", path.display()),
+            Some((path, false)) => format!("ONNX models run with ONNX Runtime on the CPU ({}).", path.display()),
+            None => "ONNX models run on the built-in engine (CPU). ONNX Runtime (Runtime page) makes them faster and can use a graphics card.".to_owned(),
         },
     );
-
-    ui.horizontal(|ui| {
-        section(ui, "Downloads");
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Max), |ui| {
-            if ui.small_button(format!("{}  Check again", icon::ARROWS_CLOCKWISE)).clicked() {
-                events.push(SettingsEvent::CheckComponents);
-            }
-        });
-    });
-    widgets::note(
-        ui,
-        "Parts that some features need. Install them when you want those features; uninstall them any time.",
-    );
-    for component in Component::AI {
-        let status = env.components.iter().find(|(c, _)| *c == component).map(|(_, s)| s);
-        component_card(ui, component, status, env, events);
-        ui.add_space(4.0);
-    }
 }
 
-/// Who makes MacroMagi, with links to them.
+// Who makes MacroMagi, with links to them.
 pub fn about(ui: &mut Ui) {
     ui.label(RichText::new(format!("MacroMagi {}", magi_core::VERSION)).strong());
     ui.horizontal_wrapped(|ui| {

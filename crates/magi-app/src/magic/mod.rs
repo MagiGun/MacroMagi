@@ -13,12 +13,24 @@ use magi_core::geom::Displays;
 use magi_core::graph::{Fragment, Node, PortRef, Wire};
 use magi_core::host::Host;
 use magi_core::input::InputEvent;
-use magi_core::magic::{Decision, MagicFile, MagicModel, ModelKind};
+use magi_core::magic::{DataItem, Decision, MagicFile, MagicModel, ModelKind};
 use magi_core::nodes::ai::AiWatchParams;
 use magi_core::nodes::flow::StartParams;
 use magi_core::nodes::notes::CommentParams;
 use magi_core::nodes::{Registry, ids, ports, studio};
 use magi_core::project::Project;
+
+use crate::history::History;
+
+/// What undo and redo bring back: the canvas (the setup is in its blocks)
+/// and the pictures. Data files are only dropped when the model is saved,
+/// so undoing a removal finds them again.
+#[derive(Clone, PartialEq)]
+pub struct Snapshot {
+    graph: magi_core::graph::Graph,
+    training: Vec<DataItem>,
+    finetune: Vec<DataItem>,
+}
 
 /// The model open in the Magic tab.
 pub struct MagicDoc {
@@ -28,7 +40,8 @@ pub struct MagicDoc {
     pub notes: Vec<String>,
     /// The model's shapes, read when it was loaded.
     pub shape: Option<magi_ml::Shape>,
-    /// The Magic tab's canvas, kept in `file.model.studio` too.
+    /// The Magic tab's canvas, kept in `file.model.studio` too. The model's
+    /// settings are made from it (`studio::derive`).
     pub studio: Project,
     /// Bumped when the model, weights or data files change, which the
     /// description alone does not show.
@@ -37,41 +50,41 @@ pub struct MagicDoc {
     saved: Option<(MagicModel, u64)>,
     /// The description and revision as last put into the macro, where it is kept too.
     kept: Option<(MagicModel, u64)>,
+    history: History<Snapshot>,
 }
 
 impl MagicDoc {
     pub fn new(mut file: MagicFile, path: Option<PathBuf>, notes: Vec<String>) -> Self {
-        // The values the settings decide, as the tab keeps them, so a file
-        // written by hand does not look changed as soon as it is open.
-        file.model = file.model.configured(&serde_json::Map::new());
         let shape = (!file.onnx.is_empty()).then(|| magi_ml::inspect(&file.onnx).ok()).flatten();
         // A model from before the canvas gets one, built from its setup.
-        let canvas =
-            file.model.studio.take().unwrap_or_else(|| {
-                studio::default_canvas(&file.model, !file.weights.is_empty(), !file.onnx.is_empty())
-            });
+        let canvas = file.model.studio.take().unwrap_or_else(|| {
+            let datasets: Vec<(String, bool)> = file.model.datasets.iter().map(|f| (f.clone(), false)).collect();
+            studio::default_canvas(&file.model, !file.weights.is_empty(), !file.onnx.is_empty(), &datasets)
+        });
         let studio = Project { graph: magi_core::graph::Graph::from(canvas), ..Project::new() };
-        let mut doc = Self { file, path, notes, shape, studio, revision: 0, saved: None, kept: None };
+        let history = History::new(&Snapshot {
+            graph: studio.graph.clone(),
+            training: file.model.training.clone(),
+            finetune: file.model.finetune.clone(),
+        });
+        let mut doc = Self { file, path, notes, shape, studio, revision: 0, saved: None, kept: None, history };
         doc.sync_canvas();
+        doc.history = History::new(&doc.snapshot());
         doc.saved = doc.path.as_ref().map(|_| (doc.file.model.clone(), 0));
         doc
     }
 
-    /// Puts the model's setup on the canvas's inspector blocks, and the
-    /// canvas into the model.
+    /// Makes the model what the canvas says – its setup from the setup blocks
+    /// chained into the start, its datasets from the Text Dataset blocks –
+    /// notes what is not connected, and puts the canvas into the model.
     pub fn sync_canvas(&mut self) {
-        let model = &mut self.file.model;
-        // A model not trained yet is what its Start from Zero block makes.
-        if self.file.onnx.is_empty()
-            && let Some(zero) = self.studio.graph.nodes().find(|n| n.kind == studio::kinds::ZERO && n.enabled)
-        {
-            let params: studio::ZeroParams = zero.params_or_default();
-            model.kind = if params.kind == "vision" { ModelKind::Vision } else { ModelKind::Text };
+        let has_onnx = !self.file.onnx.is_empty();
+        studio::derive(&mut self.studio.graph, &mut self.file.model, has_onnx);
+        // The sliders' values, on what they change.
+        let configured = self.file.model.configured(&serde_json::Map::new());
+        if configured != self.file.model {
+            self.file.model = configured;
         }
-        if model.kind == ModelKind::Text && model.text.is_none() {
-            model.text = Some(magi_core::magic::TextSpec::default());
-        }
-        // The datasets are the Text Dataset blocks' files.
         let mut datasets: Vec<String> = Vec::new();
         for node in self.studio.graph.nodes().filter(|n| n.kind == studio::kinds::TEXT_DATA) {
             let params: studio::TextDataParams = node.params_or_default();
@@ -81,15 +94,54 @@ impl MagicDoc {
                 }
             }
         }
-        if model.datasets != datasets {
-            model.datasets = datasets;
+        if self.file.model.datasets != datasets {
+            self.file.model.datasets = datasets;
         }
-        let mut nodes: Vec<&mut magi_core::graph::Node> = self.studio.graph.nodes_mut().collect();
-        studio::refresh(&mut nodes, &self.file.model, self.file.onnx.len());
         let canvas: Fragment = self.studio.graph.clone().into();
         if self.file.model.studio.as_ref() != Some(&canvas) {
             self.file.model.studio = Some(canvas);
         }
+    }
+
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            graph: self.studio.graph.clone(),
+            training: self.file.model.training.clone(),
+            finetune: self.file.model.finetune.clone(),
+        }
+    }
+
+    /// Call once per frame; `settled` is false during a drag or while typing.
+    pub fn track_history(&mut self, settled: bool) {
+        let snapshot = self.snapshot();
+        self.history.track(&snapshot, settled);
+    }
+
+    pub fn can_undo(&self) -> bool {
+        self.history.can_undo(&self.snapshot())
+    }
+
+    pub fn can_redo(&self) -> bool {
+        self.history.can_redo()
+    }
+
+    pub fn undo(&mut self) {
+        let mut snapshot = self.snapshot();
+        self.history.undo(&mut snapshot);
+        self.restore(snapshot);
+    }
+
+    pub fn redo(&mut self) {
+        let mut snapshot = self.snapshot();
+        self.history.redo(&mut snapshot);
+        self.restore(snapshot);
+    }
+
+    fn restore(&mut self, snapshot: Snapshot) {
+        self.studio.graph = snapshot.graph;
+        self.file.model.training = snapshot.training;
+        self.file.model.finetune = snapshot.finetune;
+        self.sync_canvas();
     }
 
     /// Notes a change to the model, its weights or its data files.
@@ -106,13 +158,23 @@ impl MagicDoc {
         model.kind = trained.kind;
         model.architecture = Some(trained.architecture);
         model.trained = Some(trained.record);
-        if let Some(text) = trained.text {
-            model.text = Some(text);
-        }
         if let Some(input) = trained.input {
             model.input = input;
+            // The Picture Preparation block follows what the model was trained with.
+            let value = studio::section_of(studio::kinds::PREP, &self.file.model);
+            for node in self.studio.graph.nodes_mut().filter(|n| n.kind == studio::kinds::PREP) {
+                node.set_param("value", value.clone());
+            }
         }
         self.shape = magi_ml::inspect(&self.file.onnx).ok();
+        self.sync_canvas();
+    }
+
+    /// The Compile block's settings: the one on the Model wire, or any.
+    pub fn compile_settings(&self) -> Option<studio::CompileParams> {
+        studio::pipeline(&self.studio.graph).ok().and_then(|p| p.compile).map(|(_, params)| params).or_else(|| {
+            self.studio.graph.nodes().find(|n| n.kind == studio::kinds::COMPILE).map(|n| n.params_or_default())
+        })
     }
 
     /// Why the canvas cannot train the model now, if it cannot.
@@ -122,13 +184,26 @@ impl MagicDoc {
             Err(problem) => return Some(problem),
         };
         if !pipeline.trains() {
-            return Some("Add a training stage after the model's start to train it.".into());
+            return Some("Add a training stage after the model's start (and its architecture) to train it.".into());
         }
         if pipeline.entry.kind == studio::kinds::BASE
             && pipeline.entry.params_or_default::<studio::BaseParams>().path.trim().is_empty()
             && self.file.weights.is_empty()
         {
-            return Some("This model has no weights to train further: start from zero, or load a base model.".into());
+            return Some(
+                "This model has no weights to train further: use Start from Zero, or choose a base model file.".into(),
+            );
+        }
+        match &pipeline.compile {
+            None => {
+                return Some(
+                    "Put Compile .magic Package at the end of the Model wire: it saves the trained model.".into(),
+                );
+            }
+            Some((_, params)) if params.folder.trim().is_empty() => {
+                return Some("Choose the folder Compile .magic Package saves into (select the block).".into());
+            }
+            _ => {}
         }
         let pictures = self.file.model.training.len() + self.file.model.finetune.len();
         let files = studio::PlanFiles {
@@ -136,8 +211,113 @@ impl MagicDoc {
             weights: None,
             pictures: (pictures > 0).then(String::new),
             out_dir: String::new(),
+            devices: Vec::new(),
         };
         studio::plan(&pipeline, &self.studio.graph, &self.file.model, &files).err()
+    }
+
+    /// Saves the package as the Compile block says: the `.magic` file in its
+    /// folder, and a `.gguf` and a Hugging Face folder when asked for and
+    /// possible. Returns what was written, and what was skipped and why.
+    pub fn compile(&mut self) -> Result<(Vec<PathBuf>, Vec<String>), String> {
+        let params = self.compile_settings().ok_or("Add a Compile .magic Package block to the canvas.")?;
+        if params.folder.trim().is_empty() {
+            return Err("Choose the folder Compile .magic Package saves into.".into());
+        }
+        let folder = PathBuf::from(params.folder.trim());
+        std::fs::create_dir_all(&folder)
+            .map_err(|e| format!("The folder {} could not be made: {e}", folder.display()))?;
+        let title = self.title();
+        let stem = file_stem(if params.file.trim().is_empty() { &title } else { params.file.trim() });
+        let include = &mut self.file.model.include;
+        include.weights = params.weights;
+        include.datasets = params.datasets;
+        (include.training, include.finetune) = (params.pictures, params.pictures);
+        include.blocks = params.blocks;
+        if self.file.model.blocks.is_none() {
+            self.file.model.blocks = Some(starter_blocks(&self.file.model, "", &Registry::builtin()));
+        }
+        let path = folder.join(format!("{stem}.magic"));
+        self.file.save(&path).map_err(|e| format!("Could not save {}: {e}", path.display()))?;
+        self.mark_saved(path.clone());
+        let mut written = vec![path];
+        let mut skipped = Vec::new();
+        let text = self.file.model.kind == ModelKind::Text;
+        let exportable =
+            self.file.model.architecture.as_ref().is_some_and(|a| a.gguf_compatible()) && !self.file.weights.is_empty();
+        if (params.gguf || params.huggingface) && text && !exportable {
+            skipped.push(
+                "GGUF and Hugging Face need a model trained in MacroMagi from Transformer Layers only; the .magic \
+                 file was saved."
+                    .to_owned(),
+            );
+        } else if text {
+            if params.gguf {
+                let quant = magi_core::export::Quant::parse(&params.quant).unwrap_or_default();
+                // The quantization ends the name, as LM Studio and others expect.
+                let gguf = folder.join(format!("{stem}-{}.gguf", quant.name()));
+                let bytes = magi_core::export::gguf_with(&self.file.model, &self.file.weights, quant)
+                    .map_err(|e| e.to_string())?;
+                std::fs::write(&gguf, bytes).map_err(|e| format!("Could not save {}: {e}", gguf.display()))?;
+                written.push(gguf.clone());
+                if params.lmstudio {
+                    match self.add_to_lmstudio(&gguf) {
+                        Ok(paths) => written.extend(paths),
+                        Err(error) => skipped.push(error),
+                    }
+                }
+            }
+            if params.huggingface {
+                let hf = folder.join(format!("{stem}-huggingface"));
+                magi_core::export::huggingface(&self.file.model, &self.file.weights, &hf).map_err(|e| e.to_string())?;
+                written.push(hf);
+            }
+        }
+        Ok((written, skipped))
+    }
+
+    /// Puts a GGUF file of this model into LM Studio: the file into its
+    /// models folder (`<owner>/<Name>-GGUF/`), and a `model.yaml` with a
+    /// `manifest.json` into its hub folder, so LM Studio shows the model's
+    /// size, context, Enable Thinking and Reasoning Effort. Returns what was written.
+    pub fn add_to_lmstudio(&self, gguf: &std::path::Path) -> Result<Vec<PathBuf>, String> {
+        let root = lmstudio_root().ok_or(
+            "LM Studio was not found (its folder is .lmstudio in your home folder). Install and open it once first.",
+        )?;
+        let model = &self.file.model;
+        let exported = magi_core::export::describe(model, &self.file.weights).map_err(|e| e.to_string())?;
+        let owner = lmstudio_owner(model);
+        let repo = format!("{}-GGUF", file_stem(&self.title()).replace(' ', "-"));
+        let folder = root.join("models").join(&owner).join(&repo);
+        std::fs::create_dir_all(&folder).map_err(|e| format!("Could not make {}: {e}", folder.display()))?;
+        let name = gguf.file_name().ok_or("The GGUF file has no name.")?;
+        let copy = folder.join(name);
+        std::fs::copy(gguf, &copy).map_err(|e| format!("Could not copy the GGUF file into LM Studio: {e}"))?;
+        let bytes = std::fs::metadata(&copy).map(|m| m.len()).unwrap_or_default();
+        let hub = root
+            .join("hub")
+            .join("models")
+            .join(magi_core::export::lmstudio_key(&owner))
+            .join(magi_core::export::lmstudio_key(&model.name));
+        std::fs::create_dir_all(&hub).map_err(|e| format!("Could not make {}: {e}", hub.display()))?;
+        let yaml = magi_core::export::lmstudio_model_yaml(model, &exported, &owner, &repo, bytes)
+            .map_err(|e| e.to_string())?;
+        std::fs::write(hub.join("model.yaml"), yaml).map_err(|e| format!("Could not write model.yaml: {e}"))?;
+        std::fs::write(hub.join("manifest.json"), magi_core::export::lmstudio_manifest(model, &owner, &repo))
+            .map_err(|e| format!("Could not write manifest.json: {e}"))?;
+        Ok(vec![copy, hub.join("model.yaml")])
+    }
+
+    /// The GGUF file the last compile wrote for this model, if it is there.
+    pub fn compiled_gguf(&self) -> Option<PathBuf> {
+        let params = self.compile_settings()?;
+        if !params.gguf || params.folder.trim().is_empty() {
+            return None;
+        }
+        let title = self.title();
+        let stem = file_stem(if params.file.trim().is_empty() { &title } else { params.file.trim() });
+        let quant = magi_core::export::Quant::parse(&params.quant).unwrap_or_default();
+        Some(PathBuf::from(params.folder.trim()).join(format!("{stem}-{}.gguf", quant.name()))).filter(|p| p.is_file())
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -172,6 +352,10 @@ impl MagicDoc {
     pub fn replace_onnx(&mut self, onnx: Vec<u8>) -> Result<(), String> {
         let shape = magi_ml::inspect(&onnx).map_err(|e| e.0)?;
         self.file.model.input = shape.suggested(self.file.model.input.clone());
+        let value = studio::section_of(studio::kinds::PREP, &self.file.model);
+        for node in self.studio.graph.nodes_mut().filter(|n| n.kind == studio::kinds::PREP) {
+            node.set_param("value", value.clone());
+        }
         self.file.onnx = onnx;
         self.shape = Some(shape);
         self.files_changed();
@@ -179,13 +363,61 @@ impl MagicDoc {
     }
 }
 
-/// A new model, with a canvas ready to train it.
+/// LM Studio's own folder: `.lmstudio` in the home folder (or `MAGI_LMSTUDIO_DIR`).
+pub fn lmstudio_root() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("MAGI_LMSTUDIO_DIR") {
+        return Some(PathBuf::from(dir));
+    }
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
+    Some(PathBuf::from(home).join(".lmstudio")).filter(|p| p.is_dir())
+}
+
+/// Whose model LM Studio files it under: its author, or MacroMagi.
+fn lmstudio_owner(model: &MagicModel) -> String {
+    let owner: String = model.author.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
+    if owner.is_empty() { "MacroMagi".into() } else { owner }
+}
+
+/// A name usable as a file name.
+pub fn file_stem(name: &str) -> String {
+    let cleaned: String =
+        name.chars().map(|c| if c.is_alphanumeric() || " -_.()".contains(c) { c } else { '-' }).collect();
+    let cleaned = cleaned.trim().trim_matches('.').to_owned();
+    if cleaned.is_empty() { "model".into() } else { cleaned }
+}
+
+/// A new model, with a canvas ready to train it: for a text model, an
+/// example agent with its datasets, which trains in a minute or two.
 pub fn new_model(text: bool) -> MagicFile {
-    let mut model =
-        MagicModel { name: if text { "New text model" } else { "New vision model" }.into(), ..MagicModel::default() };
+    let mut model = MagicModel {
+        name: if text { "Magi" } else { "My vision model" }.into(),
+        description: if text {
+            "A small assistant: it chats, thinks at three effort levels and uses tools such as web search.".into()
+        } else {
+            "Tells the screen's states apart.".into()
+        },
+        ..MagicModel::default()
+    };
+    let mut data = std::collections::BTreeMap::new();
+    let mut datasets = Vec::new();
     if text {
         model.kind = ModelKind::Text;
-        model.text = Some(magi_core::magic::TextSpec::default());
+        // General tools, as the example datasets use them; MacroMagi's own are a button away in Text & Tools.
+        let mut spec = magi_core::magic::TextSpec {
+            temperature: 0.3,
+            max_tokens: 200,
+            system: studio::EXAMPLE_SYSTEM.into(),
+            tools: studio::example_tools(),
+            thinking: Some(magi_core::magic::ThinkingSpec::default()),
+            effort: Some(magi_core::magic::EffortSpec::default()),
+            ..Default::default()
+        };
+        spec.ensure_specials();
+        model.text = Some(spec);
+        for (file, content, negative) in studio::example_datasets() {
+            data.insert(file.clone(), content.into_bytes());
+            datasets.push((file, negative));
+        }
     } else {
         model.kind = ModelKind::Vision;
         model.input.width = 64;
@@ -195,10 +427,32 @@ pub fn new_model(text: bool) -> MagicFile {
             magi_core::magic::ClassSpec { label: "No".into(), threshold: 0.5, ..Default::default() },
         ];
     }
-    MagicFile { model, ..MagicFile::default() }
+    model.studio = Some(studio::default_canvas(&model, false, false, &datasets));
+    model.datasets = datasets.iter().map(|(f, _)| f.clone()).collect();
+    MagicFile { model, data, ..MagicFile::default() }
 }
 
-/// The blocks a model comes with: a Start block and an AI Watch block (an AI
+/// One of the tools the AI Agent block carries out, as a tool of a model.
+pub fn agent_tool(name: &str, about: &str) -> magi_core::magic::ToolSpec {
+    let property = |ty: &str| serde_json::json!({ "type": ty });
+    let properties = match name {
+        "press" => serde_json::json!({ "key": property("string") }),
+        "type" | "log" => serde_json::json!({ "text": property("string") }),
+        "click" => {
+            serde_json::json!({ "x": property("number"), "y": property("number"), "button": property("string") })
+        }
+        "move" => serde_json::json!({ "x": property("number"), "y": property("number") }),
+        "wait" => serde_json::json!({ "ms": property("number") }),
+        _ => serde_json::json!({}),
+    };
+    magi_core::magic::ToolSpec {
+        name: name.to_owned(),
+        description: about.split(" – ").nth(1).unwrap_or(about).to_owned(),
+        parameters: serde_json::json!({ "type": "object", "properties": properties }),
+    }
+}
+
+// The blocks a model comes with: a Start block and an AI Watch block (an AI
 /// Agent and a Log block for a text model), with a comment saying how to use
 /// them. `model` is the asset id in the macro.
 pub fn starter_blocks(model: &MagicModel, asset: &str, registry: &Registry) -> Fragment {

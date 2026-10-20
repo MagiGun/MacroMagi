@@ -33,17 +33,22 @@ pub enum SettingsPage {
     Hotkeys,
     Recording,
     Engine,
-    Ai,
+    /// Downloads: what trains and runs AI models.
+    #[serde(alias = "ai")]
+    Runtime,
+    /// The processor, memory and graphics cards, and which ones AI uses.
+    Hardware,
 }
 
 impl SettingsPage {
-    pub const ALL: [SettingsPage; 6] = [
+    pub const ALL: [SettingsPage; 7] = [
         SettingsPage::General,
         SettingsPage::Appearance,
         SettingsPage::Hotkeys,
         SettingsPage::Recording,
         SettingsPage::Engine,
-        SettingsPage::Ai,
+        SettingsPage::Runtime,
+        SettingsPage::Hardware,
     ];
 
     pub fn label(self) -> &'static str {
@@ -53,7 +58,8 @@ impl SettingsPage {
             SettingsPage::Hotkeys => "Hotkeys",
             SettingsPage::Recording => "Recording",
             SettingsPage::Engine => "Engine",
-            SettingsPage::Ai => "AI",
+            SettingsPage::Runtime => "Runtime",
+            SettingsPage::Hardware => "Hardware",
         }
     }
 }
@@ -171,6 +177,23 @@ pub struct Settings {
     /// Where AI models run.
     pub ai_device: magi_ml::Device,
     pub recent_files: Vec<PathBuf>,
+    /// `.magic` files opened lately, newest first.
+    pub recent_models: Vec<PathBuf>,
+    /// While a model trains, the Magic tab shows only the training, and the
+    /// background picture and see-through panels are off.
+    pub optimize_training: bool,
+    /// The Magic tab's console, and the panel of the selected block.
+    pub magic_console: bool,
+    pub magic_panel: bool,
+    /// The graphics cards training uses (CUDA numbers): `None` is the first
+    /// one there is; an empty list is the CPU.
+    pub train_gpus: Option<Vec<u32>>,
+    /// The llama.cpp build GGUF models run with; `None`: the most capable installed.
+    pub llama_build: Option<crate::components::Component>,
+    /// Layers of a GGUF model put on graphics cards (999: all of them; 0: the CPU only).
+    pub llama_gpu_layers: u32,
+    /// The devices llama.cpp uses (`CUDA0`…); empty: its own choice.
+    pub llama_devices: Vec<String>,
 }
 
 impl Default for Settings {
@@ -210,6 +233,14 @@ impl Default for Settings {
             rate_window_size: None,
             ai_device: magi_ml::Device::Auto,
             recent_files: Vec::new(),
+            recent_models: Vec::new(),
+            optimize_training: true,
+            magic_console: true,
+            magic_panel: true,
+            train_gpus: None,
+            llama_build: None,
+            llama_gpu_layers: 999,
+            llama_devices: Vec::new(),
         }
     }
 }

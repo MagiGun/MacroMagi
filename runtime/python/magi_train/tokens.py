@@ -5,6 +5,19 @@ in `specials`, in order. Special tags are matched first, longest first.
 """
 
 
+import json
+
+
+def tool_of(tool):
+    """A tool as {"name", "description", "parameters"} (OpenAI's form is unwrapped)."""
+    tool = tool.get("function", tool) if isinstance(tool, dict) else {}
+    return {
+        "name": str(tool.get("name", "")),
+        "description": str(tool.get("description", "") or ""),
+        "parameters": tool.get("parameters", {}),
+    }
+
+
 class Tokenizer:
     def __init__(self, spec):
         self.spec = spec
@@ -49,13 +62,45 @@ class Tokenizer:
 
     # ---- the chat template -------------------------------------------------
 
-    def prompt(self, user, system=None):
+    def tools_text(self, tools):
+        """The tools a model may use, as its system text lists them (TextSpec::tools_text)."""
+        open_tag, close_tag = self.spec["tool_tags"]
+        text = "You can use these tools:"
+        for tool in map(tool_of, tools):
+            text += "\n- %s: %s Parameters: %s" % (
+                tool["name"], tool["description"].strip(),
+                json.dumps(tool["parameters"], ensure_ascii=False, sort_keys=True))
+        return text + ("\nTo use one, write %s{\"name\": \"<tool name>\", \"arguments\": {...}}%s. "
+                       "Its result comes back in the next turn." % (open_tag, close_tag))
+
+    def system_text(self, system, effort, tools):
+        """The system text of a request (TextSpec::system_text): the system prompt (the
+        model's own when empty), the reasoning effort and the tools."""
         spec = self.spec
-        system = spec.get("system", "") if system is None else system
+        parts = []
+        system = (system or "").strip() or spec.get("system", "").strip()
+        if system:
+            parts.append(system)
+        levels = spec.get("effort")
+        if levels:
+            level = effort if effort in (levels.get("levels") or []) else levels.get("default", "")
+            parts.append("Reasoning effort: %s" % level)
+        if spec.get("tool_tag") and tools:
+            parts.append(self.tools_text(tools))
+        return "\n\n".join(parts)
+
+    def prompt(self, user, system=None, tools=None, effort=None, thinking=None):
+        """A request as the model reads it (TextSpec::prompt_with)."""
+        spec = self.spec
         text = ""
-        if system.strip():
-            text += spec["system_tag"] + system.strip() + spec["end_tag"]
-        return text + spec["user_tag"] + user + spec["end_tag"] + spec["assistant_tag"]
+        head = self.system_text(system, effort, tools or [])
+        if head:
+            text += spec["system_tag"] + head + spec["end_tag"]
+        text += spec["user_tag"] + user + spec["end_tag"] + spec["assistant_tag"]
+        switch = spec.get("thinking")
+        if switch and not (switch.get("on_by_default", True) if thinking is None else thinking):
+            text += spec["think_tags"][0] + spec["think_tags"][1]
+        return text
 
     def answer(self, response):
         return response + self.spec["end_tag"]

@@ -562,7 +562,8 @@ fn edit_param(
             ui.horizontal(|ui| {
                 let field = egui::TextEdit::singleline(&mut path)
                     .hint_text(if *folder { "Folder path" } else { "File path" })
-                    .desired_width(ui.available_width() - 72.0);
+                    // Room for the Browse button beside it.
+                    .desired_width((ui.available_width() - 100.0).max(80.0));
                 changed |= ui.add(field).changed();
                 if ui.button(format!("{}  Browse", icon::FOLDER_OPEN)).clicked() {
                     let dialog = rfd::FileDialog::new();

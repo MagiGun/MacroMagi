@@ -17,6 +17,11 @@ tract-onnx = { version = "0.23", default-features = false }
 # runs on graphics cards (DirectML on Windows, CoreML on macOS).
 ort = { version = "=2.0.0-rc.14", default-features = false, features = ["std", "load-dynamic", "api-20", "directml", "coreml"] }
 thiserror.workspace = true
+serde_json.workspace = true
+
+# llama.cpp servers close with MacroMagi, even when it is killed (a job object).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 [dev-dependencies]
 # Builds a tiny ONNX model for the tests.

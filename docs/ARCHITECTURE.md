@@ -89,7 +89,7 @@ This is the contract both engines implement. If you change one, change the other
 
 **Blocks one engine cannot run.** Python Script blocks need the Python engine. The native engine treats them as disabled and says so once in the console; the editor marks them while the Python engine is not available.
 
-**AI models.** An AI block names a model asset – a `.magic` file embedded in the macro. The program loads a model once, the first time a block uses it, onto the engine chosen under *Settings → AI*. A look captures the model's screen area, prepares the picture as the model's description says, runs the model and decides: the likeliest answer *acts* when its class is marked to act and the model is at least as sure as that class's threshold. The block's own setting values are applied over the model's first. A text model (the AI Agent block) is asked instead: the request goes through the model's chat template, the answer is generated token by token until the end tag, and its tool calls are carried out when the block says so. AI Watch repeats this and works like a loop: when the model acts, it waits the class's delay, presses the model's key or clicks its mouse button, and runs the blocks under *Acted* as a loop round with its outputs up to date. Back at the block, it ignores answers for the cooldown, so one event is not acted on twice, and watches again. A Stop that leaves the loop, or the end of its time, continues from its usual output. Both engines call the same operations, so a model behaves the same on either.
+**AI models.** An AI block names a model asset – a `.magic` file embedded in the macro. The program loads a model once, the first time a block uses it, onto the engine chosen under *Settings › Hardware* (ONNX) – or, for a GGUF text model, onto llama.cpp. A look captures the model's screen area, prepares the picture as the model's description says, runs the model and decides: the likeliest answer *acts* when its class is marked to act and the model is at least as sure as that class's threshold. The block's own setting values are applied over the model's first. A text model (the AI Agent block) is asked instead: the request goes through the model's chat template, the answer is generated token by token until the end tag, and its tool calls are carried out when the block says so. AI Watch repeats this and works like a loop: when the model acts, it waits the class's delay, presses the model's key or clicks its mouse button, and runs the blocks under *Acted* as a loop round with its outputs up to date. Back at the block, it ignores answers for the cooldown, so one event is not acted on twice, and watches again. A Stop that leaves the loop, or the end of its time, continues from its usual output. Both engines call the same operations, so a model behaves the same on either.
 
 **Errors.** A failure ends the run and is reported against the block it happened in.
 
@@ -181,7 +181,7 @@ Adding a capability a macro can use means adding a method here, implementing it 
 
 ONNX Runtime is loaded with `ort`'s *load-dynamic* feature: MacroMagi does not link it, so the executable stays a single file and works without it. A process can load it once, so installing or removing it takes effect after a restart.
 
-*Settings → AI → Run models on* is **Automatic**, **CPU** or a particular graphics card. Automatic times each candidate on the model itself (a few warm-up runs, then the median of several) and keeps the fastest, remembering the answer per model; when a graphics card is not faster – small models often are not, because of the copying – the CPU is used.
+*Settings › Hardware › ONNX models* is **Automatic**, **CPU** or a particular graphics card. Automatic times each candidate on the model itself (a few warm-up runs, then the median of several) and keeps the fastest, remembering the answer per model; when a graphics card is not faster – small models often are not, because of the copying – the CPU is used.
 
 Image Detection stays on the CPU: its coarse-to-fine search already finishes in a few milliseconds, and a graphics card would spend longer receiving the picture.
 
@@ -228,12 +228,39 @@ Every color comes from one `Palette` in [`theme.rs`](../crates/magi-app/src/them
 
 ### The Magic tab
 
-The Magic tab edits one model at a time – a [`MagicFile`](../crates/magi-core/src/magic.rs): the ONNX bytes, the weights, a description (`MagicModel`), and datasets and pictures by path.
+The Magic tab edits one model at a time: a [`MagicFile`](../crates/magi-core/src/magic.rs) holds the ONNX bytes, the weights, a description (`MagicModel`), and datasets and pictures by path.
 
-- **The canvas** is a `Project` drawn by the same `GraphView` as macros, with a registry of its own ([`nodes/studio.rs`](../crates/magi-core/src/nodes/studio.rs), never part of `Registry::builtin`, so macros cannot see these blocks). It is kept in `MagicModel.studio`. `MagicDoc::sync_canvas` runs every frame: it writes the model's setup onto the inspector blocks' faces, takes the model kind from Start from Zero and the dataset list from the Text Dataset blocks, and puts the canvas back into the model. A file without a canvas gets `studio::default_canvas`.
-- **Training**: `studio::pipeline` follows the `model` wire from the one start block through architecture and training blocks; `studio::plan` turns that into the trainer's JSON plan. [`magic/train.rs`](../crates/magi-app/src/magic/train.rs) writes the plan, the datasets, the base weights and the prepared pictures into `data/training`, runs [`runtime/python/magi_train`](../runtime/python/magi_train) in the Python macros use, and reads its JSON lines on a `magi-train` thread. The result goes back into the document with `MagicDoc::apply_trained`. The trainer is separate from the macro runtime: it needs PyTorch and onnx, and the runtime needs only the standard library. [MAGIC.md](MAGIC.md) has the plan format.
-- **Text models** run in `magi-ml` (`TextModel`, `ask`) at a fixed context length, right-padded – correct because the models are causal – which keeps the graph static for the built-in engine. The tokenizer (`TextSpec::encode`/`decode`) is the same byte-level one the trainer uses.
+- **The canvas** is a `Project` drawn by the same `GraphView` as macros. Its registry is its own ([`nodes/studio.rs`](../crates/magi-core/src/nodes/studio.rs)) and is never part of `Registry::builtin`, so macros cannot see these blocks. The canvas is kept in `MagicModel.studio`. Five kinds of wire carry meaning:
+  - `model`: start → architecture → stages → package;
+  - `setup`: setup blocks chained into the start;
+  - `ffn`: a Mixture of Experts or Persona Router into layer blocks;
+  - dataset outputs into stages;
+  - `optimizer` into stages.
+- **The model comes from the canvas.** Every frame `MagicDoc::sync_canvas` calls `studio::derive`:
+  - the setup blocks chained into the start (`setup_chain`) supply the model's parts (`apply_section`), each kept as JSON in the block's `value`;
+  - the model kind comes from Start from Zero;
+  - the context and personas come from the architecture;
+  - blocks that are not connected where they would be used get a `note` on their face.
 
+  Then `sync_canvas` applies the sliders, collects the dataset list and puts the canvas back into the model. Undo/redo is a `History` of the canvas and the picture lists. A file without a canvas gets `studio::default_canvas`, built from its description.
+- **Training**: `studio::pipeline` follows the `model` wire from the one start block. It collects the architecture as per-layer specs (`Architecture.layers`) and the stages with their datasets and optimizers. `studio::plan` turns that into the trainer's JSON plan. [`magic/train.rs`](../crates/magi-app/src/magic/train.rs):
+  - writes the plan, the datasets, the base weights and the prepared pictures into `data/training`;
+  - runs [`runtime/python/magi_train`](../runtime/python/magi_train) in the Python for AI, on the cards from *Settings › Hardware*;
+  - reads its JSON lines on a `magi-train` thread.
+
+  The result goes back with `MagicDoc::apply_trained`, and then `MagicDoc::compile` saves the package into the Compile block's folder. The trainer is separate from the macro runtime: it needs PyTorch and onnx, while the runtime needs only the standard library. [MAGIC.md](MAGIC.md) has the plan format.
+- **Exports** ([`magi-core/src/export.rs`](../crates/magi-core/src/export.rs)) read the safetensors weights. For models in a layout llama.cpp knows (`Architecture::gguf_arch`: llama, qwen3, gemma3) they write GGUF: that architecture's keys and tensor names, Q/K rows interleaved for llama's rotary layout, matrices in F16, Q8_0 or Q4_0, MacroMagi's byte tokens as GPT-2 byte characters with no merges (turn tags as control tokens, thinking and tool tags as text), the size and precision LM Studio shows, the Jinja chat template (`chat_template`, the same text `TextSpec::prompt_with` and the trainer write), and MacroMagi's text spec under `macromagi.*` so imports recognise it. They also write a Hugging Face folder (Llama, Qwen3) and LM Studio's `model.yaml` and `manifest.json`.
+- **Text models** run in `magi-ml`:
+  - ONNX through `TextModel` and `ask`, at a fixed context length, right-padded. That is correct because the models are causal, and it keeps the graph static for the built-in engine.
+  - GGUF through [`llama.rs`](../crates/magi-ml/src/llama.rs): `llama-server` per model (and context window), started on demand or by *Load*, on a local port, with the devices from *Settings › Hardware*. Models trained in MacroMagi are sent and read back as token ids; other models go through `/v1/chat/completions`.
+
+  The tokenizer (`TextSpec::encode`/`decode`) is the same byte-level one the trainer uses.
+- **Optional parts** (*Settings › Runtime*, [`components.rs`](../crates/magi-app/src/components.rs)):
+  - PyTorch (CPU or CUDA) and onnx, installed with pip into the Python for AI;
+  - llama.cpp builds from the newest of its recent GitHub releases that has them;
+  - ONNX Runtime.
+
+  `Components::report` works out, off the UI thread, where everything stands and what PyTorch and llama.cpp can see.
 - **Importing** ([`magic/import.rs`](../crates/magi-app/src/magic/import.rs)) takes an `.onnx` file, or a folder or ZIP that contains one, and reads the project's text files for hints: class names (a Markdown table or a dictionary in code), which classes act, color statistics, the screen area, the key, and adjustable settings (a `settings.json`, or typed declarations in code). It reads files; it never runs them. Everything it found or guessed becomes a note in the tab.
 - **Trying** a model runs it on a `magi-magic-test` thread against the same host as macros (so dry run applies), and shows the picture it saw and its answers.
 - **Use in Macro** embeds the model as an asset (`.magic` bytes without training pictures, with an id derived from the content). An earlier model of the same name is replaced and the blocks that used it are pointed at the new one; when no block uses the model yet, its blocks are added.
@@ -263,6 +290,7 @@ The node editor draws nodes by hand instead of composing widgets. Geometry is co
 | `magi-audio` | Owns a sound source while a macro listens to it |
 | `magi-magic-test` | Runs the Magic tab's model on the screen while it is being tried |
 | `magi-train` | Runs the trainer in Python and reads its progress |
+| `llama-server` (a process) | Runs a GGUF model; started by `magi-ml` when a model is first asked, stopped when MacroMagi closes |
 | `magi-notify` | Keeps a notification's tray icon up for a few seconds (Windows) |
 | `magi-inject` | Owns the OS input connection; serialises everything sent |
 | `magi-run-N` | One per run on the native engine |
@@ -278,7 +306,7 @@ The node editor draws nodes by hand instead of composing widgets. Geometry is co
 | A rule about when input may be sent | `AutomationOptions` in `magi-core/src/options.rs`, checked in `RunCx::send` |
 | Something a macro can do to the machine | `Host`, then an operation in `ops.rs` |
 | Another way of seeing the screen | A function in `magi-vision`, an operation, a value block |
-| A model format or engine | `magi-ml` (a `Backend`), and its options in *Settings → AI* |
+| A model format or engine | `magi-ml` (a `Backend`), and its options in *Settings › Hardware* |
 | Something to download | A `Component` in `magi-app/src/components.rs` |
 | An engine | Something that can start and stop runs behind `Session` |
 | An operating system backend | A module in `magi-platform` |
@@ -287,7 +315,7 @@ The node editor draws nodes by hand instead of composing widgets. Geometry is co
 
 **Add-ons.** An add-on would be a folder with a manifest listing `NodeDef`s (the same JSON `macromagi nodes` prints) and a Python module registering behaviour for them with the existing `@flow_node` / `@value_node` decorators. The registry already accepts definitions at run time, the editor already draws from definitions, and unknown blocks already survive a round trip. What is missing is discovery, loading and a trust model for third-party code.
 
-**Faster text models.** Generation recomputes the whole context for every token. A key-value cache needs a second exported graph (one token in, the cache in and out), which the trainer can export beside the first; `TextModel` would then keep the cache between tokens.
+**Faster ONNX text models.** ONNX generation recomputes the whole context for every token (GGUF models with llama.cpp keep a cache). A key-value cache for ONNX needs a second exported graph (one token in, the cache in and out), which the trainer can export beside the first; `TextModel` would then keep the cache between tokens.
 
 **Sending gamepad input.** `InputEvent` already has gamepad events, and recordings already contain them. What is missing is a backend in `magi-platform` that owns a virtual controller. On Windows that requires a driver, which a portable app cannot install; the intended approach is to use one if present and say so clearly if not.
 

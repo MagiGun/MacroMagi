@@ -361,3 +361,79 @@ mod windows {
         unsafe { SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX) };
     }
 }
+
+/// The computer: its processor, how many threads it runs at once, and its memory.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Machine {
+    pub cpu: String,
+    pub threads: usize,
+    /// Installed memory, in megabytes (0 when unknown).
+    pub memory_mb: u64,
+}
+
+/// What [`Machine`] this is.
+pub fn machine() -> Machine {
+    Machine {
+        cpu: cpu_name().unwrap_or_else(|| std::env::consts::ARCH.to_owned()),
+        threads: std::thread::available_parallelism().map_or(1, |n| n.get()),
+        memory_mb: memory_mb(),
+    }
+}
+
+/// The processor's brand string, as it reports it itself.
+#[cfg(target_arch = "x86_64")]
+fn cpu_name() -> Option<String> {
+    use std::arch::x86_64::__cpuid;
+    let top = __cpuid(0x8000_0000).eax;
+    if top < 0x8000_0004 {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(48);
+    for leaf in 0x8000_0002u32..=0x8000_0004 {
+        let r = __cpuid(leaf);
+        for word in [r.eax, r.ebx, r.ecx, r.edx] {
+            bytes.extend_from_slice(&word.to_le_bytes());
+        }
+    }
+    let name = String::from_utf8_lossy(&bytes).trim_matches(char::from(0)).trim().to_owned();
+    (!name.is_empty()).then_some(name)
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn cpu_name() -> Option<String> {
+    None
+}
+
+#[cfg(windows)]
+fn memory_mb() -> u64 {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    let mut status =
+        MEMORYSTATUSEX { dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32, ..unsafe { std::mem::zeroed() } };
+    // SAFETY: the struct is the size it says it is.
+    if unsafe { GlobalMemoryStatusEx(&mut status) } != 0 { status.ullTotalPhys / (1024 * 1024) } else { 0 }
+}
+
+#[cfg(not(windows))]
+fn memory_mb() -> u64 {
+    std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|text| {
+            text.lines()
+                .find(|l| l.starts_with("MemTotal:"))
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|kb| kb.parse::<u64>().ok())
+        })
+        .map_or(0, |kb| kb / 1024)
+}
+
+/// Shows a folder in the system's file manager.
+pub fn open_folder(path: &std::path::Path) -> std::io::Result<()> {
+    let program = if cfg!(windows) {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    std::process::Command::new(program).arg(path).spawn().map(|_| ())
+}

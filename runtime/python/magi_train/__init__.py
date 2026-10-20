@@ -11,5 +11,5 @@ weights, through the stages the plan lists, and writes `model.onnx`,
 reports progress as JSON lines on standard output.
 
 Unlike the macro runtime (package `magi`), this package needs third-party
-packages: PyTorch and onnx, which Settings → AI installs.
+packages: PyTorch and onnx, which Settings › Runtime installs.
 """

@@ -1,12 +1,14 @@
 """Running a training plan.
 
 The plan (JSON, written by the Magic tab) says what kind of model to make,
-where to start, its architecture, the datasets, the stages and the optimizer.
-Each stage reports progress as JSON lines; the result goes to `out_dir`.
+where to start, its architecture, the datasets and the stages, each with the
+optimizer wired into it. Progress goes out as JSON lines; the result goes to
+`out_dir`: `weights.safetensors`, `model.onnx` and `report.json`.
 
 Stages:
 
-    pretrain     next-token prediction on plain text, with a context-length curriculum
+    pretrain     next-token prediction on plain text, optionally growing the
+                 context from short to full (a curriculum)
     sft          fine-tuning on requests and answers (fully, or with LoRA or DoRA
                  adapters that are folded back in afterwards); answers *not* to
                  give are made less likely (unlikelihood)
@@ -43,12 +45,88 @@ def log(message):
     emit("log", message=message)
 
 
-def pick_device(choice):
-    if choice in ("gpu", "cuda", "auto") and torch.cuda.is_available():
-        return torch.device("cuda")
-    if choice in ("gpu", "cuda"):
-        log("No graphics card PyTorch can use; training on the CPU.")
-    return torch.device("cpu")
+def check_packages():
+    """Everything training needs, checked before anything is trained."""
+    try:
+        import onnx  # noqa: F401
+    except ImportError:
+        raise SystemExit(
+            "The onnx package is not installed in this Python (%s). Install it under Settings › Runtime, "
+            "then train again." % sys.executable
+        )
+
+
+def pick_devices(choice):
+    """The devices to train on: a list of CUDA indices, "auto", or the CPU."""
+    if isinstance(choice, list) and choice:
+        if torch.cuda.is_available():
+            found = [i for i in choice if i < torch.cuda.device_count()]
+            if found:
+                return [torch.device("cuda", i) for i in found]
+        else:
+            emit("warning", message="This PyTorch cannot use graphics cards (it is the CPU build), so training "
+                                    "runs on the CPU. Install PyTorch for NVIDIA graphics cards under Settings › Runtime.")
+        return [torch.device("cpu")]
+    if choice == "auto" and torch.cuda.is_available():
+        return [torch.device("cuda", 0)]
+    return [torch.device("cpu")]
+
+
+def describe(devices):
+    if devices[0].type == "cuda":
+        return "Training on %s." % ", ".join(torch.cuda.get_device_name(d) for d in devices)
+    return "Training on the CPU (%d threads)." % torch.get_num_threads()
+
+
+class Runner:
+    """A model on one or more devices."""
+
+    def __init__(self, model, devices):
+        self.core = model.to(devices[0])
+        self.devices = devices
+        self.parallel = None
+        if len(devices) > 1:
+            self.parallel = torch.nn.DataParallel(self.core, device_ids=[d.index for d in devices])
+
+    def __call__(self, *args, **kwargs):
+        return (self.parallel or self.core)(*args, **kwargs)
+
+    @property
+    def device(self):
+        return self.devices[0]
+
+
+def run_steps(runner, settings, steps, stage_name, compute, counter, after_backward=None):
+    """The training loop of a stage: `compute(step)` gives (loss, extra fields) for one batch."""
+    optimizer = optim.make(runner.core, settings, steps)
+    accumulate = max(1, int(settings.get("accumulate", 1)))
+    clip = float(settings.get("clip", 1.0))
+    offload = bool(settings.get("offload")) and runner.device.type == "cuda"
+    runner.core.checkpointing = bool(settings.get("checkpointing"))
+    runner.core.train()
+    last = float("nan")
+    for step in range(steps):
+        loss, extra = compute(step)
+        if loss is not None and loss.requires_grad:
+            (loss / accumulate).backward()
+        if after_backward:
+            after_backward()
+        if (step + 1) % accumulate == 0 or step + 1 == steps:
+            if clip > 0:
+                torch.nn.utils.clip_grad_norm_([p for p in runner.core.parameters() if p.requires_grad], clip)
+            if offload:
+                optim.offload(optimizer, runner.device)
+            optimizer.step(step)
+            if offload:
+                optim.offload(optimizer, torch.device("cpu"))
+            optimizer.zero_grad()
+        if loss is not None:
+            last = float(loss.detach())
+        counter[0] += 1
+        if step % 5 == 0 or step + 1 == steps:
+            emit("progress", stage=stage_name, step=step + 1, steps=steps,
+                 loss=None if math.isnan(last) else round(last, 4), **(extra or {}))
+    return last
 
 
 # ---- text -------------------------------------------------------------------
@@ -59,30 +137,40 @@ class TextTrainer:
         self.plan = plan
         self.spec = plan["text"]
         self.tok = Tokenizer(self.spec)
-        self.context = int(self.spec.get("context", 256))
-        self.settings = plan.get("optimizer", {})
-        self.device = pick_device(self.settings.get("device", "auto"))
-        personas = len(self.spec.get("personas", []))
-        self.model = blocks.TextModel(
-            self.tok.vocab, self.context, plan["architecture"], self.tok.special(self.spec["assistant_tag"]), personas
-        )
+        architecture = dict(plan["architecture"])
+        self.context = int(architecture.get("context", self.spec.get("context", 256)))
+        architecture["context"] = self.context
+        self.architecture = architecture
+        self.personas = len(self.spec.get("personas", []))
+        self.uses_personas = any((l.get("ffn") or {}).get("kind") == "persona" for l in architecture.get("layers", []))
+        model = blocks.TextModel(self.tok.vocab, architecture, self.tok.special(self.spec["assistant_tag"]), self.personas)
         start = plan.get("start", {})
         if start.get("weights"):
-            missing = self.model.load_state_dict(safetensors.load(start["weights"]), strict=False)
+            missing = model.load_state_dict(safetensors.load(start["weights"]), strict=False)
             if missing.missing_keys or missing.unexpected_keys:
                 raise SystemExit(
-                    "The base model's weights do not fit this architecture. Keep the base model's blocks to fine-tune it."
+                    "The base model's weights do not fit this architecture (%d missing, %d left over). Keep the "
+                    "base model's architecture blocks to train it further."
+                    % (len(missing.missing_keys), len(missing.unexpected_keys))
                 )
             log("Started from the base model's weights.")
-        self.model.to(self.device)
-        self.model.checkpointing = bool(self.settings.get("checkpointing", False))
-        self.steps_done = 0
+        devices = pick_devices(plan.get("devices", "auto"))
+        log(describe(devices))
+        self.runner = Runner(model, devices)
+        log("%s parameters, %d layers, %d tokens of context." % (
+            "{:,}".format(blocks.parameter_count(model)), len(model.layers), self.context))
+        self.counter = [0]
+        self.pending = []
         self.last_loss = float("nan")
         self.stages = []
         self.datasets = {key: [] for key in plan.get("datasets", {})}
         for key, files in plan.get("datasets", {}).items():
             for path in files:
                 self.datasets[key].extend(data.read(path, self.tok))
+
+    @property
+    def device(self):
+        return self.runner.device
 
     def samples(self, keys, kinds):
         out = []
@@ -102,9 +190,9 @@ class TextTrainer:
         xs, ys = [], []
         for _ in range(batch):
             chunk = self.window(stream, length + 1)
-            chunk = chunk + [self.tok.end_id] * (length + 1 - len(chunk))
-            xs.append(chunk[:-1])
-            ys.append(chunk[1:])
+            pad = length + 1 - len(chunk)
+            xs.append(chunk[:-1] + [self.tok.end_id] * pad)
+            ys.append(chunk[1:] + [-100] * pad)
         return torch.tensor(xs, device=self.device), torch.tensor(ys, device=self.device)
 
     def pair_tensors(self, samples):
@@ -120,115 +208,109 @@ class TextTrainer:
         xs, ys = [], []
         for ids, learn in rows:
             pad = length + 1 - len(ids)
-            x = ids[:-1] + [self.tok.end_id] * pad
-            y = [-100] * (len(ids) - 1 - learn) + ids[len(ids) - learn:] + [-100] * pad
-            xs.append(x)
-            ys.append(y)
+            xs.append(ids[:-1] + [self.tok.end_id] * pad)
+            ys.append([-100] * (len(ids) - 1 - learn) + ids[len(ids) - learn:] + [-100] * pad)
         return torch.tensor(xs, device=self.device), torch.tensor(ys, device=self.device)
 
-    def forward(self, x):
-        labels = torch.tensor([self.tok.persona_spans(row) for row in x.tolist()], device=self.device)
-        return self.model(x, labels)
+    def forward(self, x, y=None):
+        labels = None
+        if self.uses_personas:
+            labels = torch.tensor([self.tok.persona_spans(row) for row in x.tolist()], device=self.device)
+        out = self.runner(x, labels, y)
+        if out["load"].numel():
+            # Applied after the backward pass, so recomputed layers route as they did.
+            self.pending.append(out["load"].sum(0).detach())
+        return out["logits"], out["aux"].mean()
 
-    def loss_of(self, logits, y):
+    def balance(self):
+        for load in self.pending:
+            self.runner.core.balance(load)
+        self.pending = []
+
+    def loss_of(self, x, y):
+        logits, aux = self.forward(x, y)
         loss = F.cross_entropy(logits.reshape(-1, logits.shape[-1]), y.reshape(-1), ignore_index=-100)
-        aux = self.model.aux_loss()
-        return loss + (0.01 * aux if aux is not None else 0.0)
+        return loss + aux
 
-    def unlikelihood(self, logits, y):
+    def unlikelihood(self, x, y):
         """Makes the tokens of an answer not to give less likely: -log(1 - p)."""
+        logits, _ = self.forward(x, None)
         probs = torch.softmax(logits, dim=-1)
         mask = y != -100
         picked = probs.gather(-1, y.clamp_min(0).unsqueeze(-1)).squeeze(-1)
         return -(torch.log((1 - picked).clamp_min(1e-6)) * mask).sum() / mask.sum().clamp_min(1)
 
+    @staticmethod
+    def settings(stage):
+        return stage.get("optimizer") or {}
+
     # -- stages --
-
-    def optimizer(self, stage):
-        settings = dict(self.settings)
-        if stage.get("lr"):
-            settings["lr"] = stage["lr"]
-        return optim.make(self.model, settings)
-
-    def step(self, optimizer, loss, stage_name, step, steps, accumulate, **extra):
-        # Nothing to learn this step (every answer scored the same): no update.
-        if loss.requires_grad:
-            (loss / accumulate).backward()
-        if (step + 1) % accumulate == 0 or step + 1 == steps:
-            torch.nn.utils.clip_grad_norm_([p for p in self.model.parameters() if p.requires_grad], 1.0)
-            if self.settings.get("offload") and self.device.type == "cuda":
-                optim.offload(optimizer, self.device)
-            optimizer.step()
-            if self.settings.get("offload") and self.device.type == "cuda":
-                optim.offload(optimizer, torch.device("cpu"))
-            optimizer.zero_grad()
-        self.steps_done += 1
-        self.last_loss = float(loss.detach())
-        if step % 5 == 0 or step + 1 == steps:
-            emit("progress", stage=stage_name, step=step + 1, steps=steps, loss=round(self.last_loss, 4), **extra)
 
     def pretrain(self, stage):
         texts = [s.text for s in self.samples(stage.get("data"), {"text"})]
         texts += [s.prompt + self.tok.answer(s.response) for s in self.samples(stage.get("data"), {"pair"})]
         if not texts:
-            raise SystemExit("Pretraining has no text: wire a Text Dataset with text into it.")
+            raise SystemExit("Pretraining has no text: wire a Text Dataset with files into its Text input.")
         stream = []
         for text in texts:
             stream.extend(self.tok.encode(text) + [self.tok.end_id])
         steps, batch = int(stage.get("steps", 200)), int(stage.get("batch", 8))
-        curriculum = self.settings.get("curriculum") or {}
-        first = int(curriculum.get("start", self.context))
-        last = int(curriculum.get("end", self.context))
-        accumulate = max(1, int(self.settings.get("accumulate", 1)))
-        optimizer = self.optimizer(stage)
-        self.model.train()
-        for step in range(steps):
-            length = min(self.context, max(8, int(first + (last - first) * step / max(1, steps - 1))))
+        first = int(stage.get("curriculum_start", 0) or self.context)
+        first = max(8, min(first, self.context))
+        log("Pretraining on %s tokens of text." % "{:,}".format(len(stream)))
+
+        def compute(step):
+            length = min(self.context, int(first + (self.context - first) * step / max(1, steps - 1)))
             x, y = self.lm_batch(stream, batch, length)
-            loss = self.loss_of(self.forward(x), y)
-            self.step(optimizer, loss, "pretrain", step, steps, accumulate, context=length)
+            return self.loss_of(x, y), ({"context": length} if first < self.context else {})
+
+        self.last_loss = run_steps(self.runner, self.settings(stage), steps, "pretrain", compute, self.counter, self.balance)
 
     def sft(self, stage, name="sft", samples=None):
         good = samples if samples is not None else self.samples(stage.get("data"), {"pair"})
         bad = self.samples(stage.get("negatives"), {"pair", "negative"})
         if not good and not bad:
-            raise SystemExit("Fine-tuning has no requests and answers: wire a Text Dataset into it.")
+            raise SystemExit("Fine-tuning has no requests and answers: wire a Text Dataset into its “What to do” input.")
         adapter = stage.get("adapter", "full")
+        core = self.runner.core
         if adapter in ("lora", "dora"):
-            blocks.add_adapters(self.model, int(stage.get("rank", 8)), float(stage.get("alpha", 16)), adapter == "dora")
-            self.model.to(self.device)
-            log("Training %s adapters (rank %s)." % (adapter.upper(), stage.get("rank", 8)))
+            blocks.add_adapters(core, int(stage.get("rank", 8)), float(stage.get("alpha", 16)), adapter == "dora")
+            self.runner = Runner(core, self.runner.devices)
+            log("Training %s adapters (rank %s) on %d requests." % (adapter.upper(), stage.get("rank", 8), len(good)))
+        else:
+            log("Training all weights on %d requests%s." % (len(good), ", %d answers to avoid" % len(bad) if bad else ""))
         steps, batch = int(stage.get("steps", 200)), int(stage.get("batch", 4))
         weight = float(stage.get("negative_weight", 0.5))
-        accumulate = max(1, int(self.settings.get("accumulate", 1)))
-        optimizer = self.optimizer(stage)
-        self.model.train()
-        for step in range(steps):
+
+        def compute(step):
             loss = torch.zeros((), device=self.device)
             if good:
                 x, y = self.pair_tensors(random.choices(good, k=batch))
-                loss = loss + self.loss_of(self.forward(x), y)
+                loss = loss + self.loss_of(x, y)
             if bad:
                 x, y = self.pair_tensors(random.choices(bad, k=max(1, batch // 2)))
-                loss = loss + weight * self.unlikelihood(self.forward(x), y)
-                self.model.aux_loss()
-            self.step(optimizer, loss, name, step, steps, accumulate)
+                loss = loss + weight * self.unlikelihood(x, y)
+            return loss, {}
+
+        self.last_loss = run_steps(self.runner, self.settings(stage), steps, name, compute, self.counter, self.balance)
         if adapter in ("lora", "dora"):
-            blocks.merge_adapters(self.model)
+            blocks.merge_adapters(core)
+            self.runner = Runner(core, self.runner.devices)
 
     def compaction(self, stage):
         pairs = [data.compact_pair(self.tok, s) for s in self.samples(stage.get("data"), {"compact"})]
         if not pairs:
-            raise SystemExit('Compaction needs {"context": ..., "compact": ...} lines in its dataset.')
+            raise SystemExit('Context Compaction needs {"context": …, "compact": …} lines in its dataset.')
         self.sft(stage, "compaction", pairs)
 
     @torch.no_grad()
     def sample(self, prompt_ids, count, max_new, temperature, top_k):
-        self.model.eval()
+        model = self.runner.core
+        model.eval()
         x = torch.tensor([prompt_ids] * count, device=self.device)
         done = torch.zeros(count, dtype=torch.bool, device=self.device)
         for _ in range(max_new):
-            logits = self.model(x[:, -self.context:])[:, -1, :] / max(temperature, 1e-3)
+            logits = model(x[:, -self.context:])["logits"][:, -1, :] / max(temperature, 1e-3)
             if top_k:
                 kth = logits.topk(min(top_k, logits.shape[-1])).values[:, -1:]
                 logits = logits.masked_fill(logits < kth, -1e9)
@@ -238,7 +320,14 @@ class TextTrainer:
             done = done | (nxt == self.tok.end_id)
             if bool(done.all()):
                 break
-        return [row[len(prompt_ids):] for row in x.tolist()]
+        model.train()
+        out = []
+        for row in x.tolist():
+            completion = row[len(prompt_ids):]
+            if self.tok.end_id in completion:
+                completion = completion[: completion.index(self.tok.end_id) + 1]
+            out.append(completion)
+        return out
 
     def reward(self, completion, rules, reference):
         text = self.tok.decode([t for t in completion if t != self.tok.end_id])
@@ -249,10 +338,14 @@ class TextTrainer:
             value = str(rule.get("text", ""))
             if kind == "contains" and value and value in text:
                 total += score
-            elif kind == "not_contains" and value and value in text:
+            elif kind == "not_contains" and value and value not in text:
                 total += score
-            elif kind == "regex" and value and re.search(value, text):
-                total += score
+            elif kind == "regex" and value:
+                try:
+                    if re.search(value, text):
+                        total += score
+                except re.error:
+                    pass
             elif kind == "exact" and reference is not None and text.strip() == reference.strip():
                 total += score
             elif kind in ("tool_valid", "tool_malformed"):
@@ -264,9 +357,10 @@ class TextTrainer:
                         good += isinstance(parsed, dict) and isinstance(parsed.get("name"), str)
                     except ValueError:
                         pass
-                if kind == "tool_valid" and calls and good == len(calls):
+                broken = text.count(tool_open) != text.count(tool_close)
+                if kind == "tool_valid" and calls and good == len(calls) and not broken:
                     total += score
-                if kind == "tool_malformed" and good < len(calls):
+                if kind == "tool_malformed" and (good < len(calls) or broken):
                     total += score
             elif kind == "loop":
                 n = int(rule.get("ngram", 4))
@@ -282,50 +376,45 @@ class TextTrainer:
     def rl(self, stage):
         pairs = self.samples(stage.get("data"), {"pair"})
         if not pairs:
-            raise SystemExit("Reinforcement learning needs requests: wire a Text Dataset into it.")
+            raise SystemExit("Reinforcement Learning needs requests: wire a Text Dataset into its Requests input.")
         rules = stage.get("rules") or [{"kind": "ends", "score": 1}]
         steps, group = int(stage.get("steps", 50)), max(2, int(stage.get("group", 4)))
         max_new = int(stage.get("max_new", 48))
         temperature, top_k = float(stage.get("temperature", 0.9)), int(stage.get("top_k", 40))
-        optimizer = self.optimizer(stage)
-        for step in range(steps):
+
+        def compute(step):
             sample = random.choice(pairs)
             prompt = self.tok.encode(sample.prompt)[-(self.context - max_new):]
             completions = self.sample(prompt, group, max_new, temperature, top_k)
             rewards = torch.tensor([self.reward(c, rules, sample.response) for c in completions], dtype=torch.float)
             advantage = (rewards - rewards.mean()) / (rewards.std() + 1e-6)
-            self.model.train()
             loss = torch.zeros((), device=self.device)
             for completion, adv in zip(completions, advantage.tolist()):
                 if not completion or abs(adv) < 1e-6:
                     continue
                 ids = (prompt + completion)[-(self.context + 1):]
                 x = torch.tensor([ids[:-1]], device=self.device)
-                logits = self.forward(x)
-                self.model.aux_loss()
+                logits, _ = self.forward(x)
                 logp = torch.log_softmax(logits[0, -len(completion):], dim=-1)
                 taken = logp.gather(-1, torch.tensor(ids[-len(completion):], device=self.device).unsqueeze(-1)).sum()
                 loss = loss - adv * taken / len(completion)
-            loss = loss / group
-            self.step(optimizer, loss, "rl", step, steps, 1, reward=round(float(rewards.mean()), 3))
+            return loss / group, {"reward": round(float(rewards.mean()), 3)}
+
+        self.last_loss = run_steps(self.runner, self.settings(stage), steps, "rl", compute, self.counter, self.balance)
 
     # -- results --
 
     def export(self, out_dir):
-        self.model.eval()
-        self.model.checkpointing = False
-        model = self.model.to("cpu")
+        model = self.runner.core.to("cpu")
+        model.eval()
+        model.checkpointing = False
         safetensors.save(model.state_dict(), os.path.join(out_dir, "weights.safetensors"))
-        tokens = torch.zeros(1, min(8, self.context), dtype=torch.long)
-        try:
-            torch.onnx.export(
-                model, (tokens,), os.path.join(out_dir, "model.onnx"),
-                input_names=["tokens"], output_names=["logits"],
-                dynamic_axes={"tokens": {1: "length"}, "logits": {1: "length"}},
-                opset_version=17, dynamo=False,
-            )
-        except Exception as error:  # noqa: BLE001 – reported, not hidden
-            emit("warning", message="The model could not be exported to ONNX (%s). Install onnx (Settings → AI) to run it in macros." % error)
+        tokens = torch.zeros(1, self.context, dtype=torch.long)
+        log("Exporting the model.")
+        torch.onnx.export(
+            blocks.Exported(model), (tokens,), os.path.join(out_dir, "model.onnx"),
+            input_names=["tokens"], output_names=["logits"], opset_version=17, dynamo=False,
+        )
         return blocks.parameter_count(model)
 
     def run(self, out_dir):
@@ -335,7 +424,8 @@ class TextTrainer:
             {"pretrain": self.pretrain, "sft": self.sft, "rl": self.rl, "compaction": self.compaction}[kind](stage)
             self.stages.append(kind)
         parameters = self.export(out_dir)
-        return {"stages": self.stages, "steps": self.steps_done, "loss": self.last_loss, "parameters": parameters}
+        return {"stages": self.stages, "steps": self.counter[0], "loss": self.last_loss, "parameters": parameters,
+                "gguf_compatible": blocks.gguf_compatible(self.architecture)}
 
 
 # ---- vision -----------------------------------------------------------------
@@ -351,51 +441,56 @@ def read_pictures(path):
     return header, tensor
 
 
+class VisionWrap(torch.nn.Module):
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+
+    def forward(self, x):
+        return {"logits": self.model(x)}
+
+
 def train_vision(plan, out_dir):
-    settings = plan.get("optimizer", {})
-    device = pick_device(settings.get("device", "auto"))
+    devices = pick_devices(plan.get("devices", "auto"))
+    log(describe(devices))
     header, pictures = read_pictures(plan["vision"]["pictures"])
     classes = int(plan["vision"]["classes"])
     model = blocks.VisionModel(classes, plan["architecture"])
     if plan.get("start", {}).get("weights"):
         model.load_state_dict(safetensors.load(plan["start"]["weights"]))
         log("Started from the base model's weights.")
-    model.to(device)
+    runner = Runner(VisionWrap(model), devices)
     labels = torch.tensor([item["class"] for item in header["items"]])
     negative = torch.tensor([bool(item.get("negative")) for item in header["items"]])
     stage = next((s for s in plan.get("stages", []) if s.get("type") == "vision"), {})
     steps, batch = int(stage.get("steps", 300)), int(stage.get("batch", 16))
-    if stage.get("lr"):
-        settings = dict(settings, lr=stage["lr"])
-    optimizer = optim.make(model, settings)
     emit("stage", stage="vision")
-    loss_value = float("nan")
-    for step in range(steps):
-        model.train()
+    log("%d pictures of %d answers." % (len(pictures), classes))
+    counter = [0]
+
+    def compute(step):
         index = torch.randint(0, len(pictures), (min(batch, len(pictures)),))
-        x = pictures[index].to(device)
+        x = pictures[index].to(runner.device)
         # A little shifting, so the model does not learn exact pixel positions.
         x = torch.roll(x, shifts=(random.randint(-2, 2), random.randint(-2, 2)), dims=(2, 3))
-        y, neg = labels[index].to(device), negative[index].to(device)
-        logits = model(x)
-        loss = torch.zeros((), device=device)
+        y, neg = labels[index].to(runner.device), negative[index].to(runner.device)
+        logits = runner(x)["logits"]
+        loss = torch.zeros((), device=runner.device)
         if (~neg).any():
             loss = loss + F.cross_entropy(logits[~neg], y[~neg])
         if neg.any():
             p = torch.softmax(logits[neg], -1).gather(-1, y[neg].unsqueeze(-1)).squeeze(-1)
             loss = loss - torch.log((1 - p).clamp_min(1e-6)).mean()
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        loss_value = float(loss.detach())
-        if step % 5 == 0 or step + 1 == steps:
-            emit("progress", stage="vision", step=step + 1, steps=steps, loss=round(loss_value, 4))
+        return loss, {}
+
+    loss_value = run_steps(runner, stage.get("optimizer") or {}, steps, "vision", compute, counter)
     model.eval().to("cpu")
     safetensors.save(model.state_dict(), os.path.join(out_dir, "weights.safetensors"))
     sample = torch.zeros(1, 3, header["height"], header["width"])
+    log("Exporting the model.")
     torch.onnx.export(model, (sample,), os.path.join(out_dir, "model.onnx"), input_names=["input"],
                       output_names=["logits"], opset_version=17, dynamo=False)
-    return {"stages": ["vision"], "steps": steps, "loss": loss_value, "parameters": blocks.parameter_count(model)}
+    return {"stages": ["vision"], "steps": counter[0], "loss": loss_value, "parameters": blocks.parameter_count(model)}
 
 
 def main(path):
@@ -407,12 +502,17 @@ def main(path):
     torch.manual_seed(plan.get("seed", 0))
     began = time.time()
     try:
+        check_packages()
         if plan.get("kind") == "vision":
             report = train_vision(plan, out_dir)
         else:
             report = TextTrainer(plan).run(out_dir)
     except SystemExit as stop:
         emit("error", message=str(stop))
+        return 1
+    except torch.cuda.OutOfMemoryError:
+        emit("error", message="The graphics card ran out of memory. Make the model or the batch smaller, turn on "
+                              "“Recompute activations” in the Optimizer block, or train on the CPU.")
         return 1
     report["seconds"] = round(time.time() - began, 1)
     if isinstance(report.get("loss"), float) and math.isnan(report["loss"]):

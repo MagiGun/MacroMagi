@@ -273,11 +273,65 @@ pub struct ToolSpec {
     pub parameters: Value,
 }
 
-/// A tool call found in a text model's answer: `<tool>{"name": …, "args": {…}}</tool>`.
+/// A tool call found in a text model's answer:
+/// `<tool_call>{"name": …, "arguments": {…}}</tool_call>` (older models write `"args"`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ToolCall {
     pub name: String,
     pub args: Value,
+}
+
+/// A text model that can be asked to think or not. Not thinking is an
+/// empty thinking span the answer starts with.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ThinkingSpec {
+    /// Think unless the request says not to.
+    pub on_by_default: bool,
+}
+
+impl Default for ThinkingSpec {
+    fn default() -> Self {
+        Self { on_by_default: true }
+    }
+}
+
+/// How hard a text model thinks: the levels it was trained with, such as
+/// low, medium and high, named in the system text as `Reasoning effort: high`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EffortSpec {
+    pub levels: Vec<String>,
+    pub default: String,
+}
+
+impl Default for EffortSpec {
+    fn default() -> Self {
+        Self { levels: vec!["low".into(), "medium".into(), "high".into()], default: "medium".into() }
+    }
+}
+
+impl EffortSpec {
+    /// The level a request asks for, or the default.
+    pub fn level<'a>(&'a self, asked: &'a str) -> &'a str {
+        if self.levels.iter().any(|l| l == asked) { asked } else { &self.default }
+    }
+}
+
+/// JSON the way Python's `json.dumps(…, sort_keys=True)` writes it (", " and
+/// ": ", keys in order), so prompts written here and in training agree.
+pub fn spaced_json(value: &Value) -> String {
+    match value {
+        Value::Array(items) => format!("[{}]", items.iter().map(spaced_json).collect::<Vec<_>>().join(", ")),
+        Value::Object(map) => format!(
+            "{{{}}}",
+            map.iter()
+                .map(|(k, v)| format!("{}: {}", Value::String(k.clone()), spaced_json(v)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        other => other.to_string(),
+    }
 }
 
 /// How a text model reads and writes: its tokens, its chat tags, its personas
@@ -298,8 +352,19 @@ pub struct TextSpec {
     /// Ends a turn; generation stops at it.
     pub end_tag: String,
     pub think_tags: (String, String),
-    /// The one way of writing a tool call: `<tool>{"name": …, "args": {…}}</tool>`.
+    /// The one way of writing a tool call: `<tool_call>{"name": …, "arguments": {…}}</tool_call>`.
     pub tool_tags: (String, String),
+    /// Opens a turn with a tool's result. Models with one also read the
+    /// tools they may use in their system text (see [`TextSpec::system_text`]);
+    /// models made before it have none and read results as user turns.
+    #[serde(default)]
+    pub tool_tag: String,
+    /// Whether the model can be asked not to think (and thinks unless asked).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ThinkingSpec>,
+    /// Levels of reasoning effort the model knows, named in its system text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<EffortSpec>,
     pub compact_tags: (String, String),
     pub personas: Vec<Persona>,
     pub tools: Vec<ToolSpec>,
@@ -320,7 +385,10 @@ impl Default for TextSpec {
             assistant_tag: "<|assistant|>".into(),
             end_tag: "<|end|>".into(),
             think_tags: ("<think>".into(), "</think>".into()),
-            tool_tags: ("<tool>".into(), "</tool>".into()),
+            tool_tags: ("<tool_call>".into(), "</tool_call>".into()),
+            tool_tag: "<|tool|>".into(),
+            thinking: None,
+            effort: None,
             compact_tags: ("<compact>".into(), "</compact>".into()),
             personas: Vec::new(),
             tools: Vec::new(),
@@ -348,6 +416,7 @@ impl TextSpec {
             self.tool_tags.1.clone(),
             self.compact_tags.0.clone(),
             self.compact_tags.1.clone(),
+            self.tool_tag.clone(),
         ];
         for persona in &self.personas {
             let name = persona.tag.trim_start_matches('<').trim_end_matches('>');
@@ -411,14 +480,76 @@ impl TextSpec {
         self.specials.iter().position(|s| s == tag).map(|i| 256 + i as u32)
     }
 
+    /// Tags the model writes as text (thinking, tool calls, personas), which
+    /// chat programs show; the turn tags are control tokens they hide.
+    pub fn is_text_tag(&self, tag: &str) -> bool {
+        ![&self.end_tag, &self.system_tag, &self.user_tag, &self.assistant_tag, &self.tool_tag]
+            .iter()
+            .any(|t| *t == tag)
+    }
+
+    /// The tools a model may use, as its system text lists them.
+    pub fn tools_text(&self, tools: &[ToolSpec]) -> String {
+        let mut text = "You can use these tools:".to_owned();
+        for tool in tools {
+            text.push_str(&format!(
+                "\n- {}: {} Parameters: {}",
+                tool.name,
+                tool.description.trim(),
+                spaced_json(&tool.parameters)
+            ));
+        }
+        text.push_str(&format!(
+            "\nTo use one, write {}{{\"name\": \"<tool name>\", \"arguments\": {{...}}}}{}. Its result comes back in the next turn.",
+            self.tool_tags.0, self.tool_tags.1
+        ));
+        text
+    }
+
+    /// The system text of a request: `system` (the model's own when empty),
+    /// the reasoning effort and the tools, separated by blank lines.
+    pub fn system_text(&self, system: &str, effort: &str, tools: &[ToolSpec]) -> String {
+        let mut parts = Vec::new();
+        let system = if system.trim().is_empty() { self.system.trim() } else { system.trim() };
+        if !system.is_empty() {
+            parts.push(system.to_owned());
+        }
+        if let Some(spec) = &self.effort {
+            parts.push(format!("Reasoning effort: {}", spec.level(effort)));
+        }
+        if !self.tool_tag.is_empty() && !tools.is_empty() {
+            parts.push(self.tools_text(tools));
+        }
+        parts.join("\n\n")
+    }
+
+    /// Whether a request thinks: as asked, else as the model does by default.
+    pub fn thinks(&self, asked: Option<bool>) -> bool {
+        match &self.thinking {
+            Some(spec) => asked.unwrap_or(spec.on_by_default),
+            None => true,
+        }
+    }
+
     /// A request as the model reads it: the system text, the request, and the
     /// tag after which it answers.
     pub fn prompt(&self, user: &str) -> String {
+        self.prompt_with(user, None, "")
+    }
+
+    /// A request as the model reads it, thinking or not and at an effort level
+    /// (`None` and empty follow the model). The model's tools are listed.
+    pub fn prompt_with(&self, user: &str, thinking: Option<bool>, effort: &str) -> String {
         let mut text = String::new();
-        if !self.system.trim().is_empty() {
-            text.push_str(&format!("{}{}{}", self.system_tag, self.system.trim(), self.end_tag));
+        let system = self.system_text("", effort, &self.tools);
+        if !system.is_empty() {
+            text.push_str(&format!("{}{}{}", self.system_tag, system, self.end_tag));
         }
         text.push_str(&format!("{}{}{}{}", self.user_tag, user, self.end_tag, self.assistant_tag));
+        if self.thinking.is_some() && !self.thinks(thinking) {
+            text.push_str(&self.think_tags.0);
+            text.push_str(&self.think_tags.1);
+        }
         text
     }
 
@@ -433,7 +564,13 @@ impl TextSpec {
             if let Ok(Value::Object(call)) = serde_json::from_str::<Value>(after[..end].trim())
                 && let Some(name) = call.get("name").and_then(Value::as_str)
             {
-                calls.push(ToolCall { name: name.to_owned(), args: call.get("args").cloned().unwrap_or(Value::Null) });
+                let args = call.get("arguments").or_else(|| call.get("args")).cloned().unwrap_or(Value::Null);
+                // Some programs send the arguments as a JSON string.
+                let args = match args {
+                    Value::String(text) => serde_json::from_str(&text).unwrap_or(Value::String(text)),
+                    other => other,
+                };
+                calls.push(ToolCall { name: name.to_owned(), args });
             }
             rest = &after[end + close.len()..];
         }
@@ -489,27 +626,139 @@ impl TextSpec {
 }
 
 /// One block of a model's architecture, as the Magic tab's canvas put it
-/// together: `kind` (such as `transformer`, `moe`, `sparse_attention`) and its settings.
+/// together: the block's type (`magic.layers`, `magic.csa`…), its settings,
+/// and the feed-forward block wired into it, if any.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ArchBlock {
     pub kind: String,
     pub params: Map<String, Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ffn: Option<Box<ArchBlock>>,
 }
 
-/// The shape of a model trained in MacroMagi.
+/// The shape of a model trained in MacroMagi, as the trainer builds it
+/// (`runtime/python/magi_train/blocks.py`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Architecture {
-    /// The width of the model: numbers per token (text) or per pixel feature (vision).
+    /// Numbers per token.
     pub width: u32,
     pub heads: u32,
+    /// Key/value heads (grouped-query attention); equal to `heads` for plain attention.
+    pub kv_heads: u32,
+    /// The longest text, in tokens (text), or the side of the pictures (vision).
+    pub context: u32,
+    /// `rope` (rotary) or `learned`.
+    pub positions: String,
+    pub rope_theta: f64,
+    /// Manifold-constrained hyper-connections: `{"streams": n, "sinkhorn": iterations}`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hyper_connections: Option<Value>,
+    /// Multi-token prediction while training: `{"weight": w}`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mtp: Option<Value>,
+    pub prefix_split: bool,
+    /// The output head shares the embedding table.
+    pub tied: bool,
+    /// Embeddings are scaled by √width (Gemma).
+    pub embed_scale: bool,
+    /// One per layer: `{"attention": {"kind": …, …}, "ffn": {"kind": …, …}, "norm": "pre" | "sandwich"}`.
+    pub layers: Vec<Value>,
+    /// Vision models: the convolutions, `{"layers": n, "channels": c}`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conv: Option<Value>,
+    /// The canvas blocks it was made from, in order, to rebuild them.
     pub blocks: Vec<ArchBlock>,
 }
 
 impl Default for Architecture {
     fn default() -> Self {
-        Self { width: 128, heads: 4, blocks: Vec::new() }
+        Self {
+            width: 128,
+            heads: 4,
+            kv_heads: 4,
+            context: 256,
+            positions: "rope".into(),
+            rope_theta: 10000.0,
+            hyper_connections: None,
+            mtp: None,
+            prefix_split: false,
+            tied: false,
+            embed_scale: false,
+            layers: Vec::new(),
+            conv: None,
+            blocks: Vec::new(),
+        }
+    }
+}
+
+impl Architecture {
+    /// Whether GGUF runtimes such as llama.cpp and LM Studio run the model as
+    /// it is (see [`Architecture::gguf_arch`]).
+    pub fn gguf_compatible(&self) -> bool {
+        self.gguf_arch().is_some()
+    }
+
+    /// The GGUF architecture the model is, if it is one llama.cpp knows. All
+    /// need Transformer Layers only – rotary positions, plain attention, a
+    /// gated feed-forward layer, the same options in every layer:
+    ///
+    /// - `llama`: SwiGLU, norms before each part (Llama, Mistral);
+    /// - `qwen3`: the same with queries and keys normalized;
+    /// - `gemma3`: queries and keys normalized, GeGLU, sandwich norms, scaled
+    ///   and tied embeddings, and no window or a window on five layers of six.
+    pub fn gguf_arch(&self) -> Option<&'static str> {
+        let plain = self.conv.is_none()
+            && !self.layers.is_empty()
+            && self.positions == "rope"
+            && self.hyper_connections.is_none()
+            && !self.prefix_split;
+        if !plain {
+            return None;
+        }
+        let text = |layer: &Value, path: &str, default: &'static str| {
+            layer.pointer(path).and_then(Value::as_str).unwrap_or(default).to_owned()
+        };
+        let flag = |layer: &Value, path: &str| layer.pointer(path).and_then(Value::as_bool).unwrap_or(false);
+        let mut shapes = std::collections::BTreeSet::new();
+        let mut windows = Vec::new();
+        for layer in &self.layers {
+            if text(layer, "/attention/kind", "full") != "full" || text(layer, "/ffn/kind", "dense") != "dense" {
+                return None;
+            }
+            if flag(layer, "/attention/bias")
+                || layer.pointer("/attention/rotary").and_then(Value::as_f64).unwrap_or(1.0) < 1.0
+            {
+                return None;
+            }
+            shapes.insert((
+                flag(layer, "/attention/qk_norm"),
+                text(layer, "/ffn/activation", "swiglu"),
+                text(layer, "/norm", "pre"),
+            ));
+            windows.push(layer.pointer("/attention/window").and_then(Value::as_u64).unwrap_or(0));
+        }
+        if shapes.len() != 1 {
+            return None;
+        }
+        let (qk, activation, norm) = shapes.pop_first()?;
+        if windows.iter().all(|w| *w == 0) && !self.embed_scale && activation == "swiglu" && norm == "pre" {
+            return Some(if qk { "qwen3" } else { "llama" });
+        }
+        let gemma_window = || {
+            let local: Vec<u64> = windows.iter().enumerate().filter(|(i, _)| i % 6 != 5).map(|(_, w)| *w).collect();
+            windows.iter().all(|w| *w == 0)
+                || (local.iter().all(|w| *w == local[0] && *w > 0)
+                    && windows.iter().enumerate().filter(|(i, _)| i % 6 == 5).all(|(_, w)| *w == 0))
+        };
+        (qk && activation == "geglu" && norm == "sandwich" && self.embed_scale && self.tied && gemma_window())
+            .then_some("gemma3")
+    }
+
+    /// The local window of a model with one (Gemma 3), in tokens.
+    pub fn local_window(&self) -> Option<u64> {
+        self.layers.iter().filter_map(|l| l.pointer("/attention/window").and_then(Value::as_u64)).find(|w| *w > 0)
     }
 }
 
@@ -588,6 +837,10 @@ pub struct MagicModel {
     pub datasets: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trained: Option<TrainingRecord>,
+    /// A GGUF model file this model runs (with llama.cpp), where it is on disk.
+    /// It stays outside the `.magic` file: GGUF models are often gigabytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gguf: Option<String>,
 }
 
 impl Default for MagicModel {
@@ -613,6 +866,7 @@ impl Default for MagicModel {
             studio: None,
             datasets: Vec::new(),
             trained: None,
+            gguf: None,
         }
     }
 }
@@ -813,6 +1067,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn requests_list_tools_effort_and_thinking() {
+        let mut spec = TextSpec {
+            system: "Be brief.".into(),
+            tools: vec![ToolSpec {
+                name: "web_search".into(),
+                description: "Searches the web.".into(),
+                parameters: serde_json::json!({"type": "object", "properties": {"query": {"type": "string"}}}),
+            }],
+            thinking: Some(ThinkingSpec::default()),
+            effort: Some(EffortSpec::default()),
+            ..TextSpec::default()
+        };
+        spec.ensure_specials();
+        let prompt = spec.prompt_with("hi", Some(false), "high");
+        assert!(prompt.starts_with(
+            "<|system|>Be brief.\n\nReasoning effort: high\n\nYou can use these tools:\n- web_search: Searches the web. \
+             Parameters: {\"properties\": {\"query\": {\"type\": \"string\"}}, \"type\": \"object\"}"
+        ));
+        assert!(prompt.ends_with("<|user|>hi<|end|><|assistant|><think></think>"));
+        assert!(spec.prompt_with("hi", None, "extreme").contains("Reasoning effort: medium"));
+        assert!(spec.prompt("hi").ends_with("<|assistant|>"));
+        let calls =
+            spec.tool_calls(r#"<tool_call>{"name": "web_search", "arguments": "{\"query\": \"rust\"}"}</tool_call>"#);
+        assert_eq!(calls[0].args, serde_json::json!({"query": "rust"}));
+        assert!(spec.is_text_tag("<think>") && !spec.is_text_tag("<|tool|>"));
+    }
+
+    #[test]
+    fn old_text_specs_keep_their_tokens() {
+        // Saved before tool turns existed: no tool tag, so no new token.
+        let old: TextSpec =
+            serde_json::from_str(r#"{"specials": ["<|end|>"], "tool_tags": ["<tool>", "</tool>"]}"#).unwrap();
+        assert!(old.tool_tag.is_empty());
+        let mut again = old.clone();
+        again.ensure_specials();
+        assert!(!again.specials.iter().any(|s| s == "<|tool|>"));
+    }
+
+    #[test]
     fn text_is_bytes_and_special_tags_and_comes_back_the_same() {
         let spec = TextSpec {
             personas: vec![Persona { name: "Gun".into(), tag: "<gun>".into(), role: String::new() }],
@@ -831,7 +1124,7 @@ mod tests {
 
     #[test]
     fn tool_calls_are_read_and_the_visible_answer_has_none() {
-        let spec = TextSpec::default();
+        let spec = TextSpec { tool_tags: ("<tool>".into(), "</tool>".into()), ..TextSpec::default() };
         let answer = r#"<think>press it</think>Sure.<tool>{"name": "press", "args": {"key": "Space"}}</tool><tool>broken</tool><|end|>"#;
         let calls = spec.tool_calls(answer);
         assert_eq!(calls, vec![ToolCall { name: "press".into(), args: serde_json::json!({ "key": "Space" }) }]);

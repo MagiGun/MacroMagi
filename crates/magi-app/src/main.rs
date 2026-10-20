@@ -67,6 +67,7 @@ fn main() -> ExitCode {
 fn gui(options: StartupOptions) -> ExitCode {
     let paths = Paths::detect();
     let settings = Settings::load(&paths.settings_file());
+    report_crashes(paths.data_dir.join("crash.log"));
 
     let size = WINDOW_SIZE_OVERRIDE.get().copied().flatten().or(settings.window_size).unwrap_or(DEFAULT_SIZE);
     let viewport = egui::ViewportBuilder::default()
@@ -95,4 +96,36 @@ fn gui(options: StartupOptions) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// If MacroMagi ever fails, it says so instead of vanishing: what happened
+/// goes into `crash.log` in the data folder, and a message points at it.
+fn report_crashes(log: std::path::PathBuf) {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let what = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_owned())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "an unknown error".to_owned());
+        let place = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
+        let thread = std::thread::current().name().unwrap_or("unnamed").to_owned();
+        let trace = std::backtrace::Backtrace::force_capture();
+        let report =
+            format!("MacroMagi {} stopped on thread “{thread}”: {what}\nat {place}\n\n{trace}\n", magi_core::VERSION);
+        let _ = std::fs::write(&log, &report);
+        // Only the window's own thread takes the app down; say so there.
+        if thread == "main" {
+            rfd::MessageDialog::new()
+                .set_level(rfd::MessageLevel::Error)
+                .set_title("MacroMagi stopped")
+                .set_description(format!(
+                    "Something went wrong and MacroMagi has to close:\n\n{what}\n\nThe details are in {}. Please send that file with a description of what you did.",
+                    log.display()
+                ))
+                .show();
+        }
+        previous(info);
+    }));
 }

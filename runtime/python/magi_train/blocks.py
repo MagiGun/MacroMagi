@@ -1,27 +1,51 @@
 """The building blocks of models trained in MacroMagi.
 
-A text model is an embedding, the blocks the Magic tab's canvas lists (each
-a stack of layers), and a head that gives a score per token. The blocks:
+A text model is an embedding, a stack of layers and a head that gives a score
+per token. The Magic tab's canvas describes it as JSON (`architecture`):
 
-    transformer        attention and a feed-forward layer: the standard block
-    sparse_attention   attention that keeps keys and values in a small latent
-                       (low-rank, optionally shared by the block's layers) and
-                       looks at a sliding window plus every `stride`-th token
-    moe                a mixture of experts: shared experts every token goes
-                       through, and routed experts of which each token uses `top_k`
-    ssm                a state-space layer in the quadratic ("state space
-                       duality") form of Mamba-2: per head, a learned decay
-                       over time instead of attention scores
-    persona_router     feed-forward experts, one per persona of the reasoning
-                       (and one neutral), with routing taught by the persona tags
-    prefix_split       not layers: the request (up to the assistant tag) is read
-                       both ways at once, and only the answer causally (a
-                       prefix language model, or encoder/decoder split)
+    width, heads, kv_heads    numbers per token, attention heads, key/value heads
+    context                   the longest text, in tokens
+    positions                 "rope" (rotary, the default) or "learned"
+    rope_theta                the rotary base
+    hyper_connections         {"streams": n, "sinkhorn": iterations} or absent
+    mtp                       {"weight": 0.3} or absent
+    prefix_split              true: the request is read both ways at once
+    tied                      true: the output head shares the embedding table
+    embed_scale               true: embeddings are scaled by sqrt(width) (Gemma)
+    layers                    one entry per layer: {"attention": {...}, "ffn": {...},
+                              "norm": "pre" | "sandwich"}; "sandwich" also normalizes
+                              each part's output, before it is added back (Gemma, GLM)
 
-A vision model is a stack of convolutions (`conv`) and a classifier.
+Attention ("attention.kind"):
 
-Everything traces to ONNX with a dynamic sequence length, so MacroMagi can run
-the models it trains.
+    full      causal attention with rotary positions and grouped key/value heads
+              (the Llama layout; models made only of these export to GGUF).
+              Options: "qk_norm" (RMSNorm on each head's queries and keys, as in
+              Qwen3 and Gemma 3), "bias" (on queries, keys and values), "rotary"
+              (the share of each head that turns, 1.0 by default; GLM uses 0.5)
+              and "window" (look only at the last `window` tokens; 0: all)
+    window    the same, looking only at the last `window` tokens
+    mla       multi-head latent attention (DeepSeek-V2/V3): keys and values come
+              up from a small latent, with a separate rotary part shared by heads
+    csa       compressed sparse attention (DeepSeek-V4): every `compress` tokens
+              become one entry (a learned, softmax-weighted pooling over two
+              overlapping blocks); a lightning indexer picks the `top_k` entries
+              each token attends to, beside a sliding window of plain tokens
+    hca       heavily compressed attention (DeepSeek-V4): larger blocks, attended
+              to densely, beside a sliding window
+    ssm       a Mamba-2 state-space layer, in its exact quadratic form
+
+Feed-forward ("ffn.kind"): "dense" (SwiGLU, or GeGLU with "activation": "geglu"), "moe" (DeepSeekMoE: shared and
+routed experts; softmax, sigmoid or sqrt-softplus affinities; an auxiliary
+balance loss or auxiliary-loss-free bias balancing; or hash routing by token)
+and "persona" (an expert per persona of the reasoning, routed by its tags).
+
+A vision model is a stack of convolutions and a classifier.
+
+The forward pass returns a dictionary – logits, an auxiliary loss and the
+experts' loads – so that several graphics cards (DataParallel) can share it;
+`Exported` wraps a model as tokens -> logits for ONNX. Top-k choices are
+made by rank in exported models, so ONNX runtimes need no TopK operator.
 """
 
 import math
@@ -33,89 +57,429 @@ import torch.nn.functional as F
 NEG = -1e4
 
 
+class RMSNorm(nn.Module):
+    def __init__(self, dim, eps=1e-5):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(dim))
+        self.eps = eps
+
+    def forward(self, x):
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps) * self.weight
+
+
+def rotate(x, cos, sin):
+    """Rotary positions on the last dimension of x [..., n, dim] (halves layout)."""
+    half = x.shape[-1] // 2
+    turned = torch.cat([-x[..., half:], x[..., :half]], dim=-1)
+    return x * cos + turned * sin
+
+
+def rank_mask(scores, k):
+    """True for the k highest scores on the last axis (ties: the earlier wins), without TopK."""
+    n = scores.shape[-1]
+    idx = torch.arange(n, device=scores.device)
+    higher = (scores.unsqueeze(-1) < scores.unsqueeze(-2)).sum(-1)
+    tied = ((scores.unsqueeze(-1) == scores.unsqueeze(-2)) & (idx.view(n, 1) > idx.view(1, n))).sum(-1)
+    return (higher + tied) < k
+
+
+class Context:
+    """What every layer needs besides its input: tokens, the mask, rotary tables."""
+
+    def __init__(self, tokens, mask, theta, labels=None, rotary_on=True, causal=True):
+        self.tokens, self.mask, self.theta, self.labels = tokens, mask, theta, labels
+        self.rotary_on = rotary_on
+        # Plain causal attention: no request read both ways (Encoder/Decoder Split).
+        self.causal = causal
+        self._tables = {}
+
+    def rope(self, dim, positions):
+        """cos and sin for `positions` (a 1-D tensor), each [len, dim]."""
+        if dim not in self._tables:
+            # Compressed entries sit at the end of their (padded) block: a little past the text.
+            span = self.mask.shape[-1] + 1024
+            inv = 1.0 / (self.theta ** (torch.arange(0, dim, 2, dtype=torch.float32, device=positions.device) / dim))
+            angles = torch.outer(torch.arange(span, dtype=torch.float32, device=positions.device), inv)
+            angles = torch.cat([angles, angles], dim=-1)
+            if not self.rotary_on:
+                angles = torch.zeros_like(angles)
+            self._tables[dim] = (angles.cos(), angles.sin())
+        cos, sin = self._tables[dim]
+        return cos[positions], sin[positions]
+
+
+def window_mask(mask, window):
+    s = mask.shape[-1]
+    rows = torch.arange(s, device=mask.device).unsqueeze(1)
+    cols = torch.arange(s, device=mask.device).unsqueeze(0)
+    return mask & ((rows - cols) < window)
+
+
+def even(n):
+    return max(2, int(n) // 2 * 2)
+
+
 # ---- attention --------------------------------------------------------------
 
 
-class Attention(nn.Module):
-    def __init__(self, width, heads, kv_rank=0):
+class FullAttention(nn.Module):
+    """Causal attention with rotary positions and grouped key/value heads (Llama layout)."""
+
+    def __init__(self, width, heads, kv_heads, p):
         super().__init__()
-        self.heads, self.dim = heads, width // heads
-        self.q = nn.Linear(width, width, bias=False)
-        self.kv_rank = kv_rank
-        if kv_rank:
-            # Keys and values come from a small latent: the cache stores only it.
-            self.kv_down = nn.Linear(width, kv_rank, bias=False)
-            self.k_up = nn.Linear(kv_rank, width, bias=False)
-            self.v_up = nn.Linear(kv_rank, width, bias=False)
+        self.heads, self.kv_heads, self.dim = heads, kv_heads, width // heads
+        self.window = int(p.get("window", 0) or 0)
+        bias = bool(p.get("bias"))
+        self.q_proj = nn.Linear(width, heads * self.dim, bias=bias)
+        self.k_proj = nn.Linear(width, kv_heads * self.dim, bias=bias)
+        self.v_proj = nn.Linear(width, kv_heads * self.dim, bias=bias)
+        self.o_proj = nn.Linear(heads * self.dim, width, bias=False)
+        self.turned = min(self.dim, even(self.dim * float(p.get("rotary", 1.0) or 1.0)))
+        if p.get("qk_norm"):
+            self.q_norm, self.k_norm = RMSNorm(self.dim), RMSNorm(self.dim)
         else:
-            self.k = nn.Linear(width, width, bias=False)
-            self.v = nn.Linear(width, width, bias=False)
-        self.out = nn.Linear(width, width, bias=False)
+            self.q_norm = self.k_norm = None
 
-    def latent(self, x):
-        return self.kv_down(x)
+    def turn(self, x, cos, sin):
+        if self.turned == self.dim:
+            return rotate(x, cos, sin)
+        return torch.cat([rotate(x[..., : self.turned], cos, sin), x[..., self.turned :]], dim=-1)
 
-    def forward(self, x, mask, latent=None):
-        b, s, w = x.shape
-        q = self.q(x).view(b, s, self.heads, self.dim).transpose(1, 2)
-        if self.kv_rank:
-            c = self.kv_down(x) if latent is None else latent
-            k, v = self.k_up(c), self.v_up(c)
+    def forward(self, x, cx):
+        b, s, _ = x.shape
+        q = self.q_proj(x).view(b, s, self.heads, self.dim).transpose(1, 2)
+        k = self.k_proj(x).view(b, s, self.kv_heads, self.dim).transpose(1, 2)
+        v = self.v_proj(x).view(b, s, self.kv_heads, self.dim).transpose(1, 2)
+        if self.q_norm is not None:
+            q, k = self.q_norm(q), self.k_norm(k)
+        cos, sin = cx.rope(self.turned, torch.arange(s, device=x.device))
+        q, k = self.turn(q, cos, sin), self.turn(k, cos, sin)
+        if self.kv_heads != self.heads:
+            repeat = self.heads // self.kv_heads
+            k, v = k.repeat_interleave(repeat, dim=1), v.repeat_interleave(repeat, dim=1)
+        # PyTorch's fused attention: the same softmax(qk/√d)v, without keeping the whole score matrix
+        # (plainly causal attention uses the fastest kernel). It exports to ONNX as plain operators.
+        if not self.window and cx.causal:
+            y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         else:
-            k, v = self.k(x), self.v(x)
-        k = k.view(b, s, self.heads, self.dim).transpose(1, 2)
-        v = v.view(b, s, self.heads, self.dim).transpose(1, 2)
-        scores = (q @ k.transpose(-1, -2)) / math.sqrt(self.dim)
-        scores = scores.masked_fill(~mask, NEG)
-        y = torch.softmax(scores, dim=-1) @ v
-        return self.out(y.transpose(1, 2).reshape(b, s, w))
+            mask = window_mask(cx.mask, self.window) if self.window else cx.mask
+            y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+        return self.o_proj(y.transpose(1, 2).reshape(b, s, -1))
 
 
-class FeedForward(nn.Module):
-    def __init__(self, width, mult=4):
+class LatentAttention(nn.Module):
+    """Multi-head latent attention (DeepSeek-V2/V3).
+
+    Keys and values are made from a small latent per token (all a cache would
+    keep), plus a rotary key part shared by all heads; queries may come from a
+    latent too.
+    """
+
+    def __init__(self, width, heads, p):
         super().__init__()
-        self.up = nn.Linear(width, width * mult)
-        self.down = nn.Linear(width * mult, width)
+        self.heads = heads
+        self.nope = int(p.get("head_dim", width // heads))
+        self.rope = even(p.get("rope_dim", max(8, self.nope // 2)))
+        self.v_dim = self.nope
+        self.kv_rank = int(p.get("kv_rank", max(16, width // 4)))
+        self.q_rank = int(p.get("q_rank", 0))
+        qk = self.nope + self.rope
+        if self.q_rank:
+            self.q_down = nn.Linear(width, self.q_rank, bias=False)
+            self.q_norm = RMSNorm(self.q_rank)
+            self.q_up = nn.Linear(self.q_rank, heads * qk, bias=False)
+        else:
+            self.q_proj = nn.Linear(width, heads * qk, bias=False)
+        self.kv_down = nn.Linear(width, self.kv_rank + self.rope, bias=False)
+        self.kv_norm = RMSNorm(self.kv_rank)
+        self.kv_up = nn.Linear(self.kv_rank, heads * (self.nope + self.v_dim), bias=False)
+        self.o_proj = nn.Linear(heads * self.v_dim, width, bias=False)
+
+    def forward(self, x, cx):
+        b, s, _ = x.shape
+        q = self.q_up(self.q_norm(self.q_down(x))) if self.q_rank else self.q_proj(x)
+        q = q.view(b, s, self.heads, self.nope + self.rope).transpose(1, 2)
+        q_nope, q_rope = q.split([self.nope, self.rope], dim=-1)
+        latent, k_rope = self.kv_down(x).split([self.kv_rank, self.rope], dim=-1)
+        kv = self.kv_up(self.kv_norm(latent)).view(b, s, self.heads, self.nope + self.v_dim).transpose(1, 2)
+        k_nope, v = kv.split([self.nope, self.v_dim], dim=-1)
+        cos, sin = cx.rope(self.rope, torch.arange(s, device=x.device))
+        q_rope = rotate(q_rope, cos, sin)
+        k_rope = rotate(k_rope.unsqueeze(1), cos, sin).expand(b, self.heads, s, self.rope)
+        q = torch.cat([q_nope, q_rope], dim=-1)
+        k = torch.cat([k_nope, k_rope], dim=-1)
+        scores = (q @ k.transpose(-1, -2)) / math.sqrt(self.nope + self.rope)
+        y = torch.softmax(scores.masked_fill(~cx.mask, NEG), dim=-1) @ v
+        return self.o_proj(y.transpose(1, 2).reshape(b, s, -1))
+
+
+class Compressor(nn.Module):
+    """Turns every `m` tokens into one entry: a softmax-weighted pooling, per channel.
+
+    With `overlap`, each entry pools 2m candidates – its own block and the one
+    before – as DeepSeek-V4's compressed sparse attention does.
+    """
+
+    def __init__(self, width, dim, m, overlap):
+        super().__init__()
+        self.m, self.overlap = m, overlap
+        self.c_a = nn.Linear(width, dim, bias=False)
+        self.z_a = nn.Linear(width, dim, bias=False)
+        self.b_a = nn.Parameter(torch.zeros(m, dim))
+        if overlap:
+            self.c_b = nn.Linear(width, dim, bias=False)
+            self.z_b = nn.Linear(width, dim, bias=False)
+            self.b_b = nn.Parameter(torch.zeros(m, dim))
 
     def forward(self, x):
-        return self.down(F.gelu(self.up(x)))
+        b, s, _ = x.shape
+        n = s // self.m
+        ca = self.c_a(x).view(b, n, self.m, -1)
+        za = self.z_a(x).view(b, n, self.m, -1) + self.b_a
+        if not self.overlap:
+            return (torch.softmax(za, dim=2) * ca).sum(2)
+        cb = self.c_b(x).view(b, n, self.m, -1)
+        zb = self.z_b(x).view(b, n, self.m, -1) + self.b_b
+        # The block before each block (none before the first).
+        cb = torch.cat([torch.zeros_like(cb[:, :1]), cb[:, :-1]], dim=1)
+        zb = torch.cat([torch.full_like(zb[:, :1], NEG), zb[:, :-1]], dim=1)
+        c, z = torch.cat([cb, ca], dim=2), torch.cat([zb, za], dim=2)
+        return (torch.softmax(z, dim=2) * c).sum(2)
+
+
+class CompressedAttention(nn.Module):
+    """DeepSeek-V4's compressed sparse (CSA) and heavily compressed (HCA) attention.
+
+    Queries come from a latent and are normalized per head; keys and values
+    are one shared head (MQA): compressed entries of earlier blocks – all of
+    them (HCA), or the `top_k` a lightning indexer picks (CSA) – and the last
+    `window` plain tokens. A learned sink per head lets a head attend to
+    little. Rotary positions cover the last `rope_dim` channels, and outputs
+    are rotated back by their own position so only distances count. Heads are
+    projected out in groups.
+    """
+
+    def __init__(self, width, heads, p, sparse):
+        super().__init__()
+        self.heads, self.sparse = heads, sparse
+        self.dim = even(p.get("head_dim", width // heads))
+        self.rope = min(even(p.get("rope_dim", max(8, self.dim // 4))), self.dim)
+        self.m = max(1, int(p.get("compress", 4 if sparse else 32)))
+        self.window = int(p.get("window", 64))
+        q_rank = int(p.get("q_rank", max(16, width // 2)))
+        self.q_down = nn.Linear(width, q_rank, bias=False)
+        self.q_down_norm = RMSNorm(q_rank)
+        self.q_up = nn.Linear(q_rank, heads * self.dim, bias=False)
+        self.q_norm = RMSNorm(self.dim)
+        self.compressor = Compressor(width, self.dim, self.m, overlap=sparse)
+        self.kv_norm = RMSNorm(self.dim)
+        self.local = nn.Linear(width, self.dim, bias=False)
+        self.sink = nn.Parameter(torch.zeros(heads))
+        groups = max(1, min(int(p.get("groups", 2)), heads))
+        while heads % groups:
+            groups -= 1
+        self.groups = groups
+        group_dim = int(p.get("group_dim", max(8, width // 2)))
+        self.group_proj = nn.ModuleList(nn.Linear(heads // groups * self.dim, group_dim, bias=False) for _ in range(groups))
+        self.o_proj = nn.Linear(groups * group_dim, width, bias=False)
+        if sparse:
+            self.top_k = max(1, int(p.get("top_k", 16)))
+            self.ih, self.idim = int(p.get("indexer_heads", 4)), int(p.get("indexer_dim", 32))
+            self.index_q = nn.Linear(q_rank, self.ih * self.idim, bias=False)
+            self.index_w = nn.Linear(width, self.ih, bias=False)
+            self.index_k = Compressor(width, self.idim, self.m, overlap=True)
+        self.aux = None
+
+    def _rope(self, x, positions, cx):
+        cos, sin = cx.rope(self.rope, positions)
+        keep, turn = x.split([self.dim - self.rope, self.rope], dim=-1)
+        return torch.cat([keep, rotate(turn, cos, sin)], dim=-1)
+
+    def forward(self, x, cx):
+        b, s, _ = x.shape
+        pad = (-s) % self.m
+        xp = F.pad(x, (0, 0, 0, pad)) if pad else x
+        n = xp.shape[1] // self.m
+        positions = torch.arange(s, device=x.device)
+        cq = self.q_down_norm(self.q_down(x))
+        q = self.q_norm(self.q_up(cq).view(b, s, self.heads, self.dim)).transpose(1, 2)  # (b, h, s, d)
+        q = self._rope(q, positions, cx)
+
+        # Compressed entries, each placed at the last position of its block.
+        entries = self.kv_norm(self.compressor(xp))  # (b, n, d)
+        block_end = torch.arange(n, device=x.device) * self.m + (self.m - 1)
+        entries = self._rope(entries, block_end, cx)
+        # A token sees the blocks that ended before its own block began.
+        eligible = torch.arange(n, device=x.device).unsqueeze(0) < (positions // self.m).unsqueeze(1)  # (s, n)
+        select = eligible.unsqueeze(0).expand(b, s, n)
+        index = None
+        if self.sparse:
+            iq = self.index_q(cq).view(b, s, self.ih, self.idim)
+            ik = self.index_k(xp)  # (b, n, idim)
+            w = self.index_w(x)  # (b, s, ih)
+            index = (torch.relu(torch.einsum("bshd,bnd->bshn", iq, ik)) * w.unsqueeze(-1)).sum(2)  # (b, s, n)
+            index = index.masked_fill(~eligible.unsqueeze(0), NEG)
+            select = select & rank_mask(index, self.top_k)
+        local = self._rope(self.kv_norm(self.local(x)), positions, cx)
+        local_mask = window_mask(cx.mask, self.window).expand(b, 1, s, s)
+
+        keys = torch.cat([entries, local], dim=1).unsqueeze(1)  # (b, 1, n + s, d)
+        mask = torch.cat([select.unsqueeze(1), local_mask], dim=-1)  # (b, 1, s, n + s)
+        logits = (q @ keys.transpose(-1, -2)) / math.sqrt(self.dim)  # (b, h, s, n + s)
+        logits = logits.masked_fill(~mask, NEG)
+        sink = self.sink.view(1, self.heads, 1, 1).expand(b, self.heads, s, 1)
+        weights = torch.softmax(torch.cat([logits, sink], dim=-1), dim=-1)[..., :-1]
+        out = weights @ keys  # (b, h, s, d)
+        # Rotated back by their own position: what is left depends on distance only.
+        cos, sin = cx.rope(self.rope, positions)
+        keep, turn = out.split([self.dim - self.rope, self.rope], dim=-1)
+        out = torch.cat([keep, rotate(turn, cos, -sin)], dim=-1)
+
+        if self.sparse and self.training and n:
+            # The indexer learns to point where dense attention over the entries would look.
+            with torch.no_grad():
+                dense = logits[..., :n].masked_fill(~eligible.view(1, 1, s, n), NEG)
+                target = torch.softmax(dense, dim=-1).mean(1)
+            has = eligible.any(-1).view(1, s, 1).float()
+            self.aux = 0.1 * -((target * torch.log_softmax(index, dim=-1)) * has).sum(-1).mean()
+
+        per = self.heads // self.groups
+        parts = out.transpose(1, 2).reshape(b, s, self.groups, per * self.dim)
+        grouped = torch.cat([proj(parts[:, :, g]) for g, proj in enumerate(self.group_proj)], dim=-1)
+        return self.o_proj(grouped)
+
+
+class SSM(nn.Module):
+    """A Mamba-2 style state-space layer in its quadratic (state space duality) form."""
+
+    def __init__(self, width, heads, p):
+        super().__init__()
+        state = int(p.get("state", 16))
+        self.heads, self.dim, self.state = heads, width // heads, state
+        self.in_proj = nn.Linear(width, width * 2 + state * 2 + heads)
+        self.a_log = nn.Parameter(torch.zeros(heads))
+        self.y_norm = RMSNorm(width)
+        self.out = nn.Linear(width, width)
+
+    def forward(self, x, cx):
+        b, s, w = x.shape
+        mask = cx.mask
+        z, xs, bmat, cmat, dt = torch.split(self.in_proj(x), [w, w, self.state, self.state, self.heads], dim=-1)
+        dt = F.softplus(dt - 3.0).clamp(max=4.0)
+        log_a = -dt * torch.exp(self.a_log)
+        cum = torch.cumsum(log_a, dim=1).transpose(1, 2)
+        diff = cum.unsqueeze(-1) - cum.unsqueeze(-2)
+        decay = torch.exp(diff.masked_fill(~mask, NEG))
+        scores = (cmat @ bmat.transpose(-1, -2)).unsqueeze(1) / math.sqrt(self.state)
+        weights = (scores * decay).masked_fill(~mask, 0.0)
+        xs = (xs.view(b, s, self.heads, self.dim) * dt.unsqueeze(-1)).transpose(1, 2)
+        y = (weights @ xs).transpose(1, 2).reshape(b, s, w)
+        return self.out(self.y_norm(y) * F.silu(z))
+
+
+# ---- feed-forward -----------------------------------------------------------
+
+
+def hidden_of(width, mult):
+    return max(8, int(round(width * float(mult) / 8.0)) * 8)
+
+
+class SwiGLU(nn.Module):
+    """A gated feed-forward layer: SiLU gates (SwiGLU), or tanh-approximated GELU ones (GeGLU, Gemma)."""
+
+    def __init__(self, width, hidden, activation="swiglu"):
+        super().__init__()
+        self.gate_proj = nn.Linear(width, hidden, bias=False)
+        self.up_proj = nn.Linear(width, hidden, bias=False)
+        self.down_proj = nn.Linear(hidden, width, bias=False)
+        self.geglu = activation == "geglu"
+
+    def forward(self, x):
+        gate = self.gate_proj(x)
+        gate = F.gelu(gate, approximate="tanh") if self.geglu else F.silu(gate)
+        return self.down_proj(gate * self.up_proj(x))
 
 
 class MoE(nn.Module):
-    """Shared experts for every token, and routed experts of which each uses `top_k`."""
+    """DeepSeekMoE: shared experts for every token, and routed experts of which each uses `top_k`."""
 
-    def __init__(self, width, experts=8, shared=1, top_k=2, mult=2):
+    def __init__(self, width, p, vocab):
         super().__init__()
-        self.shared = nn.ModuleList(FeedForward(width, mult) for _ in range(shared))
-        self.experts = nn.ModuleList(FeedForward(width, mult) for _ in range(experts))
-        self.router = nn.Linear(width, experts, bias=False)
-        self.top_k = max(1, min(top_k, experts))
+        hidden = hidden_of(width, p.get("mult", 1))
+        self.n = max(1, int(p.get("experts", 8)))
+        self.top_k = max(1, min(int(p.get("top_k", 2)), self.n))
+        self.gating = p.get("gating", "softmax")
+        self.balance = p.get("balance", "aux")
+        self.hash = bool(p.get("hash", False))
+        self.normalize = bool(p.get("normalize", self.gating != "softmax"))
+        self.scale = float(p.get("scale", 1.0))
+        self.shared = nn.ModuleList(SwiGLU(width, hidden) for _ in range(int(p.get("shared", 1))))
+        self.experts = nn.ModuleList(SwiGLU(width, hidden) for _ in range(self.n))
+        self.gate = nn.Linear(width, self.n, bias=False)
+        # Auxiliary-loss-free balancing: a bias on choosing only, nudged after each step.
+        self.register_buffer("bias", torch.zeros(self.n))
+        if self.hash:
+            # Fixed experts per token id, by a hash (DeepSeek-V4's first MoE layers).
+            first = (torch.arange(vocab, dtype=torch.long) * 2654435761) % self.n
+            table = torch.stack([(first + j) % self.n for j in range(self.top_k)], dim=-1)
+            self.register_buffer("table", table)
         self.aux = None
+        self.load = None
+        self.dense = False  # every expert for every token, choices by rank (for export)
 
-    def forward(self, x):
+    def affinity(self, logits):
+        if self.gating == "sigmoid":
+            return torch.sigmoid(logits)
+        if self.gating == "sqrt_softplus":
+            return torch.sqrt(F.softplus(logits))
+        return torch.softmax(logits, dim=-1)
+
+    def forward(self, x, tokens):
+        b, s, w = x.shape
         y = sum((expert(x) for expert in self.shared), torch.zeros_like(x))
-        logits = self.router(x)
-        probs = torch.softmax(logits, dim=-1)
-        top, index = probs.topk(self.top_k, dim=-1)
-        weights = torch.zeros_like(probs).scatter(-1, index, top)
-        weights = weights / weights.sum(-1, keepdim=True).clamp_min(1e-9)
-        # Small models: every expert runs, weighted by the router (unused ones by 0).
-        outs = torch.stack([expert(x) for expert in self.experts], dim=-2)
-        y = y + (weights.unsqueeze(-1) * outs).sum(-2)
+        affinity = self.affinity(self.gate(x))  # (b, s, n)
+        if self.hash:
+            chosen = torch.zeros_like(affinity).scatter(-1, self.table[tokens], 1.0) > 0
+        elif self.dense:
+            chosen = rank_mask(affinity + self.bias, self.top_k)
+        else:
+            index = (affinity + self.bias).topk(self.top_k, dim=-1).indices
+            chosen = torch.zeros_like(affinity).scatter(-1, index, 1.0) > 0
+        weights = affinity * chosen
+        if self.normalize:
+            weights = weights / weights.sum(-1, keepdim=True).clamp_min(1e-9)
+        weights = weights * self.scale
+        if self.dense or not self.training:
+            outs = torch.stack([expert(x) for expert in self.experts], dim=-2)
+            y = y + (weights.unsqueeze(-1) * outs).sum(-2)
+        else:
+            flat, wflat = x.reshape(-1, w), weights.reshape(-1, self.n)
+            routed = torch.zeros_like(flat)
+            for e, expert in enumerate(self.experts):
+                rows = (wflat[:, e] != 0).nonzero(as_tuple=True)[0]
+                if rows.numel():
+                    routed = routed.index_add(0, rows, expert(flat[rows]) * wflat[rows, e : e + 1])
+            y = y + routed.view(b, s, w)
         if self.training:
-            # Load balancing: tokens spread over the experts.
-            share = (weights > 0).float().mean(dim=(0, 1))
-            mean_prob = probs.mean(dim=(0, 1))
-            self.aux = len(self.experts) * (share * mean_prob).sum()
+            share = chosen.float()
+            self.load = share.sum(dim=(0, 1)).detach()
+            if not self.hash:
+                probs = affinity / affinity.sum(-1, keepdim=True).clamp_min(1e-9)
+                if self.balance == "aux":
+                    self.aux = 0.01 * self.n * (share.mean(dim=(0, 1)) * probs.mean(dim=(0, 1))).sum()
+                else:
+                    # A slight sequence-wise balance loss, as DeepSeek-V3 and V4 keep.
+                    self.aux = 1e-4 * self.n * (share.mean(dim=1) * probs.mean(dim=1)).sum(-1).mean()
         return y
 
 
 class PersonaFFN(nn.Module):
     """One feed-forward expert per persona, plus a neutral one; routing learns the persona tags."""
 
-    def __init__(self, width, personas, mult=4):
+    def __init__(self, width, personas, p):
         super().__init__()
-        self.experts = nn.ModuleList(FeedForward(width, mult) for _ in range(personas + 1))
+        hidden = hidden_of(width, p.get("mult", 2.67))
+        self.experts = nn.ModuleList(SwiGLU(width, hidden) for _ in range(personas + 1))
         self.router = nn.Linear(width, personas + 1)
         self.aux = None
 
@@ -124,176 +488,273 @@ class PersonaFFN(nn.Module):
         weights = torch.softmax(logits, dim=-1)
         outs = torch.stack([expert(x) for expert in self.experts], dim=-2)
         if self.training and labels is not None:
-            # Inside a persona's turn its expert should be chosen; elsewhere the neutral one.
             target = (labels + 1).clamp_min(0)
             self.aux = F.cross_entropy(logits.reshape(-1, logits.shape[-1]), target.reshape(-1))
         return (weights.unsqueeze(-1) * outs).sum(-2)
 
 
-class SSM(nn.Module):
-    """A Mamba-2 style state-space layer in its quadratic (state space duality) form."""
+# ---- hyper-connections ------------------------------------------------------
 
-    def __init__(self, width, heads, state=16):
+
+def sinkhorn(m, iterations):
+    for _ in range(iterations):
+        m = m / m.sum(-2, keepdim=True).clamp_min(1e-9)
+        m = m / m.sum(-1, keepdim=True).clamp_min(1e-9)
+    return m
+
+
+class HyperConnection(nn.Module):
+    """Manifold-constrained hyper-connections (mHC, DeepSeek-V4) around one sublayer.
+
+    The residual is n streams. A sublayer reads a sigmoid-weighted mix of
+    them (A), the streams mix through a doubly stochastic matrix (B, by
+    Sinkhorn–Knopp), and the sublayer's output is added back with weights C.
+    All three depend on the input, and start near a plain residual connection.
+    """
+
+    def __init__(self, width, streams, iterations):
         super().__init__()
-        self.heads, self.dim, self.state = heads, width // heads, state
-        self.in_proj = nn.Linear(width, width * 2 + state * 2 + heads)
-        self.a_log = nn.Parameter(torch.zeros(heads))
-        # As in Mamba-2: the output is normalized before its gate, and steps start small.
-        self.y_norm = nn.LayerNorm(width)
-        self.out = nn.Linear(width, width)
+        self.n, self.iterations = streams, iterations
+        flat = streams * width
+        self.norm = RMSNorm(flat)
+        self.w_pre = nn.Linear(flat, streams, bias=False)
+        self.w_res = nn.Linear(flat, streams * streams, bias=False)
+        self.w_post = nn.Linear(flat, streams, bias=False)
+        for layer in (self.w_pre, self.w_res, self.w_post):
+            nn.init.zeros_(layer.weight)
+        self.s_pre = nn.Parameter(torch.full((streams,), -math.log(streams - 1.0) if streams > 1 else 4.0))
+        self.s_res = nn.Parameter(torch.eye(streams) * 6.0)
+        self.s_post = nn.Parameter(torch.zeros(streams))
+        self.a_pre = nn.Parameter(torch.tensor(0.01))
+        self.a_res = nn.Parameter(torch.tensor(0.01))
+        self.a_post = nn.Parameter(torch.tensor(0.01))
 
-    def forward(self, x, mask):
-        b, s, w = x.shape
-        z, xs, bmat, cmat, dt = torch.split(self.in_proj(x), [w, w, self.state, self.state, self.heads], dim=-1)
-        dt = F.softplus(dt - 3.0).clamp(max=4.0)  # (b, s, h): how much each step forgets and takes in
-        log_a = -dt * torch.exp(self.a_log)  # <= 0
-        cum = torch.cumsum(log_a, dim=1).transpose(1, 2)  # (b, h, s)
-        # decay[t, s] = exp(L_t - L_s) for s <= t: how much of step s is left at step t.
-        diff = cum.unsqueeze(-1) - cum.unsqueeze(-2)
-        decay = torch.exp(diff.masked_fill(~mask, NEG))
-        scores = (cmat @ bmat.transpose(-1, -2)).unsqueeze(1) / math.sqrt(self.state)  # (b, 1, s, s)
-        weights = (scores * decay).masked_fill(~mask, 0.0)
-        xs = (xs.view(b, s, self.heads, self.dim) * dt.unsqueeze(-1)).transpose(1, 2)  # (b, h, s, d)
-        y = (weights @ xs).transpose(1, 2).reshape(b, s, w)
-        return self.out(self.y_norm(y) * F.silu(z))
+    def forward(self, streams, sublayer):
+        b, s, n, w = streams.shape
+        h = self.norm(streams.reshape(b, s, n * w))
+        a = torch.sigmoid(self.a_pre * self.w_pre(h) + self.s_pre)  # (b, s, n)
+        mix = sinkhorn(torch.exp(self.a_res * self.w_res(h).view(b, s, n, n) + self.s_res), self.iterations)
+        c = 2 * torch.sigmoid(self.a_post * self.w_post(h) + self.s_post)
+        y = sublayer((a.unsqueeze(-1) * streams).sum(2))  # (b, s, w)
+        return mix @ streams + c.unsqueeze(-1) * y.unsqueeze(2)
 
 
 # ---- layers -----------------------------------------------------------------
 
 
 class Layer(nn.Module):
-    """A residual layer: a mixer (attention or SSM) and a feed-forward part."""
+    """A residual layer: a mixer (attention or SSM), then a feed-forward part, each pre-normed."""
 
-    def __init__(self, width, heads, mixer="attention", ffn="dense", params=None, personas=0):
+    def __init__(self, width, heads, kv_heads, spec, personas, vocab, streams=0, iterations=20):
         super().__init__()
-        p = params or {}
-        self.norm1, self.norm2 = nn.LayerNorm(width), nn.LayerNorm(width)
-        self.kind = mixer
-        if mixer == "ssm":
-            self.mixer = SSM(width, heads, int(p.get("state", 16)))
+        attention, ffn = spec.get("attention", {}) or {}, spec.get("ffn", {}) or {}
+        kind = attention.get("kind", "full")
+        self.input_layernorm, self.post_attention_layernorm = RMSNorm(width), RMSNorm(width)
+        self.sandwich = spec.get("norm") == "sandwich"
+        if self.sandwich:
+            self.attn_out_norm, self.mlp_out_norm = RMSNorm(width), RMSNorm(width)
+        if kind == "ssm":
+            self.self_attn = SSM(width, heads, attention)
+        elif kind == "mla":
+            self.self_attn = LatentAttention(width, heads, attention)
+        elif kind in ("csa", "hca"):
+            self.self_attn = CompressedAttention(width, heads, attention, sparse=kind == "csa")
         else:
-            self.mixer = Attention(width, heads, int(p.get("kv_rank", 0)) if mixer == "sparse" else 0)
-        if ffn == "moe":
-            self.ffn = MoE(width, int(p.get("experts", 8)), int(p.get("shared", 1)), int(p.get("top_k", 2)), int(p.get("mult", 2)))
-        elif ffn == "persona":
-            self.ffn = PersonaFFN(width, personas, int(p.get("mult", 4)))
+            self.self_attn = FullAttention(width, heads, kv_heads, attention)
+        fkind = ffn.get("kind", "dense")
+        if fkind == "moe":
+            self.mlp = MoE(width, ffn, vocab)
+        elif fkind == "persona":
+            self.mlp = PersonaFFN(width, personas, ffn)
         else:
-            self.ffn = FeedForward(width, int(p.get("mult", 4)))
-        self.window = int(p.get("window", 0)) if mixer == "sparse" else 0
-        self.stride = int(p.get("stride", 0)) if mixer == "sparse" else 0
-        self.share = bool(p.get("share_kv", False)) and mixer == "sparse"
+            self.mlp = SwiGLU(width, hidden_of(width, ffn.get("mult", 2.67)), ffn.get("activation", "swiglu"))
+        self.hyper = streams > 1
+        if self.hyper:
+            self.hc_attn = HyperConnection(width, streams, iterations)
+            self.hc_mlp = HyperConnection(width, streams, iterations)
 
-    def mask(self, base):
-        if not (self.window or self.stride):
-            return base
-        s = base.shape[-1]
-        rows = torch.arange(s, device=base.device).unsqueeze(1)
-        cols = torch.arange(s, device=base.device).unsqueeze(0)
-        keep = torch.zeros(s, s, dtype=torch.bool, device=base.device)
-        if self.window:
-            keep = keep | ((rows - cols) < self.window)
-        if self.stride:
-            keep = keep | ((cols % self.stride) == (self.stride - 1))
-        return base & keep
+    def _attn(self, x, cx):
+        out = self.self_attn(self.input_layernorm(x), cx)
+        return self.attn_out_norm(out) if self.sandwich else out
 
-    def forward(self, x, mask, latent=None, labels=None):
-        h = self.norm1(x)
-        if self.kind == "ssm":
-            x = x + self.mixer(h, mask)
+    def _mlp(self, x, cx):
+        h = self.post_attention_layernorm(x)
+        if isinstance(self.mlp, MoE):
+            out = self.mlp(h, cx.tokens)
+        elif isinstance(self.mlp, PersonaFFN):
+            out = self.mlp(h, cx.labels)
         else:
-            x = x + self.mixer(h, self.mask(mask), latent)
-        if isinstance(self.ffn, PersonaFFN):
-            return x + self.ffn(self.norm2(x), labels)
-        return x + self.ffn(self.norm2(x))
+            out = self.mlp(h)
+        return self.mlp_out_norm(out) if self.sandwich else out
 
-
-def layers_of(block, width, heads, personas):
-    kind, p = block.get("kind"), block.get("params", {}) or {}
-    count = max(1, int(p.get("layers", 1)))
-    mixer, ffn = {
-        "transformer": ("attention", "dense"),
-        "sparse_attention": ("sparse", "dense"),
-        "moe": ("attention", "moe"),
-        "ssm": ("ssm", "dense"),
-        "persona_router": ("attention", "persona"),
-    }.get(kind, (None, None))
-    if mixer is None:
-        return []
-    return [Layer(width, heads, mixer, ffn, p, personas) for _ in range(count)]
+    def forward(self, x, cx):
+        if self.hyper:
+            x = self.hc_attn(x, lambda h: self._attn(h, cx))
+            return self.hc_mlp(x, lambda h: self._mlp(h, cx))
+        x = x + self._attn(x, cx)
+        return x + self._mlp(x, cx)
 
 
 class TextModel(nn.Module):
-    """Tokens in, a score per possible next token out: `tokens` [1, s] -> `logits` [1, s, vocab]."""
+    """Tokens in, a score per possible next token out."""
 
-    def __init__(self, vocab, context, architecture, prefix_id=None, personas=0):
+    def __init__(self, vocab, architecture, prefix_id=None, personas=0):
         super().__init__()
-        width, heads = int(architecture.get("width", 128)), int(architecture.get("heads", 4))
-        blocks = architecture.get("blocks", []) or [{"kind": "transformer", "params": {"layers": 2}}]
-        self.prefix_split = any(b.get("kind") == "prefix_split" for b in blocks)
+        a = architecture
+        width, heads = int(a.get("width", 128)), int(a.get("heads", 4))
+        kv_heads = int(a.get("kv_heads", heads) or heads)
+        if kv_heads <= 0 or heads % kv_heads:
+            kv_heads = heads
+        self.context = int(a.get("context", 256))
+        self.theta = float(a.get("rope_theta", 10000.0))
+        self.prefix_split = bool(a.get("prefix_split"))
         self.prefix_id = prefix_id
-        self.context = context
-        self.embed = nn.Embedding(vocab, width)
-        self.position = nn.Embedding(context, width)
-        layers = []
-        for block in blocks:
-            group = layers_of(block, width, heads, personas)
-            # A block's own share of the KV latent starts afresh.
-            if group:
-                group[0].first_of_block = True
-            layers.extend(group)
-        if not layers:
-            layers = layers_of({"kind": "transformer", "params": {"layers": 2}}, width, heads, personas)
-        self.layers = nn.ModuleList(layers)
-        self.norm = nn.LayerNorm(width)
-        self.head = nn.Linear(width, vocab, bias=False)
+        hc = a.get("hyper_connections") or {}
+        self.streams = int(hc.get("streams", 0)) if hc else 0
+        iterations = int(hc.get("sinkhorn", 20)) if hc else 20
+        self.embed_tokens = nn.Embedding(vocab, width)
+        self.tied = bool(a.get("tied"))
+        self.embed_scale = math.sqrt(width) if a.get("embed_scale") else 1.0
+        self.learned_positions = a.get("positions", "rope") == "learned"
+        if self.learned_positions:
+            self.position = nn.Embedding(self.context, width)
+        specs = a.get("layers") or [{"attention": {"kind": "full"}, "ffn": {"kind": "dense"}}] * 2
+        self.layers = nn.ModuleList(
+            Layer(width, heads, kv_heads, spec, personas, vocab, self.streams, iterations) for spec in specs
+        )
+        self.norm = RMSNorm(width)
+        if not self.tied:
+            self.lm_head = nn.Linear(width, vocab, bias=False)
+        mtp = a.get("mtp") or {}
+        self.mtp_weight = float(mtp.get("weight", 0.3)) if mtp else 0.0
+        if mtp:
+            # Multi-token prediction (DeepSeek-V3/V4): one more layer predicts the token after next.
+            self.mtp_hidden_norm = RMSNorm(width)
+            self.mtp_embed_norm = RMSNorm(width)
+            self.mtp_proj = nn.Linear(2 * width, width, bias=False)
+            self.mtp_layer = Layer(width, heads, kv_heads, {}, personas, vocab)
         self.checkpointing = False
+
+    def head(self, h):
+        """Scores per token: the output head, or the embedding table when they are tied."""
+        return F.linear(h, self.embed_tokens.weight) if self.tied else self.lm_head(h)
+
+    def embed(self, tokens):
+        x = self.embed_tokens(tokens)
+        return x * self.embed_scale if self.embed_scale != 1.0 else x
 
     def base_mask(self, tokens):
         b, s = tokens.shape
         positions = torch.arange(s, device=tokens.device)
-        mask = (positions.unsqueeze(0) <= positions.unsqueeze(1)).unsqueeze(0).unsqueeze(0)  # (1, 1, s, s)
+        mask = (positions.unsqueeze(0) <= positions.unsqueeze(1)).unsqueeze(0).unsqueeze(0)
         if self.prefix_split and self.prefix_id is not None:
-            # The request (up to the last assistant tag) sees itself both ways.
             marks = (tokens == self.prefix_id).long() * (positions + 1).unsqueeze(0)
             prefix = marks.max(dim=1).values.view(b, 1, 1, 1)
             inside = (positions.view(1, 1, s, 1) < prefix) & (positions.view(1, 1, 1, s) < prefix)
             mask = mask | inside
         return mask
 
-    def forward(self, tokens, labels=None):
-        # Recomputation for checkpointing sets these again after they were read: start afresh.
+    def forward(self, tokens, labels=None, targets=None):
+        """Logits for every position; when training, also the auxiliary loss
+        (balancing, the indexer, multi-token prediction) and the experts' loads."""
+        for module in self.modules():
+            if hasattr(module, "aux"):
+                module.aux = None
+            if isinstance(module, MoE):
+                module.load = None
+        s = tokens.shape[1]
+        x = self.embed(tokens)
+        if self.learned_positions:
+            x = x + self.position(torch.arange(s, device=tokens.device)).unsqueeze(0)
+        causal = not (self.prefix_split and self.prefix_id is not None)
+        cx = Context(tokens, self.base_mask(tokens), self.theta, labels, not self.learned_positions, causal)
+        if self.streams > 1:
+            x = x.unsqueeze(2).expand(-1, -1, self.streams, -1).contiguous()
+        for layer in self.layers:
+            if self.checkpointing and self.training:
+                x = torch.utils.checkpoint.checkpoint(lambda h, layer=layer: layer(h, cx), x, use_reentrant=False)
+            else:
+                x = layer(x, cx)
+        if self.streams > 1:
+            x = x.mean(2)
+        logits = self.head(self.norm(x))
+        aux = torch.zeros((), device=tokens.device)
         for module in self.modules():
             if getattr(module, "aux", None) is not None:
-                module.aux = None
-        s = tokens.shape[1]
-        positions = torch.arange(s, device=tokens.device)
-        x = self.embed(tokens) + self.position(positions).unsqueeze(0)
-        mask = self.base_mask(tokens)
-        latent = None
-        for layer in self.layers:
-            if getattr(layer, "first_of_block", False):
-                latent = None
-            # Layers of a block that share keys and values use the first one's latent.
-            use = None
-            if layer.share and layer.mixer.kv_rank:
-                if latent is None:
-                    latent = layer.mixer.latent(layer.norm1(x))
-                use = latent
-            if self.checkpointing and self.training:
-                x = torch.utils.checkpoint.checkpoint(layer, x, mask, use, labels, use_reentrant=False)
-            else:
-                x = layer(x, mask, use, labels)
-        return self.head(self.norm(x))
+                aux = aux + module.aux
+        if self.training and self.mtp_weight and targets is not None and s > 1:
+            nxt = self.embed(tokens[:, 1:])
+            h = self.mtp_proj(torch.cat([self.mtp_hidden_norm(x[:, :-1]), self.mtp_embed_norm(nxt)], dim=-1))
+            cx2 = Context(tokens[:, 1:], cx.mask[..., : s - 1, : s - 1], self.theta, None, not self.learned_positions, causal)
+            later = self.head(self.norm(self.mtp_layer(h, cx2)))
+            aux = aux + self.mtp_weight * F.cross_entropy(
+                later.reshape(-1, later.shape[-1]), targets[:, 1:].reshape(-1), ignore_index=-100
+            )
+        loads = [m.load for m in self.modules() if isinstance(m, MoE) and m.load is not None]
+        load = torch.cat(loads).unsqueeze(0) if loads else torch.zeros(1, 0, device=tokens.device)
+        return {"logits": logits, "aux": aux.reshape(1), "load": load}
 
-    def aux_loss(self):
-        total = None
+    def balance(self, load, rate=1e-3):
+        """Auxiliary-loss-free balancing: experts chosen more than average get a lower bias."""
+        offset = 0
         for module in self.modules():
-            aux = getattr(module, "aux", None)
-            if aux is not None:
-                total = aux if total is None else total + aux
-                module.aux = None
-        return total
+            if isinstance(module, MoE) and not module.hash:
+                part = load[offset : offset + module.n] if load.numel() >= offset + module.n else None
+                offset += module.n
+                if part is not None and module.balance == "bias" and part.sum() > 0:
+                    module.bias -= rate * torch.sign(part - part.mean())
+            elif isinstance(module, MoE):
+                offset += module.n
 
+
+class Exported(nn.Module):
+    """tokens -> logits, for ONNX."""
+
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+        for module in model.modules():
+            if isinstance(module, MoE):
+                module.dense = True
+
+    def forward(self, tokens):
+        return self.model(tokens)["logits"]
+
+
+def gguf_arch(architecture):
+    """The GGUF architecture a model exports as ("llama", "qwen3" or "gemma3"), or None
+    (the same rules as `Architecture::gguf_arch` in magic.rs)."""
+    a = architecture
+    layers = a.get("layers") or []
+    if not layers or a.get("conv") or a.get("positions", "rope") != "rope" or a.get("hyper_connections") \
+            or a.get("prefix_split"):
+        return None
+    shapes = set()
+    windows = []
+    for layer in layers:
+        att, ffn = layer.get("attention", {}) or {}, layer.get("ffn", {}) or {}
+        if att.get("kind", "full") != "full" or ffn.get("kind", "dense") != "dense":
+            return None
+        if att.get("bias") or float(att.get("rotary", 1.0) or 1.0) < 1.0:
+            return None
+        shapes.add((bool(att.get("qk_norm")), ffn.get("activation", "swiglu"), layer.get("norm", "pre")))
+        windows.append(int(att.get("window", 0) or 0))
+    if len(shapes) != 1:
+        return None
+    qk, activation, norm = shapes.pop()
+    plain = not any(windows) and not a.get("embed_scale") and activation == "swiglu" and norm == "pre"
+    if plain:
+        return "qwen3" if qk else "llama"
+    if qk and activation == "geglu" and norm == "sandwich" and a.get("embed_scale") and a.get("tied"):
+        local = [w for i, w in enumerate(windows) if i % 6 != 5]
+        if not any(windows) or (len(set(local)) == 1 and local[0] > 0 and all(w == 0 for i, w in enumerate(windows) if i % 6 == 5)):
+            return "gemma3"
+    return None
+
+
+def gguf_compatible(architecture):
+    """Whether GGUF runtimes (llama.cpp, LM Studio) run the model as it is."""
+    return gguf_arch(architecture) is not None
 
 
 class VisionModel(nn.Module):
@@ -301,8 +762,7 @@ class VisionModel(nn.Module):
 
     def __init__(self, classes, architecture):
         super().__init__()
-        convs = [b for b in architecture.get("blocks", []) if b.get("kind") == "conv"] or [{"params": {}}]
-        p = convs[0].get("params", {}) or {}
+        p = architecture.get("conv") or {}
         layers, channels = int(p.get("layers", 3)), int(p.get("channels", 32))
         parts, c_in = [], 3
         for i in range(max(1, layers)):
@@ -328,8 +788,9 @@ class Adapted(nn.Module):
         self.base = base
         for p in base.parameters():
             p.requires_grad_(False)
-        self.a = nn.Parameter(torch.randn(rank, base.in_features) * (1.0 / math.sqrt(base.in_features)))
-        self.b = nn.Parameter(torch.zeros(base.out_features, rank))
+        device = base.weight.device
+        self.a = nn.Parameter(torch.randn(rank, base.in_features, device=device) / math.sqrt(base.in_features))
+        self.b = nn.Parameter(torch.zeros(base.out_features, rank, device=device))
         self.scale = alpha / rank
         self.dora = dora
         if dora:
@@ -346,6 +807,7 @@ class Adapted(nn.Module):
 
     def merged(self):
         merged = nn.Linear(self.base.in_features, self.base.out_features, bias=self.base.bias is not None)
+        merged = merged.to(self.base.weight.device)
         with torch.no_grad():
             merged.weight.copy_(self.weight())
             if self.base.bias is not None:
@@ -353,13 +815,18 @@ class Adapted(nn.Module):
         return merged
 
 
+# Linear layers adapters go on: attention and feed-forward weights, not routers or mixing weights.
+ADAPTED = ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj",
+           "q_up", "q_down", "kv_up", "kv_down", "local", "in_proj", "out")
+
+
 def add_adapters(model, rank=8, alpha=16, dora=False):
-    """Freezes the model and puts adapters on the linear layers of its blocks."""
+    """Freezes the model and puts adapters on the linear layers of its layers."""
     for p in model.parameters():
         p.requires_grad_(False)
     for module in list(model.layers.modules()):
         for name, child in list(module.named_children()):
-            if isinstance(child, nn.Linear):
+            if isinstance(child, nn.Linear) and name in ADAPTED:
                 setattr(module, name, Adapted(child, rank, alpha, dora))
 
 

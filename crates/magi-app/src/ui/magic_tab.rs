@@ -2,13 +2,16 @@
 //! models – text models that answer and call tools, and vision models that
 //! watch the screen – and handing them to the Macro tab.
 //!
-//! The canvas works like the Macro tab's. A model travels along the `model`
-//! wire: where it starts (from zero, from a base model, or as it is), its
-//! architecture blocks, its training stages fed by datasets, and its package.
-//! The model's setup – its name, screen area, answers, tools – is shown by
-//! inspector blocks, which open their settings in the panel on the right.
+//! The canvas works like the Macro tab's. A model travels along the Model
+//! wire: where it starts, its architecture, its training stages fed by
+//! datasets, the package, and the block that tries the result. Its own
+//! settings – name, tools, answers – are in setup blocks chained into the
+//! start. Selecting a block opens its settings in the panel on the right,
+//! with what is wired into it. The File, Presets, Add, View and undo buttons
+//! are in the banner, as on the Macro tab.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use egui::{DragValue, RichText, Ui, vec2};
@@ -21,7 +24,7 @@ use magi_core::magic::{
 };
 use magi_core::nodes::Registry;
 use magi_core::nodes::ai::AGENT_TOOLS;
-use magi_core::nodes::studio::{self, RewardRule, RlParams, TextDataParams, kinds};
+use magi_core::nodes::studio::{self, PromptParams, RewardRule, RlParams, SetupParams, TextDataParams, kinds};
 
 use super::dataset_editor::{self, DatasetEditor, DatasetEvent};
 use super::graph::{GraphEnv, GraphEvent, GraphView, node_icon};
@@ -31,21 +34,23 @@ use crate::magic::train::{Level, TrainJob, stage_name};
 use crate::magic::{MagicDoc, Tester};
 use crate::theme;
 
+/// Where a model to import comes from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ImportFrom {
+    /// A project folder with an ONNX model in it.
+    Folder,
+    /// A `.zip` or `.onnx` file.
+    File,
+    /// A GGUF model file (LM Studio, llama.cpp…).
+    Gguf,
+}
+
 pub enum MagicEvent {
-    /// Close the model (to start another).
-    New,
-    /// A new model with a canvas ready to train it.
     NewModel {
         text: bool,
     },
     Open,
-    /// Import a project folder, or a file (`.zip` or `.onnx`).
-    Import {
-        folder: bool,
-    },
-    Save,
-    SaveAs,
-    UseInMacro,
+    Import(ImportFrom),
     ReplaceModel,
     /// Pick the fixed screen area the model looks at.
     PickArea,
@@ -65,6 +70,13 @@ pub enum MagicEvent {
     StopTest,
     Train,
     StopTraining,
+    /// Save the package as the Compile block says.
+    Compile,
+    /// Put the compiled GGUF file into LM Studio.
+    AddToLmStudio,
+    UseInMacro,
+    OpenFolder(PathBuf),
+    OpenRuntime,
     Toast(String),
 }
 
@@ -73,6 +85,11 @@ pub struct MagicEnv<'a> {
     /// Where models run, as a sentence.
     pub engines: String,
     pub dry_run: bool,
+    /// Options › Optimize environment when training: only the training view while training.
+    pub optimize_training: bool,
+    pub show_console: bool,
+    pub show_panel: bool,
+    pub show_grid: bool,
 }
 
 /// The Magic tab's blocks.
@@ -82,14 +99,30 @@ pub fn registry() -> &'static Registry {
 }
 
 type Pending = Arc<Mutex<Option<Result<magi_ml::Answer, String>>>>;
+type Job = Arc<Mutex<Option<Result<(), String>>>>;
 
-/// Trying a text model.
+/// Prompting a text model.
 #[derive(Default)]
 struct Chat {
     request: String,
     pending: Option<(String, Pending)>,
     /// Requests and what the model said, newest last.
     answers: Vec<(String, Result<magi_ml::Answer, String>)>,
+    /// The ONNX model, loaded once and kept, with the fingerprint of its bytes.
+    engine: Arc<Mutex<Option<(u64, magi_ml::TextModel)>>>,
+    /// Loading it (or starting llama.cpp) in the background.
+    loading: Option<Job>,
+    load_error: Option<String>,
+}
+
+/// A cheap fingerprint of a model's bytes: its length and a sample of them.
+fn fingerprint(bytes: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.len().hash(&mut hasher);
+    bytes.iter().step_by(997).for_each(|b| b.hash(&mut hasher));
+    bytes.iter().rev().take(4096).for_each(|b| b.hash(&mut hasher));
+    hasher.finish()
 }
 
 #[derive(Default)]
@@ -103,7 +136,11 @@ pub struct MagicTab {
     pub picture: Option<(String, Vec<f32>)>,
     pub view: GraphView,
     pub job: Option<TrainJob>,
+    /// What the last compile wrote.
+    pub compiled: Vec<PathBuf>,
     chat: Chat,
+    /// Something that needs the optional parts failed: they are looked at again.
+    pub runtime_failed: bool,
     dataset: Option<DatasetEditor>,
     thumbnails: HashMap<String, egui::TextureHandle>,
 }
@@ -123,50 +160,89 @@ impl MagicTab {
         self.preview = None;
         self.chat = Chat::default();
         self.dataset = None;
+        self.compiled.clear();
         self.thumbnails.clear();
         let palette_size = self.view.palette_size;
         self.view = GraphView::default();
         self.view.palette_size = palette_size;
-        if self.job.as_ref().is_some_and(TrainJob::is_running) {
+        if self.training() {
             self.job = None;
         }
+    }
+
+    #[cfg(test)]
+    pub fn dataset_open(&self) -> bool {
+        self.dataset.is_some()
+    }
+
+    #[cfg(test)]
+    /// A request to the model is still being answered.
+    pub fn chat_waiting(&self) -> bool {
+        self.chat.pending.is_some()
+    }
+
+    #[cfg(test)]
+    /// The request being written, and what came of the requests sent.
+    pub fn chat_state(&self) -> (String, Vec<Result<String, String>>) {
+        let answers =
+            self.chat.answers.iter().map(|(_, a)| a.as_ref().map(|a| a.raw.clone()).map_err(Clone::clone)).collect();
+        (self.chat.request.clone(), answers)
+    }
+
+    #[cfg(test)]
+    /// What the model said last.
+    pub fn last_answer(&self) -> Option<&magi_ml::Answer> {
+        self.chat.answers.last().and_then(|(_, a)| a.as_ref().ok())
     }
 
     pub fn training(&self) -> bool {
         self.job.as_ref().is_some_and(TrainJob::is_running)
     }
 
+    /// Whether the training view replaces the canvas now.
+    pub fn training_view(&self, env_optimize: bool) -> bool {
+        env_optimize && self.training()
+    }
+
     pub fn show(&mut self, ui: &mut Ui, env: &MagicEnv<'_>) -> Vec<MagicEvent> {
         let mut events = Vec::new();
-        self.take_trained();
-        egui::Panel::top("magic-toolbar")
-            .frame(egui::Frame::new().fill(theme::bg_panel()).inner_margin(egui::Margin::symmetric(10, 6)))
-            .show(ui, |ui| self.toolbar(ui, env, &mut events));
-
+        if self.take_trained() {
+            events.push(MagicEvent::Compile);
+        }
         if self.doc.is_none() {
             egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::bg_panel())).show(ui, |ui| {
                 empty_state(ui, &mut events);
             });
             return events;
         }
+        if self.training_view(env.optimize_training) {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().fill(theme::bg_panel()).inner_margin(egui::Margin::same(16)))
+                .show(ui, |ui| self.training_dashboard(ui, &mut events));
+            return events;
+        }
 
-        egui::Panel::bottom("magic-console")
-            .resizable(true)
-            .default_size(150.0)
-            .size_range(90.0..=420.0)
-            .frame(egui::Frame::new().fill(theme::bg_panel()).inner_margin(egui::Margin::symmetric(10, 6)))
-            .show(ui, |ui| self.console(ui, &mut events));
-
-        egui::Panel::right("magic-block")
-            .resizable(true)
-            .default_size(360.0)
-            .size_range(280.0..=620.0)
-            .frame(egui::Frame::new().fill(theme::bg_panel()).inner_margin(egui::Margin::same(12)))
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    self.block_panel(ui, env, &mut events);
+        if env.show_console {
+            egui::Panel::bottom("magic-console")
+                .resizable(true)
+                .default_size(170.0)
+                .size_range(90.0..=480.0)
+                .frame(egui::Frame::new().fill(theme::bg_panel()).inner_margin(egui::Margin::symmetric(10, 6)))
+                .show(ui, |ui| self.console(ui));
+        }
+        if env.show_panel {
+            egui::Panel::right("magic-block")
+                .resizable(true)
+                .default_size(380.0)
+                .size_range(280.0..=640.0)
+                .frame(egui::Frame::new().fill(theme::bg_panel()).inner_margin(egui::Margin::same(12)))
+                .show(ui, |ui| {
+                    // Content wider than the panel scrolls; the panel keeps the width it was given.
+                    egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
+                        self.block_panel(ui, env, &mut events);
+                    });
                 });
-            });
+        }
 
         egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::bg_canvas())).show(ui, |ui| {
             let doc = self.doc.as_mut().expect("checked above");
@@ -176,23 +252,23 @@ impl MagicTab {
                 activity: &activity,
                 running: &[],
                 error_node: None,
-                show_grid: true,
+                show_grid: env.show_grid,
                 show_activity: false,
                 python_missing: false,
             };
             for event in self.view.show(ui, &mut doc.studio, &graph_env) {
                 match event {
-                    GraphEvent::Inspect(node) => {
-                        self.view.selection = [node].into();
-                    }
+                    GraphEvent::Inspect(node) => self.view.selection = [node].into(),
                     GraphEvent::Toast(text) => events.push(MagicEvent::Toast(text)),
                     _ => {}
                 }
             }
         });
 
+        let settled = ui.ctx().input(|i| !i.pointer.any_down()) && !ui.ctx().egui_wants_keyboard_input();
         let doc = self.doc.as_mut().expect("checked above");
         doc.sync_canvas();
+        doc.track_history(settled);
 
         if let Some(editor) = &mut self.dataset {
             let spec = doc.file.model.text.clone().unwrap_or_default();
@@ -219,136 +295,42 @@ impl MagicTab {
         events
     }
 
-    /// Puts what a finished training run made into the model.
-    fn take_trained(&mut self) {
-        let Some(job) = &self.job else { return };
-        let trained = job.state.lock().unwrap_or_else(|p| p.into_inner()).trained.take();
+    /// Puts what a finished training run made into the model. True when it did.
+    fn take_trained(&mut self) -> bool {
+        let Some(job) = &self.job else { return false };
+        let mut state = job.state.lock().unwrap_or_else(|p| p.into_inner());
+        if matches!(state.outcome, Some(Err(_))) && !state.reported {
+            state.reported = true;
+            self.runtime_failed = true;
+        }
+        let trained = state.trained.take();
+        drop(state);
         if let (Some(trained), Some(doc)) = (trained, &mut self.doc) {
             doc.apply_trained(trained);
             self.tester = None;
             self.picture = None;
+            self.chat.answers.clear();
+            return true;
         }
+        false
     }
 
-    fn toolbar(&mut self, ui: &mut Ui, env: &MagicEnv<'_>, events: &mut Vec<MagicEvent>) {
-        widgets::button_row(ui, |ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            ui.menu_button(format!("{}  New", icon::FILE_PLUS), |ui| {
-                ui.set_width(230.0);
-                if ui.button(format!("{}  Text model (agent)…", icon::ROBOT)).clicked() {
-                    events.push(MagicEvent::NewModel { text: true });
-                    ui.close();
-                }
-                if ui.button(format!("{}  Vision model…", icon::EYE)).clicked() {
-                    events.push(MagicEvent::NewModel { text: false });
-                    ui.close();
-                }
-                if self.doc.is_some() && ui.button(format!("{}  Close this model", icon::X)).clicked() {
-                    events.push(MagicEvent::New);
-                    ui.close();
-                }
-            });
-            ui.menu_button(format!("{}  Import", icon::DOWNLOAD_SIMPLE), |ui| {
-                ui.set_width(250.0);
-                if ui.button(format!("{}  A project folder…", icon::FOLDER_OPEN)).clicked() {
-                    events.push(MagicEvent::Import { folder: true });
-                    ui.close();
-                }
-                if ui.button(format!("{}  A .zip or .onnx file…", icon::FILE_ZIP)).clicked() {
-                    events.push(MagicEvent::Import { folder: false });
-                    ui.close();
-                }
-                widgets::note(ui, "The model is read, and its settings worked out from the project's files.");
-            })
-            .response
-            .on_hover_text("Import a model made elsewhere");
-            if ui.button(format!("{}  Open", icon::FOLDER_OPEN)).on_hover_text("Open a .magic file").clicked() {
-                events.push(MagicEvent::Open);
-            }
-            let has_doc = self.doc.is_some();
-            if ui.add_enabled(has_doc, egui::Button::new(format!("{}  Save", icon::FLOPPY_DISK))).clicked() {
-                events.push(MagicEvent::Save);
-            }
-            if ui.add_enabled(has_doc, egui::Button::new(format!("{}  Save as…", icon::FLOPPY_DISK_BACK))).clicked() {
-                events.push(MagicEvent::SaveAs);
-            }
-            if has_doc
-                && ui.button(format!("{}  Add block", icon::PLUS)).on_hover_text("Or right-click the canvas").clicked()
-            {
-                self.view.open_palette_in_view();
-            }
-            ui.add_space(6.0);
-            if ui.available_size_before_wrap().x < 260.0 {
-                ui.end_row();
-            }
-            if let Some(doc) = &self.doc {
-                if self.training() {
-                    if widgets::accent_button(
-                        ui,
-                        format!("{}  Stop training", icon::STOP),
-                        theme::danger(),
-                        vec2(0.0, 28.0),
-                    )
-                    .clicked()
-                    {
-                        events.push(MagicEvent::StopTraining);
-                    }
-                } else {
-                    let problem = doc.training_problem();
-                    let hint =
-                        problem.clone().unwrap_or_else(|| "Run the training stages on the canvas, in order".into());
-                    ui.add_enabled_ui(problem.is_none(), |ui| {
-                        if widgets::accent_button(
-                            ui,
-                            format!("{}  Train", icon::PLAY),
-                            theme::accent(),
-                            vec2(0.0, 28.0),
-                        )
-                        .on_hover_text(&hint)
-                        .on_disabled_hover_text(&hint)
-                        .clicked()
-                        {
-                            events.push(MagicEvent::Train);
-                        }
-                    });
-                }
-                let ready = !doc.file.onnx.is_empty();
-                ui.add_enabled_ui(ready, |ui| {
-                    if ui
-                        .add(
-                            egui::Button::new(format!("{}  Use in Macro", icon::TREE_STRUCTURE))
-                                .min_size(vec2(0.0, 28.0)),
-                        )
-                        .on_hover_text("Put the model into the open macro, with blocks that run it")
-                        .on_disabled_hover_text("Train the model (or import one) first")
-                        .clicked()
-                    {
-                        events.push(MagicEvent::UseInMacro);
-                    }
-                });
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(
-                    RichText::new(format!("{}  {}", icon::CPU, env.engines)).size(11.5).color(theme::text_faint()),
-                )
-                .on_hover_text("Where models run. Change it under Settings › AI.");
-                if let Some(doc) = &self.doc {
-                    let name = if doc.is_dirty() { format!("{} •", doc.title()) } else { doc.title() };
-                    ui.add(egui::Label::new(RichText::new(name).color(theme::text_dim())).truncate());
-                }
-            });
-        });
+    /// A line in the console, from the tab (after training: what was saved).
+    pub fn console_line(&mut self, level: Level, text: impl Into<String>) {
+        if let Some(job) = &self.job {
+            job.state.lock().unwrap_or_else(|p| p.into_inner()).push(level, text);
+        }
     }
 
     // ---- the console --------------------------------------------------------
 
-    fn console(&mut self, ui: &mut Ui, events: &mut Vec<MagicEvent>) {
+    fn console(&mut self, ui: &mut Ui) {
         let Some(job) = &self.job else {
             ui.label(RichText::new("CONSOLE").size(10.5).color(theme::text_faint()));
             widgets::note(
                 ui,
-                "Training reports here: each stage, its progress and loss. Build the pipeline on the canvas – a \
-                 start, architecture blocks, training stages with datasets – then press Train.",
+                "Training reports here, line by line: each stage, its progress, the loss and what was saved. Press \
+                 Train in the banner when the pipeline is ready – its tooltip says what is missing if it is not.",
             );
             return;
         };
@@ -359,13 +341,7 @@ impl MagicTab {
             ui.label(RichText::new("CONSOLE").size(10.5).color(theme::text_faint()));
             if running {
                 ui.spinner();
-                let stage = stage_name(&state.stage);
-                let text = match state.progress {
-                    Some((step, steps)) => format!("{stage} · step {step} of {steps}"),
-                    None if stage.is_empty() => "Starting…".to_owned(),
-                    None => stage.to_owned(),
-                };
-                ui.label(RichText::new(text).color(theme::text_dim()));
+                ui.label(RichText::new(progress_text(&state)).color(theme::text_dim()));
                 if let Some((step, steps)) = state.progress
                     && steps > 0
                 {
@@ -373,9 +349,7 @@ impl MagicTab {
                         egui::ProgressBar::new(step as f32 / steps as f32).desired_width(160.0).desired_height(10.0),
                     );
                 }
-            }
-            let seconds = job.started.elapsed().as_secs();
-            if running {
+                let seconds = job.started.elapsed().as_secs();
                 ui.label(RichText::new(format!("{}:{:02}", seconds / 60, seconds % 60)).color(theme::text_faint()));
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -390,32 +364,91 @@ impl MagicTab {
                 }
             });
         });
-        ui.horizontal_top(|ui| {
-            let chart_width = (ui.available_width() * 0.35).clamp(160.0, 340.0);
-            let log_width = ui.available_width() - chart_width - 10.0;
-            ui.allocate_ui(vec2(log_width, ui.available_height()), |ui| {
-                egui::ScrollArea::vertical().stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
-                    for (level, text) in &state.lines {
-                        let (glyph, color) = match level {
-                            Level::Info => (icon::DOT_OUTLINE, theme::text_dim()),
-                            Level::Stage => (icon::CARET_RIGHT, theme::text()),
-                            Level::Warning => (icon::WARNING, theme::warning()),
-                            Level::Error => (icon::X_CIRCLE, theme::danger()),
-                            Level::Done => (icon::CHECK_CIRCLE, theme::success()),
-                        };
-                        ui.add(
-                            egui::Label::new(RichText::new(format!("{glyph}  {text}")).size(12.0).color(color)).wrap(),
-                        );
-                    }
-                });
+        let height = ui.available_height().max(40.0);
+        ui.horizontal(|ui| {
+            let chart_width = (ui.available_width() * 0.32).clamp(160.0, 360.0);
+            let log_width = (ui.available_width() - chart_width - 12.0).max(120.0);
+            ui.allocate_ui_with_layout(vec2(log_width, height), egui::Layout::top_down(egui::Align::Min), |ui| {
+                ui.set_width(log_width);
+                egui::ScrollArea::vertical()
+                    .id_salt("console-lines")
+                    .stick_to_bottom(true)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for (level, text) in &state.lines {
+                            console_line(ui, *level, text);
+                        }
+                    });
             });
-            loss_chart(ui, &state.losses, vec2(chart_width, ui.available_height().max(60.0)));
+            loss_chart(ui, &state.losses, vec2(chart_width, height));
         });
         drop(state);
         if clear {
             self.job = None;
         }
-        let _ = events;
+    }
+
+    /// While training with the environment optimized: only the run itself.
+    fn training_dashboard(&mut self, ui: &mut Ui, events: &mut Vec<MagicEvent>) {
+        let Some(job) = &self.job else { return };
+        let title = self.doc.as_ref().map(MagicDoc::title).unwrap_or_default();
+        let state = job.state.lock().unwrap_or_else(|p| p.into_inner());
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(icon::MAGIC_WAND).size(26.0).color(theme::accent()));
+            ui.vertical(|ui| {
+                ui.label(RichText::new(format!("Training “{title}”")).size(18.0).strong());
+                ui.label(RichText::new(progress_text(&state)).color(theme::text_dim()));
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if widgets::accent_button(
+                    ui,
+                    format!("{}  Stop training", icon::STOP),
+                    theme::danger(),
+                    vec2(0.0, 30.0),
+                )
+                .clicked()
+                {
+                    events.push(MagicEvent::StopTraining);
+                }
+            });
+        });
+        ui.add_space(6.0);
+        let share = state.progress.filter(|(_, n)| *n > 0).map(|(s, n)| s as f32 / n as f32);
+        widgets::progress_bar(ui, share);
+        let seconds = job.started.elapsed().as_secs_f64();
+        let mut facts = vec![format!("{}:{:02} so far", seconds as u64 / 60, seconds as u64 % 60)];
+        if let Some(last) = state.losses.last() {
+            facts.push(format!("loss {:.4}", last[1]));
+        }
+        if let Some(last) = state.rewards.last() {
+            facts.push(format!("reward {:.2}", last[1]));
+        }
+        if let (Some((step, steps)), Some(share)) = (state.progress, share)
+            && step > 5
+            && share > 0.0
+        {
+            let stage_left = (steps - step) as f64 * (state.stage_seconds() / step as f64);
+            facts.push(format!("this stage ends in about {:.0} s", stage_left.max(0.0)));
+        }
+        ui.label(RichText::new(facts.join("  ·  ")).monospace().color(theme::text_dim()));
+        ui.add_space(8.0);
+        let height = (ui.available_height() * 0.55).max(120.0);
+        loss_chart(ui, &state.losses, vec2(ui.available_width(), height));
+        ui.add_space(8.0);
+        egui::ScrollArea::vertical().id_salt("training-lines").stick_to_bottom(true).auto_shrink([false, false]).show(
+            ui,
+            |ui| {
+                for (level, text) in &state.lines {
+                    console_line(ui, *level, text);
+                }
+            },
+        );
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+        widgets::note(
+            ui,
+            "Effects and the background are off while training. Turn this off under Options › Optimize environment \
+             when training.",
+        );
     }
 
     // ---- the panel of the selected block ----------------------------------
@@ -424,30 +457,29 @@ impl MagicTab {
         let selected = (self.view.selection.len() == 1).then(|| *self.view.selection.first().expect("one"));
         let doc = self.doc.as_mut().expect("checked by the caller");
         let Some(node_id) = selected.filter(|id| doc.studio.graph.contains(*id)) else {
-            overview(ui, doc);
+            let training = self.job.as_ref().is_some_and(TrainJob::is_running);
+            if let Some(select) = overview(ui, doc, env, training, events) {
+                self.view.selection = [select].into();
+            }
             return;
         };
         let kind = doc.studio.graph.node(node_id).map(|n| n.kind.clone()).unwrap_or_default();
-        let custom = kinds::INSPECTORS.contains(&kind.as_str())
-            || [kinds::TEXT_DATA, kinds::IMAGE_DATA, kinds::COMPILE, kinds::USE].contains(&kind.as_str());
+        let note = doc.studio.graph.node(node_id).and_then(|n| n.param::<String>("note")).unwrap_or_default();
+        let custom = kinds::SETUP_BLOCKS.contains(&kind.as_str())
+            || [kinds::TEXT_DATA, kinds::IMAGE_DATA, kinds::PROMPT, kinds::TEST].contains(&kind.as_str());
         if custom {
             block_header(ui, &kind);
+            if !note.is_empty() {
+                widgets::notice(ui, icon::WARNING, note.clone(), theme::warning());
+            }
+        }
+        if kinds::SETUP_BLOCKS.contains(&kind.as_str()) {
+            setup_panel(ui, doc, node_id, &kind, env, events);
+            return;
         }
         match kind.as_str() {
-            kinds::INFO => info_card(ui, doc, events),
-            kinds::INPUT => capture_card(ui, &mut doc.file.model, env, events),
-            kinds::ANSWERS => classes_card(ui, &mut doc.file.model),
-            kinds::ACTION => action_card(ui, &mut doc.file.model),
-            kinds::SETTINGS => settings_card(ui, &mut doc.file.model),
-            kinds::PREP => input_card(ui, &mut doc.file.model),
-            kinds::TEXT => text_card(ui, &mut doc.file.model),
-            kinds::TRY => {
-                if doc.file.model.kind == ModelKind::Text {
-                    self.chat_panel(ui);
-                } else {
-                    self.test_panel(ui, env, events);
-                }
-            }
+            kinds::PROMPT => self.chat_panel(ui, node_id, events),
+            kinds::TEST => self.test_panel(ui, env, events),
             kinds::TEXT_DATA => {
                 if let Some(open) = text_data_card(ui, doc, node_id, events) {
                     let bytes = doc.file.data.get(&open).cloned().unwrap_or_default();
@@ -455,8 +487,6 @@ impl MagicTab {
                 }
             }
             kinds::IMAGE_DATA => pictures_card(ui, doc, &mut self.thumbnails, events),
-            kinds::COMPILE => compile_card(ui, doc, events),
-            kinds::USE => use_card(ui, doc, events),
             _ => {
                 let live = serde_json::Map::new();
                 let mut inspector_env = InspectorEnv {
@@ -469,6 +499,9 @@ impl MagicTab {
                 };
                 // Their settings are plain values: nothing needs the rest of the app.
                 let _ = inspector::show(ui, &mut doc.studio, node_id, &mut inspector_env);
+                if !note.is_empty() {
+                    widgets::notice(ui, icon::WARNING, note, theme::warning());
+                }
                 if kind == kinds::RL
                     && let Some(node) = doc.studio.graph.node_mut(node_id)
                 {
@@ -478,76 +511,357 @@ impl MagicTab {
                         node.set_param("rules", &params.rules);
                     }
                 }
-                if kind == kinds::BASE {
-                    widgets::note(
+                connections(ui, doc, node_id);
+                match kind.as_str() {
+                    kinds::COMPILE => compile_card(ui, doc, &self.compiled, events),
+                    kinds::BASE => widgets::note(
                         ui,
-                        "Fine-tuning needs the weights of a model trained in MacroMagi. Models imported from \
-                         elsewhere (ONNX only) can be set up and used, but not trained further.",
-                    );
+                        "Training further needs the weights of a model trained in MacroMagi. Models imported from \
+                         elsewhere (ONNX or GGUF) can be set up and used with Use As It Is, but not trained further.",
+                    ),
+                    kinds::ZERO => widgets::note(
+                        ui,
+                        "Next: Model Size and layer blocks give it a shape; the training stages after them teach it. \
+                         Presets › Commons puts well-known architectures (DeepSeek, Llama) in place.",
+                    ),
+                    _ => {}
                 }
             }
         }
     }
 
-    fn chat_panel(&mut self, ui: &mut Ui) {
-        let doc = self.doc.as_ref().expect("checked by the caller");
+    fn chat_panel(&mut self, ui: &mut Ui, node_id: NodeId, events: &mut Vec<MagicEvent>) {
+        let doc = self.doc.as_mut().expect("checked by the caller");
+        if doc.file.model.kind != ModelKind::Text {
+            widgets::notice(ui, icon::INFO, "This is a vision model: use a Test Model block.", theme::text_faint());
+            return;
+        }
         if let Some((request, pending)) = &self.chat.pending {
             let done = pending.lock().unwrap_or_else(|p| p.into_inner()).take();
             if let Some(result) = done {
+                if result.is_err() {
+                    self.runtime_failed = true;
+                }
                 self.chat.answers.push((request.clone(), result));
                 self.chat.pending = None;
             } else {
                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
             }
         }
-        if doc.file.onnx.is_empty() {
-            widgets::notice(ui, icon::INFO, "Train the model first: there is nothing to ask yet.", theme::text_faint());
+        if let Some(loading) = &self.chat.loading {
+            let done = loading.lock().unwrap_or_else(|p| p.into_inner()).take();
+            if let Some(result) = done {
+                self.chat.loading = None;
+                if let Err(error) = result {
+                    self.runtime_failed = true;
+                    self.chat.load_error = Some(error);
+                }
+            } else {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+            }
         }
-        ui.add(
+        let Some(node) = doc.studio.graph.node(node_id) else { return };
+        let mut params: PromptParams = node.params_or_default();
+        let before = params.clone();
+        let spec = doc.file.model.text.clone().unwrap_or_default();
+        let own = doc.file.model.architecture.is_some();
+
+        // What runs it: the built-in engine (ONNX) or llama.cpp (a GGUF file).
+        let has_onnx = !doc.file.onnx.is_empty();
+        let llama = magi_ml::llama::llama().is_some();
+        let gguf = doc.file.model.gguf.clone().map(PathBuf::from).or_else(|| doc.compiled_gguf());
+        let use_gguf = match params.engine.as_str() {
+            "onnx" if has_onnx => false,
+            "gguf" if gguf.is_some() => true,
+            _ => doc.file.model.gguf.is_some() || (gguf.is_some() && (llama || !has_onnx)),
+        };
+        let ready = if use_gguf { gguf.is_some() } else { has_onnx };
+        let key = if use_gguf { 0 } else { fingerprint(&doc.file.onnx) };
+
+        if !ready {
+            widgets::notice(
+                ui,
+                icon::INFO,
+                "Train the model first (Train, in the banner): there is nothing to prompt yet.",
+                theme::text_faint(),
+            );
+        }
+
+        // ---- the model: what runs it, and whether it is loaded ----
+        card(ui, "Model", |ui| {
+            if has_onnx && gguf.is_some() {
+                ui.horizontal(|ui| {
+                    widgets::fixed_label(ui, RichText::new("Run with").color(theme::text_dim()), 110.0).on_hover_text(
+                        "Built-in: the ONNX model, in MacroMagi. llama.cpp: the compiled GGUF file – much faster",
+                    );
+                    let mut engine = if use_gguf { "gguf".to_owned() } else { "onnx".to_owned() };
+                    if widgets::segmented(
+                        ui,
+                        &mut engine,
+                        &[("onnx".to_owned(), "Built-in"), ("gguf".to_owned(), "llama.cpp")],
+                    ) {
+                        params.engine = engine;
+                    }
+                });
+            }
+            let busy = self.chat.pending.is_some() || self.chat.loading.is_some();
+            let loaded = if use_gguf {
+                gguf.as_deref().is_some_and(magi_ml::llama::is_loaded)
+            } else {
+                match self.chat.engine.try_lock() {
+                    Ok(slot) => slot.as_ref().is_some_and(|(k, _)| *k == key),
+                    Err(_) => true,
+                }
+            };
+            {
+                let (dot, text, color) = if self.chat.loading.is_some() {
+                    (icon::CIRCLE_NOTCH, "Loading…", theme::text_dim())
+                } else if loaded {
+                    (icon::CIRCLE, "Loaded – requests answer at once", theme::success())
+                } else {
+                    (icon::CIRCLE_DASHED, "Not loaded – it loads with the first request", theme::text_faint())
+                };
+                ui.label(RichText::new(format!("{dot}  {text}")).size(11.5).color(color));
+                widgets::button_row(ui, |ui| {
+                    ui.add_enabled_ui(ready && !busy, |ui| {
+                        if loaded {
+                            if ui
+                                .small_button(format!("{}  Unload", icon::EJECT))
+                                .on_hover_text("Frees its memory")
+                                .clicked()
+                            {
+                                if use_gguf {
+                                    if let Some(path) = &gguf {
+                                        magi_ml::llama::stop_server(path);
+                                    }
+                                } else {
+                                    *self.chat.engine.lock().unwrap_or_else(|p| p.into_inner()) = None;
+                                }
+                            }
+                        } else if ui.small_button(format!("{}  Load", icon::UPLOAD_SIMPLE)).clicked() {
+                            self.chat.load_error = None;
+                            let slot: Job = Arc::new(Mutex::new(None));
+                            let (done, ctx) = (Arc::clone(&slot), ui.ctx().clone());
+                            let (engine, spec, context) = (Arc::clone(&self.chat.engine), spec.clone(), params.context);
+                            let onnx = if use_gguf { Vec::new() } else { doc.file.onnx.clone() };
+                            let path = gguf.clone().filter(|_| use_gguf);
+                            std::thread::spawn(move || {
+                                let result = match path {
+                                    Some(path) => magi_ml::llama::load_gguf(&path, &spec, own, context as usize),
+                                    None => magi_ml::TextModel::load(&onnx, spec.context as usize).map(|model| {
+                                        *engine.lock().unwrap_or_else(|p| p.into_inner()) = Some((key, model));
+                                    }),
+                                };
+                                *done.lock().unwrap_or_else(|p| p.into_inner()) = Some(result.map_err(|e| e.0));
+                                ctx.request_repaint();
+                            });
+                            self.chat.loading = Some(slot);
+                        }
+                    });
+                });
+            }
+            if let Some(error) = &self.chat.load_error {
+                ui.add(egui::Label::new(RichText::new(error).size(11.5).color(theme::danger())).wrap());
+            }
+            if use_gguf && !llama {
+                widgets::note(ui, "llama.cpp is not installed: Settings › Runtime installs it.");
+            }
+            if !use_gguf && spec.context > 512 {
+                widgets::note(
+                    ui,
+                    if gguf.is_some() {
+                        "The built-in engine reads the whole context window again for every token it writes, so long answers take a while. With llama.cpp installed (Settings › Runtime), the compiled GGUF answers many times faster."
+                    } else {
+                        "The built-in engine reads the whole context window again for every token it writes, so long answers take a while. Models that export to GGUF run many times faster with llama.cpp."
+                    },
+                );
+                if !llama && ui.small_button(format!("{}  Open Settings › Runtime", icon::GEAR)).clicked() {
+                    events.push(MagicEvent::OpenRuntime);
+                }
+            }
+        });
+        ui.add_space(4.0);
+
+        // ---- how it answers ----
+        card(ui, "Answering", |ui| {
+            ui.horizontal(|ui| {
+                widgets::fixed_label(ui, RichText::new("Context window").color(theme::text_dim()), 110.0);
+                if use_gguf {
+                    let mut own_context = params.context == 0;
+                    if ui.checkbox(&mut own_context, "The model's").changed() {
+                        params.context = match (own_context, own) {
+                            (true, _) => 0,
+                            (false, true) => (spec.context / 2).max(256),
+                            (false, false) => 16384,
+                        };
+                    }
+                    // llama.cpp keeps a model it knows within the context it learned.
+                    let most = if own { spec.context.max(256) } else { 1_048_576 };
+                    if !own_context {
+                        ui.add(DragValue::new(&mut params.context).range(256..=most).speed(64).suffix(" tokens"));
+                    }
+                } else {
+                    ui.label(RichText::new(format!("{} tokens", spec.context)).color(theme::text_dim()));
+                }
+            });
+            widgets::note(
+                ui,
+                if use_gguf && own {
+                    format!(
+                        "How much text it reads at once – system text, tools, request and answer together. It                          learned {} tokens (Model Size), the most llama.cpp gives it; less saves memory. Changing it                          reloads the model.",
+                        spec.context
+                    )
+                } else if use_gguf {
+                    "How much text it reads at once – system text, tools, request and answer together. More fits                      longer conversations and uses more memory, up to what the model was made for. Changing it                      reloads the model."
+                        .to_owned()
+                } else {
+                    "The built-in engine reads the context window the model was trained with: change it in the Model \
+                     Size block and train again, or run the GGUF file with llama.cpp to set it here."
+                        .to_owned()
+                },
+            );
+            if let Some(thinking) = &spec.thinking {
+                let mut on = match params.thinking.as_str() {
+                    "on" => true,
+                    "off" => false,
+                    _ => thinking.on_by_default,
+                };
+                ui.horizontal(|ui| {
+                    widgets::fixed_label(ui, RichText::new("Thinking").color(theme::text_dim()), 110.0);
+                    if widgets::toggle(ui, &mut on)
+                        .on_hover_text("Think before answering (the Thinking block)")
+                        .changed()
+                    {
+                        params.thinking = if on { "on" } else { "off" }.into();
+                    }
+                });
+            }
+            if let Some(effort) = &spec.effort {
+                ui.horizontal(|ui| {
+                    widgets::fixed_label(ui, RichText::new("Reasoning effort").color(theme::text_dim()), 110.0);
+                    let mut level = effort.level(&params.effort).to_owned();
+                    let options: Vec<(String, &str)> = effort.levels.iter().map(|l| (l.clone(), l.as_str())).collect();
+                    if widgets::segmented(ui, &mut level, &options) {
+                        params.effort = level;
+                    }
+                });
+            }
+            egui::CollapsingHeader::new(RichText::new("More").size(11.0).color(theme::text_faint()))
+                .id_salt("prompt-more")
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        widgets::fixed_label(ui, RichText::new("Longest answer").color(theme::text_dim()), 110.0);
+                        let mut own_max = params.max_tokens == 0;
+                        if ui.checkbox(&mut own_max, format!("The model's ({})", spec.max_tokens)).changed() {
+                            params.max_tokens = if own_max { 0 } else { spec.max_tokens.max(16) };
+                        }
+                        if !own_max {
+                            ui.add(DragValue::new(&mut params.max_tokens).range(1..=65536).suffix(" tokens"));
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        widgets::fixed_label(ui, RichText::new("Temperature").color(theme::text_dim()), 110.0);
+                        let mut own_temperature = params.temperature < 0.0;
+                        if ui.checkbox(&mut own_temperature, format!("The model's ({})", spec.temperature)).changed() {
+                            params.temperature = if own_temperature { -1.0 } else { f64::from(spec.temperature) };
+                        }
+                        if !own_temperature {
+                            ui.add(egui::Slider::new(&mut params.temperature, 0.0..=2.0).max_decimals(2));
+                        }
+                    });
+                    widgets::note(ui, "The system prompt and tools come from Text & Tools.");
+                });
+        });
+        if params != before
+            && let Some(node) = doc.studio.graph.node_mut(node_id)
+            && let serde_json::Value::Object(map) = serde_json::to_value(&params).unwrap_or_default()
+        {
+            for (key, value) in map {
+                node.set_param(&key, value);
+            }
+        }
+        ui.add_space(6.0);
+
+        // ---- the request ----
+        let response = ui.add(
             egui::TextEdit::multiline(&mut self.chat.request)
-                .hint_text("Ask it something, or give it a task")
+                .hint_text("Ask it something – try “What is 487 times 26?” or “Will it rain in Oslo?”")
                 .desired_rows(3)
                 .desired_width(f32::INFINITY),
         );
-        let busy = self.chat.pending.is_some();
+        let enter = response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command);
+        let busy = self.chat.pending.is_some() || self.chat.loading.is_some();
         widgets::button_row(ui, |ui| {
-            let can = !busy && !doc.file.onnx.is_empty() && !self.chat.request.trim().is_empty();
+            let can = !busy && ready && !self.chat.request.trim().is_empty();
             ui.add_enabled_ui(can, |ui| {
-                if widgets::accent_button(
+                let send = widgets::accent_button(
                     ui,
-                    format!("{}  Ask", icon::PAPER_PLANE_RIGHT),
+                    format!("{}  Send", icon::PAPER_PLANE_RIGHT),
                     theme::accent(),
                     vec2(0.0, 28.0),
                 )
-                .clicked()
-                {
-                    let spec = doc.file.model.text.clone().unwrap_or_default();
-                    let onnx = doc.file.onnx.clone();
+                .on_hover_text("Ctrl+Enter")
+                .clicked();
+                if send || (enter && can) {
                     let request = self.chat.request.trim().to_owned();
                     let pending: Pending = Arc::new(Mutex::new(None));
                     let (slot, ctx, asked) = (Arc::clone(&pending), ui.ctx().clone(), request.clone());
-                    std::thread::spawn(move || {
-                        let seed = std::time::SystemTime::now()
+                    let options = magi_ml::AskOptions {
+                        max_tokens: params.max_tokens as usize,
+                        temperature: params.temperature as f32,
+                        seed: std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
-                            .map_or(1, |d| d.as_nanos() as u64);
-                        let result = magi_ml::TextModel::load(&onnx, spec.context as usize)
-                            .and_then(|mut model| magi_ml::ask(&mut model, &spec, &asked, 0, -1.0, seed))
-                            .map_err(|e| e.0);
+                            .map_or(1, |d| d.as_nanos() as u64),
+                        context: params.context as usize,
+                        thinking: match params.thinking.as_str() {
+                            "on" => Some(true),
+                            "off" => Some(false),
+                            _ => None,
+                        },
+                        effort: params.effort.clone(),
+                    };
+                    let (engine, spec) = (Arc::clone(&self.chat.engine), spec.clone());
+                    // The model's bytes go along only when it must be loaded first.
+                    let onnx = if use_gguf
+                        || self.chat.engine.try_lock().is_ok_and(|s| s.as_ref().is_some_and(|(k, _)| *k == key))
+                    {
+                        Vec::new()
+                    } else {
+                        doc.file.onnx.clone()
+                    };
+                    let path = gguf.clone().filter(|_| use_gguf);
+                    std::thread::spawn(move || {
+                        let result = match path {
+                            Some(path) => magi_ml::llama::ask_gguf_with(&path, &spec, own, &asked, &options),
+                            None => (|| {
+                                let mut slot = engine.lock().unwrap_or_else(|p| p.into_inner());
+                                if slot.as_ref().is_none_or(|(k, _)| *k != key) {
+                                    *slot = None;
+                                    *slot = Some((key, magi_ml::TextModel::load(&onnx, spec.context as usize)?));
+                                }
+                                let (_, model) = slot.as_mut().expect("loaded above");
+                                magi_ml::ask_with(model, &spec, &asked, &options)
+                            })(),
+                        }
+                        .map_err(|e| e.0);
                         *slot.lock().unwrap_or_else(|p| p.into_inner()) = Some(result);
                         ctx.request_repaint();
                     });
                     self.chat.pending = Some((request, pending));
+                    // The request shows with its answer; the box is ready for the next one.
+                    self.chat.request.clear();
                 }
             });
-            if busy {
+            if busy && self.chat.pending.is_some() {
                 ui.spinner();
-                ui.label(RichText::new("Thinking…").color(theme::text_dim()));
+                ui.label(RichText::new("Answering…").color(theme::text_dim()));
             }
             if !self.chat.answers.is_empty() && ui.small_button("Clear").clicked() {
                 self.chat.answers.clear();
             }
         });
         ui.add_space(6.0);
+        let mut runtime = false;
         for (index, (request, answer)) in self.chat.answers.iter().enumerate().rev() {
             ui.push_id(index, |ui| {
                 egui::Frame::new().fill(theme::bg_raised()).corner_radius(theme::RADIUS).inner_margin(8).show(
@@ -557,25 +871,17 @@ impl MagicTab {
                         ui.label(RichText::new(format!("{}  {request}", icon::USER)).color(theme::text_dim()));
                         match answer {
                             Err(error) => {
-                                ui.label(RichText::new(error).color(theme::danger()));
+                                ui.add(egui::Label::new(RichText::new(error).color(theme::danger())).wrap());
+                                if error.contains("llama.cpp") {
+                                    runtime |= ui.button(format!("{}  Open Settings › Runtime", icon::GEAR)).clicked();
+                                }
                             }
                             Ok(answer) => {
-                                let text =
-                                    if answer.text.is_empty() { "(nothing to say)" } else { answer.text.as_str() };
-                                ui.add(
-                                    egui::Label::new(RichText::new(format!("{}  {text}", icon::ROBOT)).strong()).wrap(),
-                                );
-                                for call in &answer.tools {
-                                    ui.label(
-                                        RichText::new(format!("{}  {}  {}", icon::WRENCH, call.name, call.args))
-                                            .monospace()
-                                            .size(11.5)
-                                            .color(theme::accent()),
-                                    );
-                                }
                                 if !answer.thinking.is_empty() {
                                     egui::CollapsingHeader::new(
-                                        RichText::new("Thinking").size(11.0).color(theme::text_faint()),
+                                        RichText::new(format!("{}  What it thought", icon::BRAIN))
+                                            .size(11.0)
+                                            .color(theme::text_faint()),
                                     )
                                     .show(ui, |ui| {
                                         ui.add(
@@ -585,6 +891,25 @@ impl MagicTab {
                                             .wrap(),
                                         );
                                     });
+                                }
+                                let text = if answer.text.is_empty() {
+                                    "(it said nothing besides its tool calls)"
+                                } else {
+                                    answer.text.as_str()
+                                };
+                                ui.add(
+                                    egui::Label::new(RichText::new(format!("{}  {text}", icon::ROBOT)).strong()).wrap(),
+                                );
+                                for call in &answer.tools {
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(format!("{}  {}  {}", icon::WRENCH, call.name, call.args))
+                                                .monospace()
+                                                .size(11.5)
+                                                .color(theme::accent()),
+                                        )
+                                        .wrap(),
+                                    );
                                 }
                                 egui::CollapsingHeader::new(
                                     RichText::new("Everything it wrote").size(11.0).color(theme::text_faint()),
@@ -599,10 +924,20 @@ impl MagicTab {
             });
             ui.add_space(4.0);
         }
+        if runtime {
+            events.push(MagicEvent::OpenRuntime);
+        }
     }
 
     fn test_panel(&mut self, ui: &mut Ui, env: &MagicEnv<'_>, events: &mut Vec<MagicEvent>) {
         let doc = self.doc.as_ref().expect("checked by the caller");
+        if doc.file.model.kind != ModelKind::Vision {
+            widgets::notice(ui, icon::INFO, "This is a text model: use a Prompt Model block.", theme::text_faint());
+            return;
+        }
+        if doc.file.onnx.is_empty() {
+            widgets::notice(ui, icon::INFO, "Train the model (or import one) first.", theme::text_faint());
+        }
         let running = self.tester.is_some();
         widgets::button_row(ui, |ui| {
             let (text, color) = if running {
@@ -614,14 +949,14 @@ impl MagicTab {
                 if widgets::accent_button(ui, text, color, vec2(0.0, 28.0)).clicked() {
                     events.push(if running { MagicEvent::StopTest } else { MagicEvent::StartTest });
                 }
+                if ui
+                    .button(format!("{}  Picture…", icon::IMAGE))
+                    .on_hover_text("Run the model on a picture file")
+                    .clicked()
+                {
+                    events.push(MagicEvent::TryPicture);
+                }
             });
-            if ui
-                .button(format!("{}  Picture…", icon::IMAGE))
-                .on_hover_text("Run the model on a picture file")
-                .clicked()
-            {
-                events.push(MagicEvent::TryPicture);
-            }
         });
         ui.add_enabled_ui(!running, |ui| {
             widgets::toggle_row(
@@ -708,10 +1043,34 @@ impl MagicTab {
                     .desired_height(14.0)
                     .text(RichText::new(format!("{label}  {:.0}%", p * 100.0)).size(11.0))
                     .fill(if Some(class) == best { theme::accent() } else { theme::bg_widget_active() });
-                ui.add(bar).on_hover_text(if acts { "Acting on this class is on" } else { "Not acted on" });
+                ui.add(bar).on_hover_text(if acts { "Acting on this answer is on" } else { "Not acted on" });
             }
         }
     }
+}
+
+fn progress_text(state: &crate::magic::train::Telemetry) -> String {
+    let stage = stage_name(&state.stage);
+    match state.progress {
+        Some((step, steps)) => format!("{stage} · step {step} of {steps}"),
+        None if stage.is_empty() => "Starting…".to_owned(),
+        None => format!("{stage}…"),
+    }
+}
+
+fn console_line(ui: &mut Ui, level: Level, text: &str) {
+    let (glyph, color) = match level {
+        Level::Info => (icon::DOT_OUTLINE, theme::text_dim()),
+        Level::Stage => (icon::CARET_RIGHT, theme::text()),
+        Level::Warning => (icon::WARNING, theme::warning()),
+        Level::Error => (icon::X_CIRCLE, theme::danger()),
+        Level::Done => (icon::CHECK_CIRCLE, theme::success()),
+    };
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.label(RichText::new(glyph).size(12.0).color(color));
+        ui.add(egui::Label::new(RichText::new(text).size(12.0).color(color)).wrap());
+    });
 }
 
 /// The name, category and description of a block, above its settings.
@@ -730,8 +1089,72 @@ fn block_header(ui: &mut Ui, kind: &str) {
     ui.separator();
 }
 
-/// With no block selected: what the canvas makes.
-fn overview(ui: &mut Ui, doc: &MagicDoc) {
+/// What is wired into a block's inputs, and where its outputs go.
+fn connections(ui: &mut Ui, doc: &MagicDoc, node_id: NodeId) {
+    let graph = &doc.studio.graph;
+    let Some(node) = graph.node(node_id) else { return };
+    let Some(def) = registry().get(&node.kind) else { return };
+    let name_of = |id: NodeId| {
+        graph.node(id).map_or_else(String::new, |n| {
+            if n.label.is_empty() {
+                registry().get(&n.kind).map(|d| d.name.clone()).unwrap_or_default()
+            } else {
+                n.label.clone()
+            }
+        })
+    };
+    if def.data_in.is_empty() && def.data_out.is_empty() {
+        return;
+    }
+    ui.add_space(6.0);
+    ui.label(RichText::new("CONNECTIONS").size(10.5).color(theme::text_faint()));
+    for port in &def.data_in {
+        let source = graph.data_source(node_id, &port.id).map(|p| p.node);
+        let (text, color) = match source {
+            Some(id) => (format!("{}  {}: from {}", icon::ARROW_RIGHT, port.label, name_of(id)), theme::text_dim()),
+            None => {
+                let missing = match port.id.as_str() {
+                    studio::FFN => {
+                        "a plain SwiGLU layer (wire a Mixture of Experts or Persona Router here to change it)"
+                            .to_owned()
+                    }
+                    studio::OPTIMIZER => "the default AdamW (wire an Optimizer block here to change it)".to_owned(),
+                    studio::SETUP => "nothing chained in".to_owned(),
+                    studio::MODEL => "nothing – wire the block before it here".to_owned(),
+                    "negative" => "nothing (optional)".to_owned(),
+                    _ => "nothing – wire a dataset here".to_owned(),
+                };
+                (format!("{}  {}: {missing}", icon::ARROW_RIGHT, port.label), theme::text_faint())
+            }
+        };
+        ui.add(egui::Label::new(RichText::new(text).size(11.5).color(color)).wrap());
+    }
+    for port in &def.data_out {
+        let targets: Vec<String> = graph
+            .wires()
+            .iter()
+            .filter(|w| w.from.node == node_id && w.from.port == port.id)
+            .map(|w| name_of(w.to.node))
+            .collect();
+        let text = if targets.is_empty() {
+            format!("{}  {}: not wired", icon::ARROW_LEFT, port.label)
+        } else {
+            format!("{}  {}: to {}", icon::ARROW_LEFT, port.label, targets.join(", "))
+        };
+        let color = if targets.is_empty() { theme::text_faint() } else { theme::text_dim() };
+        ui.add(egui::Label::new(RichText::new(text).size(11.5).color(color)).wrap());
+    }
+}
+
+/// With no block selected: what the canvas makes, and how to go on.
+/// Returns a block to select.
+fn overview(
+    ui: &mut Ui,
+    doc: &MagicDoc,
+    env: &MagicEnv<'_>,
+    training: bool,
+    events: &mut Vec<MagicEvent>,
+) -> Option<NodeId> {
     let model = &doc.file.model;
     ui.label(RichText::new(doc.title()).strong().size(15.0));
     ui.label(RichText::new(model.kind.label()).size(11.5).color(theme::text_dim()));
@@ -739,27 +1162,34 @@ fn overview(ui: &mut Ui, doc: &MagicDoc) {
     match studio::pipeline(&doc.studio.graph) {
         Ok(pipeline) => {
             card(ui, "The pipeline", |ui| {
-                let start = registry().get(&pipeline.entry.kind).map(|d| d.name.clone()).unwrap_or_default();
-                ui.label(format!("{}  {start}", icon::FLAG));
-                for block in &pipeline.architecture.blocks {
-                    ui.label(
-                        RichText::new(format!("{}  {}", icon::CUBE, block.kind.replace('_', " ")))
-                            .color(theme::text_dim()),
-                    );
+                for id in &pipeline.path {
+                    let Some(node) = doc.studio.graph.node(*id) else { continue };
+                    let name = registry().get(&node.kind).map(|d| d.name.clone()).unwrap_or_default();
+                    ui.label(format!("{}  {name}", node_icon(&node.kind)));
                 }
-                for stage in &pipeline.stages {
-                    let name = registry().get(&stage.kind).map(|d| d.name.clone()).unwrap_or_default();
-                    let data =
-                        if stage.data.is_empty() && stage.kind != kinds::VISION_TRAIN { " – no dataset" } else { "" };
-                    ui.label(format!("{}  {name}{data}", icon::CARET_RIGHT));
-                }
-                if pipeline.compile.is_none() {
-                    widgets::note(ui, "Add Compile .magic Package at the end to say what the file includes.");
+                let layers = pipeline.architecture.layers.len();
+                if layers > 0 {
+                    widgets::note(ui, format!("{layers} layers, {} wide.", pipeline.architecture.width));
                 }
                 if !pipeline.trains() {
                     widgets::note(ui, "Nothing to train: the model is used as it is.");
                 }
             });
+            match doc.training_problem() {
+                _ if training => {
+                    widgets::notice(ui, icon::HOURGLASS, "Training… the console shows how it goes.", theme::accent())
+                }
+                Some(problem) if pipeline.trains() => widgets::notice(ui, icon::INFO, problem, theme::warning()),
+                None => {
+                    widgets::notice(ui, icon::CHECK_CIRCLE, "Ready to train.", theme::success());
+                    if widgets::accent_button(ui, format!("{}  Train", icon::PLAY), theme::accent(), vec2(0.0, 28.0))
+                        .clicked()
+                    {
+                        events.push(MagicEvent::Train);
+                    }
+                }
+                _ => {}
+            }
         }
         Err(problem) => widgets::notice(ui, icon::WARNING, problem, theme::warning()),
     }
@@ -778,16 +1208,39 @@ fn overview(ui: &mut Ui, doc: &MagicDoc) {
         });
     }
     ui.add_space(8.0);
-    widgets::note(
-        ui,
-        "Select a block to see and change it. Right-click the canvas (or press Add block) for more blocks: \
-         architecture, datasets, training stages.",
-    );
+    card(ui, "How it works", |ui| {
+        for line in [
+            "The Model wire runs left to right: a start, the architecture, the training stages, Compile .magic Package, \
+             then Prompt Model (or Test Model) to try the result.",
+            "Setup blocks – Model Info, Text & Tools… – chain into the start's Setup input; what they say is what the \
+             model is.",
+            "Datasets wire into the stages that learn from them; an Optimizer block wires into each stage it drives.",
+            "Select a block to change it and see what is wired into it. Right-click the canvas, or Add in the banner, \
+             for more blocks; Presets › Commons has well-known architectures.",
+        ] {
+            ui.add(egui::Label::new(RichText::new(format!("•  {line}")).size(11.5).color(theme::text_dim())).wrap());
+        }
+    });
+    ui.label(
+        RichText::new(format!("{}  Models run on {}.", icon::CPU, env.engines)).size(11.0).color(theme::text_faint()),
+    )
+    .on_hover_text("Settings › Hardware");
+    if doc.training_problem().is_some_and(|p| p.contains("folder")) {
+        ui.add_space(4.0);
+        if ui
+            .button(format!("{}  Choose where it is saved…", icon::FOLDER_OPEN))
+            .on_hover_text("Selects Compile .magic Package, where the folder is chosen")
+            .clicked()
+        {
+            return doc.studio.graph.nodes().find(|n| n.kind == kinds::COMPILE).map(|n| n.id);
+        }
+    }
+    None
 }
 
 fn trained_facts(ui: &mut Ui, trained: &magi_core::magic::TrainingRecord) {
     let stages: Vec<&str> = trained.stages.iter().map(|s| stage_name(s)).collect();
-    ui.label(RichText::new(stages.join(" → ")).color(theme::text_dim()));
+    ui.label(RichText::new(stages.join(" › ")).color(theme::text_dim()));
     ui.label(
         RichText::new(format!(
             "{} steps · loss {} · {:.2}M parameters",
@@ -818,7 +1271,7 @@ fn loss_chart(ui: &mut Ui, points: &[[f64; 2]], size: egui::Vec2) {
     let (x0, x1) = (points[0][0], points[points.len() - 1][0].max(points[0][0] + 1.0));
     let (lo, hi) = points.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| (lo.min(p[1]), hi.max(p[1])));
     let span = (hi - lo).max(1e-9);
-    let inner = rect.shrink(8.0);
+    let inner = rect.shrink2(vec2(10.0, 14.0));
     let line: Vec<egui::Pos2> = points
         .iter()
         .map(|p| {
@@ -830,79 +1283,180 @@ fn loss_chart(ui: &mut Ui, points: &[[f64; 2]], size: egui::Vec2) {
         .collect();
     painter.add(egui::Shape::line(line, egui::Stroke::new(1.5, theme::accent())));
     let font = egui::FontId::monospace(10.0);
-    painter.text(inner.left_top(), egui::Align2::LEFT_TOP, format!("{hi:.3}"), font.clone(), theme::text_faint());
-    painter.text(inner.left_bottom(), egui::Align2::LEFT_BOTTOM, format!("{lo:.3}"), font, theme::text_faint());
+    painter.text(
+        rect.left_top() + vec2(6.0, 3.0),
+        egui::Align2::LEFT_TOP,
+        format!("loss {hi:.3}"),
+        font.clone(),
+        theme::text_faint(),
+    );
+    painter.text(
+        rect.left_bottom() + vec2(6.0, -3.0),
+        egui::Align2::LEFT_BOTTOM,
+        format!("{lo:.3}"),
+        font,
+        theme::text_faint(),
+    );
 }
 
 fn empty_state(ui: &mut Ui, events: &mut Vec<MagicEvent>) {
+    // One narrow column: what Magic is, the two ways to start, and opening one.
     ui.vertical_centered(|ui| {
         ui.add_space(ui.available_height() * 0.16);
-        ui.label(RichText::new(icon::MAGIC_WAND).size(46.0).color(theme::accent()));
+        ui.label(RichText::new(icon::MAGIC_WAND).size(40.0).color(theme::accent()));
         ui.label(RichText::new("Magic").size(22.0).strong());
-        ui.add_space(4.0);
-        ui.set_max_width(ui.available_width().min(500.0));
-        ui.add(
-            egui::Label::new(
-                RichText::new(
-                    "Build, train and try AI models for your macros on a canvas: text models that answer and call \
-                     tools, and vision models that watch the screen. Start a new one, open a .magic file, or import \
-                     a model made elsewhere.",
-                )
-                .color(theme::text_dim()),
-            )
-            .wrap(),
-        );
-        ui.add_space(12.0);
-        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-        let row = |ui: &mut Ui, events: &mut Vec<MagicEvent>| {
-            let text = format!("{}  New text model", icon::ROBOT);
-            if widgets::accent_button(ui, text, theme::accent(), vec2(0.0, 32.0)).clicked() {
-                events.push(MagicEvent::NewModel { text: true });
-            }
-            let vision = egui::Button::new(format!("{}  New vision model", icon::EYE));
-            if ui.add(vision.min_size(vec2(0.0, 32.0))).clicked() {
-                events.push(MagicEvent::NewModel { text: false });
-            }
+        ui.add_space(2.0);
+        ui.label(RichText::new("Build, train and try AI models.").color(theme::text_dim()));
+        ui.add_space(16.0);
+        let width = ui.available_width().min(340.0);
+        let start = |ui: &mut Ui, glyph: &str, title: &str, about: &str| -> bool {
+            let format = |size: f32, color| egui::TextFormat {
+                font_id: egui::FontId::proportional(size),
+                color,
+                ..Default::default()
+            };
+            let mut job = egui::text::LayoutJob::default();
+            job.append(glyph, 0.0, format(16.0, theme::accent()));
+            job.append(title, 8.0, format(14.0, theme::text()));
+            job.append(
+                "
+",
+                0.0,
+                format(4.0, theme::text()),
+            );
+            job.append(about, 0.0, format(11.5, theme::text_dim()));
+            ui.add(egui::Button::new(job).min_size(vec2(width, 52.0))).clicked()
         };
-        let row2 = |ui: &mut Ui, events: &mut Vec<MagicEvent>| {
-            let open = egui::Button::new(format!("{}  Open .magic…", icon::FOLDER_OPEN));
-            if ui.add(open.min_size(vec2(0.0, 32.0))).clicked() {
+        if start(ui, icon::ROBOT, "New text model", "An example assistant that thinks and uses tools") {
+            events.push(MagicEvent::NewModel { text: true });
+        }
+        ui.add_space(6.0);
+        if start(ui, icon::EYE, "New vision model", "Tells what is on the screen apart") {
+            events.push(MagicEvent::NewModel { text: false });
+        }
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            ui.add_space(((ui.available_width() - 230.0) / 2.0).max(0.0));
+            if ui.add(egui::Button::new(format!("{}  Open…", icon::FOLDER_OPEN)).frame(false)).clicked() {
                 events.push(MagicEvent::Open);
             }
-            let folder = egui::Button::new(format!("{}  Import a project folder…", icon::FOLDER_OPEN));
-            if ui.add(folder.min_size(vec2(0.0, 32.0))).clicked() {
-                events.push(MagicEvent::Import { folder: true });
-            }
-            let file = egui::Button::new(format!("{}  Import a .zip or .onnx…", icon::FILE_ZIP));
-            if ui.add(file.min_size(vec2(0.0, 32.0))).clicked() {
-                events.push(MagicEvent::Import { folder: false });
-            }
-        };
-        if ui.available_width() >= 600.0 {
-            ui.horizontal(|ui| {
-                ui.add_space((ui.available_width() - 330.0).max(0.0) / 2.0);
-                row(ui, events);
+            ui.label(RichText::new("·").color(theme::text_faint()));
+            ui.menu_button(format!("{}  Import…", icon::DOWNLOAD_SIMPLE), |ui| {
+                for (from, label) in [
+                    (ImportFrom::Gguf, "A GGUF model (LM Studio, llama.cpp)…"),
+                    (ImportFrom::Folder, "An ONNX project folder…"),
+                    (ImportFrom::File, "A .zip or .onnx file…"),
+                ] {
+                    if ui.button(label).clicked() {
+                        events.push(MagicEvent::Import(from));
+                        ui.close();
+                    }
+                }
             });
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.add_space((ui.available_width() - 560.0).max(0.0) / 2.0);
-                row2(ui, events);
-            });
-        } else {
-            row(ui, events);
-            row2(ui, events);
-        }
-        ui.add_space(10.0);
-        widgets::note(ui, "Training needs PyTorch, which can be installed under Settings › AI.");
+        });
     });
 }
 
-// ---- the inspector blocks -----------------------------------------------------
+// ---- setup blocks ---------------------------------------------------------------
 
-fn info_card(ui: &mut Ui, doc: &mut MagicDoc, events: &mut Vec<MagicEvent>) {
-    let size_mb = doc.file.onnx.len() as f64 / (1024.0 * 1024.0);
-    let classes = doc.shape.as_ref().and_then(|s| s.classes());
-    let model = &mut doc.file.model;
+/// A setup block's settings, edited as the model they make.
+fn setup_panel(
+    ui: &mut Ui,
+    doc: &mut MagicDoc,
+    node_id: NodeId,
+    kind: &str,
+    env: &MagicEnv<'_>,
+    events: &mut Vec<MagicEvent>,
+) {
+    let Some(value) = doc.studio.graph.node(node_id).map(|n| n.params_or_default::<SetupParams>().value) else {
+        return;
+    };
+    let mut model = doc.file.model.clone();
+    studio::apply_section(kind, &value, &mut model);
+    match kind {
+        kinds::INFO => info_card(ui, &mut model, doc, events),
+        kinds::TEXT => text_card(ui, &mut model),
+        kinds::THINKING => thinking_card(ui, &mut model),
+        kinds::EFFORT => effort_card(ui, &mut model),
+        kinds::INPUT => capture_card(ui, &mut model, env, events),
+        kinds::ANSWERS => classes_card(ui, &mut model),
+        kinds::ACTION => action_card(ui, &mut model),
+        kinds::SETTINGS => settings_card(ui, &mut model),
+        kinds::PREP => input_card(ui, &mut model),
+        _ => {}
+    }
+    let changed = studio::section_of(kind, &model);
+    if changed != value
+        && let Some(node) = doc.studio.graph.node_mut(node_id)
+    {
+        node.set_param("value", changed);
+    }
+}
+
+fn thinking_card(ui: &mut Ui, model: &mut MagicModel) {
+    let Some(text) = model.text.as_mut() else { return };
+    let thinking = text.thinking.get_or_insert_with(Default::default);
+    widgets::toggle_row(
+        ui,
+        "Think unless asked not to",
+        "Off: it thinks only when a request turns thinking on",
+        &mut thinking.on_by_default,
+    );
+    widgets::note(
+        ui,
+        format!(
+            "Training learns every answer that has reasoning both ways: thinking first ({}…{}), and straight away after \
+             an empty thinking span. Answers without reasoning are learned without it. Requests then choose: the \
+             Prompt Model block's Thinking switch, LM Studio's Enable Thinking toggle, or enable_thinking in a chat \
+             template.",
+            text.think_tags.0, text.think_tags.1
+        ),
+    );
+    widgets::note(
+        ui,
+        "Datasets give reasoning as \"thinking\" beside the answer: {\"prompt\": …, \"thinking\": …, \"response\": …}.",
+    );
+}
+
+fn effort_card(ui: &mut Ui, model: &mut MagicModel) {
+    let Some(text) = model.text.as_mut() else { return };
+    let effort = text.effort.get_or_insert_with(Default::default);
+    widgets::caption(ui, "Levels, from least to most effort");
+    let mut remove = None;
+    let several = effort.levels.len() > 1;
+    for (index, level) in effort.levels.iter_mut().enumerate() {
+        ui.push_id(("level", index), |ui| {
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(level).desired_width(140.0));
+                if several && widgets::icon_button(ui, icon::TRASH, "Remove this level").clicked() {
+                    remove = Some(index);
+                }
+            });
+        });
+    }
+    if let Some(index) = remove {
+        effort.levels.remove(index);
+    }
+    if ui.small_button(format!("{}  Add a level", icon::PLUS)).clicked() {
+        effort.levels.push(format!("level {}", effort.levels.len() + 1));
+    }
+    ui.horizontal(|ui| {
+        widgets::fixed_label(ui, RichText::new("Default").color(theme::text_dim()), 110.0);
+        egui::ComboBox::from_id_salt("effort-default").selected_text(effort.default.clone()).show_ui(ui, |ui| {
+            for level in effort.levels.clone() {
+                ui.selectable_value(&mut effort.default, level.clone(), level);
+            }
+        });
+    });
+    widgets::note(
+        ui,
+        "The level is named in the system text (\"Reasoning effort: high\"), so the model learns to think less or more. \
+         Mark samples with \"effort\" – the example reasoning.jsonl writes each problem at every level; samples \
+         without one are at the default. LM Studio shows a Reasoning Effort choice.",
+    );
+}
+
+fn info_card(ui: &mut Ui, model: &mut MagicModel, doc: &MagicDoc, events: &mut Vec<MagicEvent>) {
     ui.horizontal(|ui| {
         widgets::caption(ui, "Name");
         ui.add(egui::TextEdit::singleline(&mut model.name).desired_width(f32::INFINITY));
@@ -919,28 +1473,36 @@ fn info_card(ui: &mut Ui, doc: &mut MagicDoc, events: &mut Vec<MagicEvent>) {
     });
     ui.horizontal(|ui| {
         widgets::caption(ui, "Licence");
-        ui.add(egui::TextEdit::singleline(&mut model.license).hint_text("Such as MIT").desired_width(f32::INFINITY));
+        ui.add(
+            egui::TextEdit::singleline(&mut model.license)
+                .hint_text("Such as MIT or Apache-2.0")
+                .desired_width(f32::INFINITY),
+        );
     });
-    let facts = if size_mb > 0.0 && model.kind == ModelKind::Vision {
+    let size_mb = doc.file.onnx.len() as f64 / (1024.0 * 1024.0);
+    let facts = if let Some(path) = &doc.file.model.gguf {
+        format!("GGUF model · {}", path)
+    } else if size_mb > 0.0 && doc.file.model.kind == ModelKind::Vision {
+        let classes = doc.shape.as_ref().and_then(|s| s.classes());
         format!(
             "Vision · reads {}×{} pictures · {} answers · {size_mb:.1} MB",
-            model.input.width,
-            model.input.height,
+            doc.file.model.input.width,
+            doc.file.model.input.height,
             classes.map_or_else(|| "?".to_owned(), |n| n.to_string())
         )
     } else if size_mb > 0.0 {
         format!(
             "Text · {} tokens of context · {size_mb:.1} MB{}",
-            model.text.as_ref().map_or(0, |t| t.context),
-            if doc.file.weights.is_empty() { "" } else { " · with weights" }
+            doc.file.model.text.as_ref().map_or(0, |t| t.context),
+            if doc.file.weights.is_empty() { "" } else { " · with its weights" }
         )
     } else {
-        format!("{} · not trained yet", model.kind.label())
+        format!("{} · not trained yet", doc.file.model.kind.label())
     };
     ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new(facts).size(11.5).color(theme::text_dim()));
-        if model.kind == ModelKind::Vision
-            && ui.small_button(format!("{}  Replace model file…", icon::ARROWS_CLOCKWISE)).clicked()
+        if doc.file.model.kind == ModelKind::Vision
+            && ui.small_button(format!("{}  Replace the model file…", icon::ARROWS_CLOCKWISE)).clicked()
         {
             events.push(MagicEvent::ReplaceModel);
         }
@@ -948,10 +1510,177 @@ fn info_card(ui: &mut Ui, doc: &mut MagicDoc, events: &mut Vec<MagicEvent>) {
     if !model.source.is_empty() {
         ui.label(RichText::new(&model.source).size(11.0).color(theme::text_faint()));
     }
-    if let Some(trained) = &model.trained {
+    if let Some(trained) = &doc.file.model.trained {
         ui.add_space(4.0);
         trained_facts(ui, trained);
     }
+}
+
+/// A text model's system prompt, tools, way of writing and chat tags.
+fn text_card(ui: &mut Ui, model: &mut MagicModel) {
+    let trained = model.trained.is_some();
+    let text = model.text.get_or_insert_with(TextSpec::default);
+    widgets::caption(ui, "System prompt");
+    ui.add(
+        egui::TextEdit::multiline(&mut text.system)
+            .hint_text("What the model is told before every request (optional)")
+            .desired_rows(3)
+            .desired_width(f32::INFINITY),
+    );
+    if trained {
+        widgets::note(
+            ui,
+            "The model learned without this prompt if it was empty while training; changing it now can change its answers.",
+        );
+    }
+    ui.add_space(4.0);
+    card(ui, "How it writes", |ui| {
+        ui.horizontal(|ui| {
+            widgets::fixed_label(ui, RichText::new("Temperature").color(theme::text_dim()), 120.0);
+            ui.add(egui::Slider::new(&mut text.temperature, 0.0..=2.0).max_decimals(2))
+                .on_hover_text("0 always writes the likeliest; higher is freer and more varied");
+        });
+        ui.horizontal(|ui| {
+            widgets::fixed_label(ui, RichText::new("Choose among").color(theme::text_dim()), 120.0);
+            ui.add(DragValue::new(&mut text.top_k).range(0..=1000).suffix(" likeliest"))
+                .on_hover_text("Each token is picked from this many likeliest; 0: from all");
+        });
+        ui.horizontal(|ui| {
+            widgets::fixed_label(ui, RichText::new("Longest answer").color(theme::text_dim()), 120.0);
+            ui.add(DragValue::new(&mut text.max_tokens).range(1..=8192).suffix(" tokens"));
+        });
+        widgets::note(
+            ui,
+            format!(
+                "Context window: {} tokens – set in the Model Size block (a token is a byte of text or a tag). \
+                 The Prompt Model block can run GGUF models with another.",
+                text.context
+            ),
+        );
+    });
+    ui.add_space(4.0);
+    card(ui, "Tools it may call", |ui| {
+        widgets::note(
+            ui,
+            format!(
+                "The model reads these in its system text and calls one by writing {}{{\"name\": …, \"arguments\": \
+                 {{…}}}}{}; a tool's result comes back in its own turn. In a macro, the AI Agent block carries out \
+                 press, type, click, move, wait and log itself; other tools come out of its Tool and Arguments \
+                 outputs. Datasets can offer their own tools per sample (\"tools\").",
+                text.tool_tags.0, text.tool_tags.1
+            ),
+        );
+        let mut remove = None;
+        for (index, tool) in text.tools.iter_mut().enumerate() {
+            ui.push_id(("tool", index), |ui| {
+                egui::Frame::new().fill(theme::bg_raised()).corner_radius(theme::RADIUS).inner_margin(6).show(
+                    ui,
+                    |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.add(egui::TextEdit::singleline(&mut tool.name).hint_text("name").desired_width(120.0));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if widgets::icon_button(ui, icon::TRASH, "Remove this tool").clicked() {
+                                    remove = Some(index);
+                                }
+                            });
+                        });
+                        ui.add(
+                            egui::TextEdit::singleline(&mut tool.description)
+                                .hint_text("What it does")
+                                .desired_width(f32::INFINITY),
+                        );
+                        json_edit(ui, &mut tool.parameters, "Arguments, as a JSON Schema");
+                    },
+                );
+            });
+            ui.add_space(3.0);
+        }
+        if let Some(index) = remove {
+            text.tools.remove(index);
+        }
+        widgets::button_row(ui, |ui| {
+            if ui.small_button(format!("{}  Add a tool", icon::PLUS)).clicked() {
+                text.tools.push(ToolSpec {
+                    name: format!("tool_{}", text.tools.len() + 1),
+                    parameters: serde_json::json!({ "type": "object", "properties": {} }),
+                    ..ToolSpec::default()
+                });
+            }
+            let general: Vec<ToolSpec> =
+                studio::example_tools().into_iter().filter(|t| !text.tools.iter().any(|o| o.name == t.name)).collect();
+            if !general.is_empty()
+                && ui
+                    .small_button(format!("{}  Add general tools", icon::GLOBE))
+                    .on_hover_text("web_search, calculator, get_weather and get_time – the example datasets use them")
+                    .clicked()
+            {
+                text.tools.extend(general);
+            }
+            let missing: Vec<_> =
+                AGENT_TOOLS.iter().filter(|(name, _)| !text.tools.iter().any(|t| t.name == *name)).collect();
+            if !missing.is_empty()
+                && ui
+                    .small_button(format!("{}  Add MacroMagi's tools", icon::WRENCH))
+                    .on_hover_text("press, type, click, move, wait and log")
+                    .clicked()
+            {
+                for (name, about) in missing {
+                    text.tools.push(crate::magic::agent_tool(name, about));
+                }
+            }
+        });
+    });
+    ui.add_space(4.0);
+    card(ui, "Personas", |ui| {
+        if text.personas.is_empty() {
+            widgets::note(
+                ui,
+                "None. A Dual-Persona Router block, wired into a layer block, gives the model two, each with its own tag.",
+            );
+        }
+        for persona in &text.personas {
+            ui.label(format!("{}  {} – {}", persona.tag, persona.name, persona.role));
+        }
+    });
+    ui.add_space(4.0);
+    egui::CollapsingHeader::new(RichText::new("CHAT TAGS").size(10.5).color(theme::text_faint())).show(ui, |ui| {
+        widgets::note(ui, "The tags around each turn of a conversation. Most models keep the defaults.");
+        if trained {
+            widgets::notice(
+                ui,
+                icon::WARNING,
+                "The model learned these tags. Changing them means training it again.",
+                theme::warning(),
+            );
+        }
+        let mut changed = false;
+        for (label, value) in [
+            ("System", &mut text.system_tag),
+            ("Request", &mut text.user_tag),
+            ("Answer", &mut text.assistant_tag),
+            ("End of a turn", &mut text.end_tag),
+            ("Thinking opens", &mut text.think_tags.0),
+            ("Thinking closes", &mut text.think_tags.1),
+            ("Tool call opens", &mut text.tool_tags.0),
+            ("Tool call closes", &mut text.tool_tags.1),
+            ("Compact opens", &mut text.compact_tags.0),
+            ("Compact closes", &mut text.compact_tags.1),
+        ] {
+            ui.horizontal(|ui| {
+                widgets::fixed_label(ui, RichText::new(label).color(theme::text_dim()), 120.0);
+                changed |= ui.add(egui::TextEdit::singleline(value).code_editor().desired_width(160.0)).lost_focus();
+            });
+        }
+        if changed {
+            text.ensure_specials();
+        }
+        ui.label(
+            RichText::new(format!("{} tokens: 256 bytes and {} tags", text.vocab_size(), text.specials.len()))
+                .size(11.0)
+                .color(theme::text_faint()),
+        );
+    });
 }
 
 fn capture_card(ui: &mut Ui, model: &mut MagicModel, env: &MagicEnv<'_>, events: &mut Vec<MagicEvent>) {
@@ -1230,167 +1959,6 @@ fn input_card(ui: &mut Ui, model: &mut MagicModel) {
         .on_hover_text("On for most classifiers. Off when the model already gives probabilities.");
 }
 
-/// A text model's chat tags, tools, personas and way of writing.
-fn text_card(ui: &mut Ui, model: &mut MagicModel) {
-    let trained = model.trained.is_some();
-    let text = model.text.get_or_insert_with(TextSpec::default);
-    widgets::caption(ui, "System prompt");
-    ui.add(
-        egui::TextEdit::multiline(&mut text.system)
-            .hint_text("What the model is told before every request")
-            .desired_rows(3)
-            .desired_width(f32::INFINITY),
-    );
-    ui.add_space(4.0);
-    card(ui, "How it writes", |ui| {
-        ui.horizontal(|ui| {
-            widgets::fixed_label(ui, RichText::new("Temperature").color(theme::text_dim()), 110.0);
-            ui.add(egui::Slider::new(&mut text.temperature, 0.0..=2.0).max_decimals(2))
-                .on_hover_text("0 always writes the likeliest; higher is freer");
-        });
-        ui.horizontal(|ui| {
-            widgets::fixed_label(ui, RichText::new("Choose among").color(theme::text_dim()), 110.0);
-            ui.add(DragValue::new(&mut text.top_k).range(0..=1000).suffix(" likeliest"));
-        });
-        ui.horizontal(|ui| {
-            widgets::fixed_label(ui, RichText::new("Longest answer").color(theme::text_dim()), 110.0);
-            ui.add(DragValue::new(&mut text.max_tokens).range(1..=8192).suffix(" tokens"));
-        });
-        ui.label(
-            RichText::new(format!("Context: {} tokens (the Model Size block)", text.context))
-                .size(11.5)
-                .color(theme::text_faint()),
-        );
-    });
-    ui.add_space(4.0);
-    card(ui, "Tools it may call", |ui| {
-        widgets::note(
-            ui,
-            format!(
-                "Every tool call is written one way: {}{{\"name\": …, \"args\": {{…}}}}{}. The AI Agent block \
-                 carries out press, type, click, move, wait and log itself; the macro handles the others.",
-                text.tool_tags.0, text.tool_tags.1
-            ),
-        );
-        let mut remove = None;
-        for (index, tool) in text.tools.iter_mut().enumerate() {
-            ui.push_id(("tool", index), |ui| {
-                egui::Frame::new().fill(theme::bg_raised()).corner_radius(theme::RADIUS).inner_margin(6).show(
-                    ui,
-                    |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.horizontal(|ui| {
-                            ui.add(egui::TextEdit::singleline(&mut tool.name).hint_text("name").desired_width(120.0));
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if widgets::icon_button(ui, icon::TRASH, "Remove this tool").clicked() {
-                                    remove = Some(index);
-                                }
-                            });
-                        });
-                        ui.add(
-                            egui::TextEdit::singleline(&mut tool.description)
-                                .hint_text("What it does")
-                                .desired_width(f32::INFINITY),
-                        );
-                        json_edit(ui, &mut tool.parameters, "Arguments, as a JSON Schema");
-                    },
-                );
-            });
-            ui.add_space(3.0);
-        }
-        if let Some(index) = remove {
-            text.tools.remove(index);
-        }
-        widgets::button_row(ui, |ui| {
-            if ui.small_button(format!("{}  Add a tool", icon::PLUS)).clicked() {
-                text.tools.push(ToolSpec {
-                    name: format!("tool_{}", text.tools.len() + 1),
-                    parameters: serde_json::json!({ "type": "object", "properties": {} }),
-                    ..ToolSpec::default()
-                });
-            }
-            let missing: Vec<_> =
-                AGENT_TOOLS.iter().filter(|(name, _)| !text.tools.iter().any(|t| t.name == *name)).collect();
-            if !missing.is_empty()
-                && ui
-                    .small_button(format!("{}  Add MacroMagi's tools", icon::WRENCH))
-                    .on_hover_text("press, type, click, move, wait and log")
-                    .clicked()
-            {
-                for (name, about) in missing {
-                    text.tools.push(agent_tool(name, about));
-                }
-            }
-        });
-    });
-    ui.add_space(4.0);
-    card(ui, "Personas", |ui| {
-        if text.personas.is_empty() {
-            widgets::note(ui, "None. The Dual-Persona Router block gives the model two, each with its own tag.");
-        }
-        for persona in &text.personas {
-            ui.label(format!("{}  {} – {}", persona.tag, persona.name, persona.role));
-        }
-    });
-    ui.add_space(4.0);
-    egui::CollapsingHeader::new(RichText::new("CHAT TAGS").size(10.5).color(theme::text_faint())).show(ui, |ui| {
-        if trained {
-            widgets::notice(
-                ui,
-                icon::WARNING,
-                "The model learned these tags. Changing them means training it again.",
-                theme::warning(),
-            );
-        }
-        let mut changed = false;
-        for (label, value) in [
-            ("System", &mut text.system_tag),
-            ("Request", &mut text.user_tag),
-            ("Answer", &mut text.assistant_tag),
-            ("End of a turn", &mut text.end_tag),
-            ("Thinking opens", &mut text.think_tags.0),
-            ("Thinking closes", &mut text.think_tags.1),
-            ("Tool call opens", &mut text.tool_tags.0),
-            ("Tool call closes", &mut text.tool_tags.1),
-            ("Compact opens", &mut text.compact_tags.0),
-            ("Compact closes", &mut text.compact_tags.1),
-        ] {
-            ui.horizontal(|ui| {
-                widgets::fixed_label(ui, RichText::new(label).color(theme::text_dim()), 120.0);
-                changed |= ui.add(egui::TextEdit::singleline(value).code_editor().desired_width(160.0)).lost_focus();
-            });
-        }
-        if changed {
-            text.ensure_specials();
-        }
-        ui.label(
-            RichText::new(format!("{} tokens: 256 bytes and {} tags", text.vocab_size(), text.specials.len()))
-                .size(11.0)
-                .color(theme::text_faint()),
-        );
-    });
-}
-
-/// One of the tools the AI Agent block carries out, as a tool of the model.
-fn agent_tool(name: &str, about: &str) -> ToolSpec {
-    let property = |ty: &str| serde_json::json!({ "type": ty });
-    let properties = match name {
-        "press" => serde_json::json!({ "key": property("string") }),
-        "type" | "log" => serde_json::json!({ "text": property("string") }),
-        "click" => {
-            serde_json::json!({ "x": property("number"), "y": property("number"), "button": property("string") })
-        }
-        "move" => serde_json::json!({ "x": property("number"), "y": property("number") }),
-        "wait" => serde_json::json!({ "ms": property("number") }),
-        _ => serde_json::json!({}),
-    };
-    ToolSpec {
-        name: name.to_owned(),
-        description: about.split(" – ").nth(1).unwrap_or(about).to_owned(),
-        parameters: serde_json::json!({ "type": "object", "properties": properties }),
-    }
-}
-
 /// A JSON value edited as text; it changes once the text is valid JSON.
 fn json_edit(ui: &mut Ui, value: &mut serde_json::Value, hint: &str) {
     let id = ui.id().with("json");
@@ -1466,99 +2034,6 @@ fn rules_card(ui: &mut Ui, rules: &mut Vec<RewardRule>) -> bool {
         changed = true;
     }
     changed
-}
-
-// ---- datasets -------------------------------------------------------------------
-
-/// A Text Dataset block's files. Returns a file to open in the editor.
-fn text_data_card(ui: &mut Ui, doc: &mut MagicDoc, node_id: NodeId, events: &mut Vec<MagicEvent>) -> Option<String> {
-    let mut params: TextDataParams = doc.studio.graph.node(node_id)?.params_or_default();
-    let spec = doc.file.model.text.clone().unwrap_or_default();
-    let mut open = None;
-    let mut changed = false;
-    for negative in [false, true] {
-        let (title, about) = if negative {
-            (
-                "What not to do",
-                "Answers to avoid – wrong tool calls, loops – as {\"prompt\", \"rejected\"} samples, or answers to unlearn.",
-            )
-        } else {
-            (
-                "What to do",
-                "Requests and answers, conversations, tool traces ({\"prompt\", \"response\"}, {\"messages\"}), or .md and .txt text to pretrain on.",
-            )
-        };
-        card(ui, title, |ui| {
-            widgets::note(ui, about);
-            let list = if negative { &mut params.negative } else { &mut params.positive };
-            let mut remove = None;
-            for (index, file) in list.iter().enumerate() {
-                let bytes = doc.file.data.get(file);
-                let samples =
-                    bytes.map(|b| studio::split_samples(file, &String::from_utf8_lossy(b))).unwrap_or_default();
-                let jsonl = studio::is_jsonl(file);
-                let problems = samples.iter().filter(|s| studio::check_sample(jsonl, s, &spec).is_err()).count();
-                ui.horizontal(|ui| {
-                    ui.label(format!("{}  {}", icon::FILE_TEXT, file.rsplit('/').next().unwrap_or_default()));
-                    let detail = match (bytes.is_some(), problems) {
-                        (false, _) => "missing".to_owned(),
-                        (true, 0) => format!("{} samples", samples.len()),
-                        (true, n) => format!("{} samples · {n} with problems", samples.len()),
-                    };
-                    ui.label(RichText::new(detail).size(11.0).color(if problems > 0 {
-                        theme::warning()
-                    } else {
-                        theme::text_faint()
-                    }));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if widgets::icon_button(ui, icon::TRASH, "Take it out of the dataset").clicked() {
-                            remove = Some(index);
-                        }
-                        if bytes.is_some()
-                            && widgets::icon_button(ui, icon::PENCIL_SIMPLE, "Edit the samples").clicked()
-                        {
-                            open = Some(file.clone());
-                        }
-                    });
-                });
-            }
-            if let Some(index) = remove {
-                list.remove(index);
-                changed = true;
-            }
-            widgets::button_row(ui, |ui| {
-                if ui.small_button(format!("{}  Add files…", icon::PLUS)).clicked() {
-                    events.push(MagicEvent::AddDatasetFiles { node: node_id, negative });
-                }
-                let stem = if negative { "not-to-do" } else { "to-do" };
-                let new = |data: &std::collections::BTreeMap<String, Vec<u8>>, ext: &str| {
-                    (1..)
-                        .map(|n| format!("data/text/{stem}-{n}.{ext}"))
-                        .find(|f| !data.contains_key(f))
-                        .expect("a free name")
-                };
-                if ui.small_button(format!("{}  New .jsonl", icon::FILE_PLUS)).clicked() {
-                    let file = new(&doc.file.data, "jsonl");
-                    doc.file.data.insert(file.clone(), dataset_editor::template(&file, negative).into_bytes());
-                    list.push(file.clone());
-                    open = Some(file);
-                    changed = true;
-                }
-                if !negative && ui.small_button(format!("{}  New .md", icon::FILE_PLUS)).clicked() {
-                    let file = new(&doc.file.data, "md");
-                    doc.file.data.insert(file.clone(), dataset_editor::template(&file, false).into_bytes());
-                    list.push(file.clone());
-                    open = Some(file);
-                    changed = true;
-                }
-            });
-        });
-        ui.add_space(6.0);
-    }
-    if changed && let Some(node) = doc.studio.graph.node_mut(node_id) {
-        node.set_params(&params);
-    }
-    open
 }
 
 /// A small picture of a dataset picture, made once.
@@ -1656,66 +2131,224 @@ fn pictures_card(
     }
 }
 
-// ---- packaging --------------------------------------------------------------------
+// ---- datasets -------------------------------------------------------------------
 
-fn compile_card(ui: &mut Ui, doc: &mut MagicDoc, events: &mut Vec<MagicEvent>) {
-    let pictures = doc.file.model.training.len() + doc.file.model.finetune.len();
-    let datasets = doc.file.model.datasets.len();
-    let mb = |bytes: usize| bytes as f64 / (1024.0 * 1024.0);
-    let include = &mut doc.file.model.include;
-    ui.checkbox(&mut include.model, format!("The model ({:.1} MB)", mb(doc.file.onnx.len())))
-        .on_hover_text("Without it, the file is only a configuration");
-    ui.add_enabled_ui(!doc.file.weights.is_empty(), |ui| {
-        ui.checkbox(
-            &mut include.weights,
-            format!("Its weights, to train further ({:.1} MB)", mb(doc.file.weights.len())),
-        );
-    });
-    ui.checkbox(&mut include.datasets, format!("Text datasets ({datasets})"));
-    let mut both = include.training && include.finetune;
-    if ui.checkbox(&mut both, format!("Pictures ({pictures})")).changed() {
-        (include.training, include.finetune) = (both, both);
+/// A Text Dataset block's files. Returns a file to open in the editor.
+fn text_data_card(ui: &mut Ui, doc: &mut MagicDoc, node_id: NodeId, events: &mut Vec<MagicEvent>) -> Option<String> {
+    let mut params: TextDataParams = doc.studio.graph.node(node_id)?.params_or_default();
+    let spec = doc.file.model.text.clone().unwrap_or_default();
+    let mut open = None;
+    let mut changed = false;
+    for negative in [false, true] {
+        let (title, about) = if negative {
+            (
+                "What not to do",
+                "Answers to avoid – wrong tool calls, loops, things it must not say – as {\"prompt\", \"rejected\"} \
+                 samples. Fine-Tuning's “What not to do” input makes them less likely.",
+            )
+        } else {
+            (
+                "What to do",
+                "Requests and answers ({\"prompt\", \"response\"}), conversations ({\"messages\"}) and tool calls, \
+                 and .md or .txt text. Pretraining learns the language from all of it; Fine-Tuning learns to answer \
+                 from the requests and answers.",
+            )
+        };
+        card(ui, title, |ui| {
+            widgets::note(ui, about);
+            let list = if negative { &mut params.negative } else { &mut params.positive };
+            let mut remove = None;
+            if list.is_empty() {
+                ui.weak("No files yet.");
+            }
+            for (index, file) in list.iter().enumerate() {
+                let bytes = doc.file.data.get(file);
+                let samples =
+                    bytes.map(|b| studio::split_samples(file, &String::from_utf8_lossy(b))).unwrap_or_default();
+                let jsonl = studio::is_jsonl(file);
+                let problems = samples.iter().filter(|s| studio::check_sample(jsonl, s, &spec).is_err()).count();
+                ui.horizontal(|ui| {
+                    ui.label(format!("{}  {}", icon::FILE_TEXT, file.rsplit('/').next().unwrap_or_default()));
+                    let detail = match (bytes.is_some(), problems) {
+                        (false, _) => "missing".to_owned(),
+                        (true, 0) => format!("{} samples", samples.len()),
+                        (true, n) => format!("{} samples · {n} with problems", samples.len()),
+                    };
+                    ui.label(RichText::new(detail).size(11.0).color(if problems > 0 {
+                        theme::warning()
+                    } else {
+                        theme::text_faint()
+                    }));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if widgets::icon_button(ui, icon::TRASH, "Take it out of the dataset").clicked() {
+                            remove = Some(index);
+                        }
+                        if bytes.is_some()
+                            && widgets::icon_button(ui, icon::PENCIL_SIMPLE, "Open it in the dataset editor").clicked()
+                        {
+                            open = Some(file.clone());
+                        }
+                    });
+                });
+            }
+            if let Some(index) = remove {
+                list.remove(index);
+                changed = true;
+            }
+            widgets::button_row(ui, |ui| {
+                if ui
+                    .small_button(format!("{}  Add files…", icon::PLUS))
+                    .on_hover_text(".jsonl, .json, .md or .txt")
+                    .clicked()
+                {
+                    events.push(MagicEvent::AddDatasetFiles { node: node_id, negative });
+                }
+                let stem = if negative { "not-to-do" } else { "to-do" };
+                let new_name = |data: &std::collections::BTreeMap<String, Vec<u8>>, ext: &str| {
+                    (1..)
+                        .map(|n| format!("data/text/{stem}-{n}.{ext}"))
+                        .find(|f| !data.contains_key(f))
+                        .expect("a free name")
+                };
+                if ui
+                    .small_button(format!("{}  New .jsonl", icon::FILE_PLUS))
+                    .on_hover_text("A new file of samples, with an example")
+                    .clicked()
+                {
+                    let file = new_name(&doc.file.data, "jsonl");
+                    doc.file.data.insert(file.clone(), dataset_editor::template(&file, negative).into_bytes());
+                    list.push(file.clone());
+                    open = Some(file);
+                    changed = true;
+                }
+                if !negative
+                    && ui
+                        .small_button(format!("{}  New .md", icon::FILE_PLUS))
+                        .on_hover_text("A new file of plain text")
+                        .clicked()
+                {
+                    let file = new_name(&doc.file.data, "md");
+                    doc.file.data.insert(file.clone(), dataset_editor::template(&file, false).into_bytes());
+                    list.push(file.clone());
+                    open = Some(file);
+                    changed = true;
+                }
+                let examples: Vec<(String, String, bool)> =
+                    studio::example_datasets().into_iter().filter(|(_, _, n)| *n == negative).collect();
+                let missing = examples.iter().any(|(f, _, _)| !list.contains(f));
+                if missing
+                    && ui
+                        .small_button(format!("{}  Add the examples", icon::LIGHTBULB))
+                        .on_hover_text("The example agent's files: tool calls to press, type, click, wait and log")
+                        .clicked()
+                {
+                    for (file, content, _) in examples {
+                        doc.file.data.entry(file.clone()).or_insert_with(|| content.into_bytes());
+                        if !list.contains(&file) {
+                            list.push(file);
+                        }
+                    }
+                    changed = true;
+                }
+            });
+        });
+        ui.add_space(6.0);
     }
-    ui.checkbox(&mut include.blocks, "Blocks to use it with");
-    widgets::note(
-        ui,
-        "Always included: the canvas, the architecture, the tokens and chat tags, the tool schemas, the \
-         answers and thresholds. Macros keep the model and its setup, never the datasets.",
-    );
-    widgets::button_row(ui, |ui| {
-        if widgets::accent_button(ui, format!("{}  Save", icon::FLOPPY_DISK), theme::accent(), vec2(0.0, 28.0))
-            .clicked()
-        {
-            events.push(MagicEvent::Save);
+    if changed {
+        doc.files_changed();
+        if let Some(node) = doc.studio.graph.node_mut(node_id) {
+            node.set_params(&params);
         }
-        if ui.button(format!("{}  Save as…", icon::FLOPPY_DISK_BACK)).clicked() {
-            events.push(MagicEvent::SaveAs);
-        }
-    });
+    }
+    connections(ui, doc, node_id);
+    open
 }
 
-fn use_card(ui: &mut Ui, doc: &MagicDoc, events: &mut Vec<MagicEvent>) {
-    let text = doc.file.model.kind == ModelKind::Text;
-    widgets::note(
-        ui,
-        if text {
-            "Adds the model to the open macro with a Start block, an AI Agent block that asks it, and a Log \
-             block for its answer. The AI Agent block can carry out its tool calls."
-        } else {
-            "Adds the model to the open macro with a Start block and an AI Watch block that runs it."
-        },
-    );
-    ui.add_enabled_ui(!doc.file.onnx.is_empty(), |ui| {
-        if widgets::accent_button(
+// ---- packaging --------------------------------------------------------------------
+
+fn compile_card(ui: &mut Ui, doc: &MagicDoc, compiled: &[PathBuf], events: &mut Vec<MagicEvent>) {
+    ui.add_space(6.0);
+    ui.label(RichText::new("PACKAGE").size(10.5).color(theme::text_faint()));
+    let params = doc.compile_settings().unwrap_or_default();
+    let has_folder = !params.folder.trim().is_empty();
+    let ready = !doc.file.onnx.is_empty() || doc.file.model.gguf.is_some();
+    if !has_folder {
+        widgets::notice(
             ui,
-            format!("{}  Use in Macro", icon::TREE_STRUCTURE),
-            theme::accent(),
-            vec2(0.0, 28.0),
-        )
-        .on_disabled_hover_text("Train the model (or import one) first")
-        .clicked()
-        {
-            events.push(MagicEvent::UseInMacro);
+            icon::INFO,
+            "Choose a folder above (Save into, then Browse): training saves the finished model there.",
+            theme::warning(),
+        );
+    }
+    let exportable = doc.file.model.architecture.as_ref().is_some_and(|a| a.gguf_compatible());
+    if params.gguf && doc.file.model.kind == ModelKind::Text && doc.file.model.architecture.is_some() && !exportable {
+        widgets::note(
+            ui,
+            "This architecture is not a GGUF one (only Transformer Layers are): the .magic file is saved, and runs in MacroMagi.",
+        );
+    }
+    if doc.file.model.kind == ModelKind::Text && params.gguf {
+        if let Some(arch) = doc.file.model.architecture.as_ref().and_then(|a| a.gguf_arch()) {
+            ui.label(
+                RichText::new(format!("{}  GGUF architecture: {arch}", icon::CHECK_CIRCLE))
+                    .size(11.5)
+                    .color(theme::text_dim()),
+            );
+        }
+        let ggufs = doc.compiled_gguf();
+        widgets::button_row(ui, |ui| {
+            ui.add_enabled_ui(ggufs.is_some(), |ui| {
+                if ui
+                    .button(format!("{}  Add to LM Studio", icon::ARROW_SQUARE_OUT))
+                    .on_hover_text(
+                        "Copies the GGUF file into LM Studio's models folder, with a model.yaml so LM Studio shows its \
+                         size, context, Enable Thinking and Reasoning Effort",
+                    )
+                    .on_disabled_hover_text("Save the package with GGUF first")
+                    .clicked()
+                {
+                    events.push(MagicEvent::AddToLmStudio);
+                }
+            });
+        });
+    }
+    widgets::button_row(ui, |ui| {
+        ui.add_enabled_ui(has_folder && ready, |ui| {
+            if widgets::accent_button(
+                ui,
+                format!("{}  Save package now", icon::PACKAGE),
+                theme::accent(),
+                vec2(0.0, 28.0),
+            )
+            .on_hover_text("Saves the model as it is into the folder (training does this by itself when it ends)")
+            .on_disabled_hover_text(if ready { "Choose a folder first" } else { "Train the model first" })
+            .clicked()
+            {
+                events.push(MagicEvent::Compile);
+            }
+        });
+        ui.add_enabled_ui(ready, |ui| {
+            if ui
+                .add(egui::Button::new(format!("{}  Use in Macro", icon::TREE_STRUCTURE)).min_size(vec2(0.0, 28.0)))
+                .on_hover_text(if doc.file.model.kind == ModelKind::Text {
+                    "Adds the model to the open macro with Start, AI Agent and Log blocks"
+                } else {
+                    "Adds the model to the open macro with Start and AI Watch blocks"
+                })
+                .on_disabled_hover_text("Train the model (or import one) first")
+                .clicked()
+            {
+                events.push(MagicEvent::UseInMacro);
+            }
+        });
+        if has_folder && ui.button(format!("{}  Open folder", icon::FOLDER_OPEN)).clicked() {
+            events.push(MagicEvent::OpenFolder(PathBuf::from(params.folder.trim())));
         }
     });
+    if !compiled.is_empty() {
+        ui.label(RichText::new("Saved last time:").size(11.0).color(theme::text_faint()));
+        for path in compiled {
+            ui.label(RichText::new(format!("{}  {}", icon::CHECK, path.display())).size(11.0).color(theme::text_dim()));
+        }
+    }
 }

@@ -413,8 +413,9 @@ The weights are in the [safetensors](https://github.com/huggingface/safetensors)
 | `training`, `finetune` | The pictures under `data/`, each with the class it shows. `negative: true` marks a picture of what the class is *not*. |
 | `kind` | `vision` (the default, and what files without it are) or `text`. |
 | `text` | Text models: how they read and write – see below. |
-| `architecture` | The shape of a model trained in MacroMagi: `width`, `heads` and `blocks`, each `{ "kind": …, "params": {…} }` with `kind` one of `transformer`, `sparse_attention`, `moe`, `prefix_split`, `ssm`, `persona_router`, `conv`. |
-| `studio` | The Magic tab's canvas: `nodes`, `wires` and `groups` as in a [nodes preset](#kind-nodes), with the Magic tab's block types (`magic.*`, listed in [MAGIC.md](MAGIC.md#blocks)). Files without it get a canvas built from their description. |
+| `architecture` | The shape of a model trained in MacroMagi, as the trainer builds it: `width`, `heads`, `kv_heads`, `context`, `positions` (`rope` or `learned`), `rope_theta`, optional `hyper_connections` (`{"streams", "sinkhorn"}`) and `mtp` (`{"weight"}`), `prefix_split`, `tied` and `embed_scale` (optional booleans), `layers` (one per layer: `{"attention": {"kind": "full" \| "window" \| "mla" \| "csa" \| "hca" \| "ssm", …}, "ffn": {"kind": "dense" \| "moe" \| "persona", …}, "norm": "pre" \| "sandwich"}`; `full` attention may have `qk_norm`, `bias`, `rotary` and `window`, a `dense` feed-forward `activation`: `swiglu` or `geglu`), `conv` for vision models, and `blocks`: the canvas blocks it was made from, each `{ "kind", "params", "ffn" }`. Models whose layers match the Llama, Qwen3 or Gemma 3 layout export to GGUF ([MAGIC.md](MAGIC.md#packages-magic-gguf-hugging-face)). |
+| `studio` | The Magic tab's canvas: `nodes`, `wires` and `groups` as in a [nodes preset](#kind-nodes), with the Magic tab's block types (`magic.*`, listed in [MAGIC.md](MAGIC.md#blocks)). Setup blocks keep their part of the model in `params.value` (Model Info: `name`, `description`, `author`, `license`, `source`; Text & Tools: the `text` object; Thinking: `text.thinking`; Reasoning Effort: `text.effort`; Screen Area: `capture`; Answers: `classes`; When It Acts: `action`; Sliders: `settings`; Picture Preparation: `input`), and the description above is what the setup blocks chained into the start say. Files without it get a canvas built from their description. |
+| `gguf` | A GGUF model file the model runs with llama.cpp, where it is on disk. It is not inside the archive. |
 | `datasets` | The text datasets in the archive, by path (`data/text/…`). |
 | `trained` | What training the model went through: `stages` (`pretrain`, `sft`, `rl`, `compaction`, `vision`), `steps`, the final `loss`, `parameters`. |
 | `include` | Also `weights` (`model/weights.safetensors`) and `datasets`. |
@@ -423,10 +424,13 @@ A text model's `text`:
 
 ```json
 "text": {
-  "specials": ["<|end|>", "<|system|>", "<|user|>", "<|assistant|>", "<think>", "</think>", "<tool>", "</tool>", "<compact>", "</compact>"],
-  "context": 256,
+  "specials": ["<|end|>", "<|system|>", "<|user|>", "<|assistant|>", "<think>", "</think>", "<tool_call>", "</tool_call>", "<compact>", "</compact>", "<|tool|>"],
+  "context": 2048,
   "system_tag": "<|system|>", "user_tag": "<|user|>", "assistant_tag": "<|assistant|>", "end_tag": "<|end|>",
-  "think_tags": ["<think>", "</think>"], "tool_tags": ["<tool>", "</tool>"], "compact_tags": ["<compact>", "</compact>"],
+  "think_tags": ["<think>", "</think>"], "tool_tags": ["<tool_call>", "</tool_call>"], "compact_tags": ["<compact>", "</compact>"],
+  "tool_tag": "<|tool|>",
+  "thinking": { "on_by_default": true },
+  "effort": { "levels": ["low", "medium", "high"], "default": "medium" },
   "personas": [ { "name": "Gun", "tag": "<gun>", "role": "Strict code and tool execution" } ],
   "tools": [ { "name": "press", "description": "taps a key", "parameters": { "type": "object", "properties": { "key": { "type": "string" } } } } ],
   "system": "You press keys for the user.",
@@ -434,7 +438,7 @@ A text model's `text`:
 }
 ```
 
-Tokens are the 256 byte values of UTF-8 text (ids 0–255), then each of `specials` in order (ids 256 on); special tags are matched longest first. A request is `system_tag system end_tag user_tag request end_tag assistant_tag` (the system part only when there is one), and the answer ends at `end_tag`. Tool calls are `tool_tags.0` + `{"name": …, "args": {…}}` + `tool_tags.1`. The ONNX model takes `tokens` (int64, `[1, length]`) and gives `logits` (`[1, length, vocabulary]`).
+Tokens are the 256 byte values of UTF-8 text (ids 0–255), then each of `specials` in order (ids 256 on); special tags are matched longest first. A request is `system_tag system end_tag user_tag request end_tag assistant_tag` (the system part only when there is one), and the answer ends at `end_tag`. The system part is the system prompt, then `Reasoning effort: <level>` (with `effort`), then the tools (with `tool_tag`), separated by blank lines – [MAGIC.md](MAGIC.md#how-text-is-read-and-written) shows it. With `thinking`, a request that does not think ends with an empty `think_tags` pair. Tool calls are `tool_tags.0` + `{"name": …, "arguments": {…}}` + `tool_tags.1`, and a tool's result is `tool_tag result end_tag`. `tool_tag`, `thinking` and `effort` are optional: files without `tool_tag` (made before it) keep their tokens, write calls with `"args"`, and read results as user turns. The ONNX model takes `tokens` (int64, `[1, length]`) and gives `logits` (`[1, length, vocabulary]`).
 
 A model asset inside a `.magi` file is the same archive with `training`, `finetune`, the datasets, the weights and their files left out.
 
@@ -459,5 +463,5 @@ A model asset inside a `.magi` file is the same archive with `training`, `finetu
 `version` is a single integer per format, currently `1` for all three.
 
 - A reader **rejects** files with a higher version than it knows, with a message asking the user to update.
-- Within a version, changes are additive: new optional fields with defaults, new block types, new stroke types. Readers ignore fields they do not know. (`options`, `clicker`, `look` strokes and the extended Auto Clicker settings were added this way in 0.1.0; `variables`, bound settings, `groups`, `display` on positions and areas, the `key_down`/`key_up`/`mouse_down`/`mouse_up`/`display` strokes and `audio` assets in 0.1.1; `model` assets, image and sound lists with groups, `mode`, `detail`, `match_ms`, `device` and the variables' `reset` in 0.1.2; group `parent`, the `input.autotype` and `vision.read_text` blocks, AI Watch's `acted` output and mouse buttons as a model's key in 0.1.3; the `vision.screenshot`, `window.display`, `window.current` and `files.*` blocks, Image Detection's `picture` input and the Auto Typer's `ignore` in 0.1.4; the `ai.agent` block and the `.magic` fields `kind`, `text`, `architecture`, `studio`, `datasets`, `trained`, `negative` and the weights in 0.1.5. Files from earlier versions load unchanged; earlier versions may refuse files that use later additions.)
+- Within a version, changes are additive: new optional fields with defaults, new block types, new stroke types. Readers ignore fields they do not know. (`options`, `clicker`, `look` strokes and the extended Auto Clicker settings were added this way in 0.1.0; `variables`, bound settings, `groups`, `display` on positions and areas, the `key_down`/`key_up`/`mouse_down`/`mouse_up`/`display` strokes and `audio` assets in 0.1.1; `model` assets, image and sound lists with groups, `mode`, `detail`, `match_ms`, `device` and the variables' `reset` in 0.1.2; group `parent`, the `input.autotype` and `vision.read_text` blocks, AI Watch's `acted` output and mouse buttons as a model's key in 0.1.3; the `vision.screenshot`, `window.display`, `window.current` and `files.*` blocks, Image Detection's `picture` input and the Auto Typer's `ignore` in 0.1.4; the `ai.agent` block and the `.magic` fields `kind`, `text`, `architecture`, `studio`, `datasets`, `trained`, `gguf`, `negative` and the weights in 0.1.5. Files from earlier versions load unchanged; earlier versions may refuse files that use later additions.)
 - A change that old readers would misread bumps the version, and the new reader migrates old files on load.

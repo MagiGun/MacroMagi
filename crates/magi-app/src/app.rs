@@ -24,7 +24,7 @@ use magi_core::text::format_hex_color;
 use magi_engine::{LogEntry, LogLevel, PythonStatus};
 
 use crate::background::{self, BackgroundLayer};
-use crate::components::{Component, Components, Status as ComponentStatus};
+use crate::components::{Component, Components, RuntimeReport};
 use crate::controller::{Controller, ControllerConfig};
 use crate::document::Document;
 use crate::examples;
@@ -37,7 +37,7 @@ use crate::theme::{self, Palette, ThemeMode};
 use crate::ui::autoclicker::{ClickerEnv, ClickerEvent, ClickerTab};
 use crate::ui::inspector::{self, InspectorEnv};
 use crate::ui::macro_tab::{MacroEnv, MacroEvent, MacroTab};
-use crate::ui::magic_tab::{MagicEnv, MagicEvent, MagicTab};
+use crate::ui::magic_tab::{ImportFrom, MagicEnv, MagicEvent, MagicTab};
 use crate::ui::options::{self, OptionsEvent, RulesWindow};
 use crate::ui::overlay::{OverlayOutcome, TargetOverlay};
 use crate::ui::recording_editor;
@@ -70,8 +70,8 @@ enum Pending {
 enum MagicPending {
     New,
     NewModel { text: bool },
-    Open,
-    Import { folder: bool },
+    Open(Option<PathBuf>),
+    Import(ImportFrom),
     OpenModel(String),
     Quit,
 }
@@ -98,6 +98,8 @@ struct FileExtras {
 enum PresetKind {
     Clicker,
     Blocks,
+    /// Blocks of the Magic tab's canvas.
+    MagicBlocks,
 }
 
 /// How far an install has got, shared with the thread doing it: what it is
@@ -110,8 +112,8 @@ enum Job {
     BackgroundReady(String),
     /// A download or removal finished (or failed): the message to show.
     Component(Component, Result<String, String>),
-    /// The parts' statuses, worked out off the UI thread.
-    ComponentStatuses(Vec<(Component, ComponentStatus)>),
+    /// Where the optional parts stand, worked out off the UI thread.
+    Runtime(Box<RuntimeReport>),
     /// The Pythons found, and the one "automatic" stands for.
     Pythons(Vec<(PathBuf, String)>, Option<(PathBuf, String)>),
 }
@@ -128,6 +130,8 @@ pub struct Screenshot {
     /// Frames still to draw before the picture is taken, so layouts settle.
     pub frames_left: u32,
     pub requested: bool,
+    /// Not before this moment (`--wait`).
+    pub not_before: Option<Instant>,
 }
 
 pub struct StartupOptions {
@@ -143,6 +147,10 @@ pub struct StartupOptions {
     pub select_kind: Option<String>,
     /// Open the settings window on this page (for screenshots).
     pub settings_page: Option<SettingsPage>,
+    /// Start training the Magic tab's model (for screenshots).
+    pub train: bool,
+    /// Take the screenshot after this many seconds.
+    pub wait: Option<f64>,
 }
 
 pub struct MagiApp {
@@ -163,7 +171,12 @@ pub struct MagiApp {
     presets: PresetLibrary,
     /// Optional downloads, their statuses (when known), and the one being installed.
     components: Components,
-    component_statuses: Vec<(Component, ComponentStatus)>,
+    runtime: Option<RuntimeReport>,
+    /// This computer, for Settings › Hardware.
+    machine: magi_platform::system::Machine,
+    /// The llama.cpp settings last given to `magi_ml`.
+    applied_llama: Option<Option<magi_ml::LlamaConfig>>,
+    llama_key: Option<(Option<Component>, u32, Vec<String>)>,
     installing: Option<(Component, Progress)>,
     /// Python interpreters found on the system (`None`: not looked for yet).
     gpus: Vec<magi_platform::gpu::Gpu>,
@@ -213,6 +226,8 @@ pub struct MagiApp {
     applied_window: Option<(bool, bool, f32)>,
     applied_title: String,
     screenshot: Option<Screenshot>,
+    /// `--train`: train the Magic tab's model once the window is up.
+    train_at_start: bool,
 }
 
 impl MagiApp {
@@ -253,7 +268,10 @@ impl MagiApp {
             macro_tab: MacroTab::default(),
             magic_tab: MagicTab::default(),
             components,
-            component_statuses: Vec::new(),
+            runtime: None,
+            machine: magi_platform::system::machine(),
+            applied_llama: None,
+            llama_key: None,
             installing: None,
             gpus: magi_platform::gpu::gpus(),
             applied_device: None,
@@ -289,10 +307,22 @@ impl MagiApp {
             applied_palette: None,
             applied_window: None,
             applied_title: String::new(),
-            screenshot: options.screenshot.map(|path| Screenshot { path, frames_left: 45, requested: false }),
+            screenshot: options.screenshot.map(|path| Screenshot {
+                path,
+                frames_left: 45,
+                requested: false,
+                not_before: options.wait.map(|s| Instant::now() + Duration::from_secs_f64(s)),
+            }),
+            train_at_start: options.train,
         };
         app.macro_tab.view.palette_size = vec2(app.settings.palette_size[0], app.settings.palette_size[1]);
         app.start_onnxruntime();
+        // What is installed is looked at once at the start (off the window's thread).
+        if app.settings.python_checked || app.settings.python_path.is_some() {
+            app.refresh_components(&cc.egui_ctx);
+        } else {
+            app.find_pythons(&cc.egui_ctx);
+        }
         // File blocks' relative paths lead into the data folder.
         magi_engine::set_files_dir(app.paths.data_dir.join("files"));
 
@@ -629,22 +659,36 @@ impl MagiApp {
                 let doc = MagicDoc::new(crate::magic::new_model(text), None, Vec::new());
                 self.set_magic_doc(Some(doc));
                 self.toast(if text {
-                    "A new text model: give it datasets, then press Train"
+                    "A new text model: an example agent with its datasets. Choose where Compile saves it, then Train."
                 } else {
-                    "A new vision model: give it answers and pictures, then press Train"
+                    "A new vision model: give it answers and pictures, choose where Compile saves it, then Train."
                 });
             }
-            MagicPending::Open => {
-                let Some(path) = rfd::FileDialog::new().add_filter(MAGIC_FILTER.0, MAGIC_FILTER.1).pick_file() else {
-                    return;
-                };
+            MagicPending::Open(path) => {
+                let path =
+                    path.or_else(|| rfd::FileDialog::new().add_filter(MAGIC_FILTER.0, MAGIC_FILTER.1).pick_file());
+                let Some(path) = path else { return };
                 match magi_core::magic::MagicFile::load(&path) {
-                    Ok(file) => self.set_magic_doc(Some(MagicDoc::new(file, Some(path), Vec::new()))),
+                    Ok(file) => {
+                        self.remember_model(&path);
+                        self.set_magic_doc(Some(MagicDoc::new(file, Some(path), Vec::new())));
+                    }
                     Err(error) => self.toast_error(format!("Could not open the model: {error}")),
                 }
             }
-            MagicPending::Import { folder } => {
-                let path = if folder {
+            MagicPending::Import(ImportFrom::Gguf) => {
+                let Some(path) = rfd::FileDialog::new().add_filter("GGUF model", &["gguf"]).pick_file() else { return };
+                match crate::magic::import::import_gguf(&path) {
+                    Ok(imported) => {
+                        let name = imported.file.model.name.clone();
+                        self.set_magic_doc(Some(MagicDoc::new(imported.file, None, imported.notes)));
+                        self.toast(format!("Imported “{name}”. Select Prompt Model to try it."));
+                    }
+                    Err(error) => self.toast_error(format!("Could not import: {error}")),
+                }
+            }
+            MagicPending::Import(from) => {
+                let path = if from == ImportFrom::Folder {
                     rfd::FileDialog::new().set_title("Choose the model's project folder").pick_folder()
                 } else {
                     rfd::FileDialog::new().add_filter("Model or project", &["onnx", "zip"]).pick_file()
@@ -673,6 +717,14 @@ impl MagiApp {
             }
             MagicPending::Quit => self.allow_close = true,
         }
+    }
+
+    /// Keeps a model among the recent ones.
+    fn remember_model(&mut self, path: &std::path::Path) {
+        let recent = &mut self.settings.recent_models;
+        recent.retain(|p| p != path);
+        recent.insert(0, path.to_owned());
+        recent.truncate(10);
     }
 
     /// Puts a model in the Magic tab, stopping anything running on the old one.
@@ -1095,6 +1147,7 @@ impl MagiApp {
                 }
                 Job::Component(component, result) => {
                     self.installing = None;
+                    self.applied_llama = None;
                     match result {
                         Ok(message) => self.toast(message),
                         Err(error) => self.toast_error(error),
@@ -1104,9 +1157,10 @@ impl MagiApp {
                         self.find_pythons(ctx);
                     }
                 }
-                Job::ComponentStatuses(statuses) => {
+                Job::Runtime(report) => {
                     self.checking_components = false;
-                    self.component_statuses = statuses;
+                    self.runtime = Some(*report);
+                    self.applied_llama = None;
                 }
                 Job::Pythons(found, auto) => {
                     self.looking_for_python = false;
@@ -1196,6 +1250,7 @@ impl MagiApp {
     }
 
     fn apply_device(&mut self) {
+        self.apply_llama();
         // Called every frame too, so a changed setting takes effect at once.
         if self.applied_device != Some(self.settings.ai_device) {
             self.applied_device = Some(self.settings.ai_device);
@@ -1224,11 +1279,40 @@ impl MagiApp {
     fn refresh_components(&mut self, ctx: &egui::Context) {
         let components = self.components.clone();
         let python = self.python_for_packages();
-        self.spawn_job(ctx, move || {
-            Job::ComponentStatuses(
-                Component::ALL.iter().map(|c| (*c, components.status(*c, python.as_deref()))).collect(),
-            )
+        self.checking_components = true;
+        self.spawn_job(ctx, move || Job::Runtime(Box::new(components.report(python.as_deref()))));
+    }
+
+    /// Tells `magi_ml` where llama.cpp is and how to run it, when that changed.
+    fn apply_llama(&mut self) {
+        // Looked at again only when a setting or what is installed changed.
+        let key = (self.settings.llama_build, self.settings.llama_gpu_layers, self.settings.llama_devices.clone());
+        if self.applied_llama.is_some() && self.llama_key.as_ref() == Some(&key) {
+            return;
+        }
+        self.llama_key = Some(key);
+        let config = self.components.llama_server(self.settings.llama_build).map(|(_, server)| magi_ml::LlamaConfig {
+            server,
+            gpu_layers: self.settings.llama_gpu_layers,
+            devices: self.settings.llama_devices.clone(),
+            split: None,
         });
+        if self.applied_llama.as_ref() != Some(&config) {
+            magi_ml::set_llama(config.clone());
+            self.applied_llama = Some(config);
+        }
+    }
+
+    /// The graphics cards training uses (CUDA numbers; empty: the CPU).
+    fn training_devices(&self) -> Vec<u32> {
+        match &self.settings.train_gpus {
+            Some(list) => list.clone(),
+            None => {
+                let cards = self.runtime.as_ref().and_then(|r| r.torch.as_ref()).map(|t| t.devices.len());
+                // Not looked at yet: the first card, which the trainer leaves for the CPU if it cannot use it.
+                if cards.unwrap_or(1) > 0 { vec![0] } else { Vec::new() }
+            }
+        }
     }
 
     /// The Python that packages (PyTorch) go into: the one macros use – the
@@ -1287,11 +1371,10 @@ impl MagiApp {
                 *progress.lock().unwrap_or_else(|p| p.into_inner()) = (message.to_owned(), share);
                 repaint.request_repaint();
             };
-            // PyTorch goes into the Python macros use, worked out now if it is not known yet.
+            // Python packages go into the Python macros use, worked out now if it is not known yet.
+            let package = matches!(component, Component::PyTorch | Component::PyTorchCuda | Component::Onnx);
             let python = known.or_else(|| {
-                (component == Component::PyTorch)
-                    .then(|| magi_engine::python::resolve_interpreter(&config).map(|(path, _)| path))
-                    .flatten()
+                package.then(|| magi_engine::python::resolve_interpreter(&config).map(|(path, _)| path)).flatten()
             });
             Job::Component(
                 component,
@@ -1327,13 +1410,16 @@ impl MagiApp {
             ThemeMode::Light => false,
             ThemeMode::System => ctx.system_theme() != Some(egui::Theme::Light),
         };
-        let panel_alpha = if look.background.is_some() { look.panel_opacity } else { 1.0 };
+        // While training with the environment optimized: no picture, no see-through panels.
+        let plain = self.settings.optimize_training && self.magic_tab.training();
+        let background = if plain { None } else { look.background.clone() };
+        let panel_alpha = if background.is_some() { look.panel_opacity } else { 1.0 };
         let wanted = (dark, look.accent, panel_alpha.to_bits());
         if self.applied_palette != Some(wanted) {
             self.applied_palette = Some(wanted);
             theme::apply(ctx, Palette::build(dark, theme::accent_from(look.accent), panel_alpha));
         }
-        let (file, blur) = (look.background.clone(), look.background_blur);
+        let (file, blur) = (background, look.background_blur);
         self.background.sync(ctx, &self.paths.backgrounds_dir(), file.as_deref(), blur);
         if let Some(error) = self.background.take_error() {
             self.toast_error(error);
@@ -1410,7 +1496,7 @@ impl MagiApp {
                     Some((self.clicker_history.can_undo(&self.settings.clicker), self.clicker_history.can_redo()))
                 }
                 Tab::Macro => Some((self.doc.can_undo(), self.doc.can_redo())),
-                Tab::Magic => None,
+                Tab::Magic => self.magic_tab.doc.as_ref().map(|d| (d.can_undo(), d.can_redo())),
             };
             if let Some((can_undo, can_redo)) = history {
                 let undo = egui::Button::new(icon::ARROW_COUNTER_CLOCKWISE).frame(false);
@@ -1477,7 +1563,11 @@ impl MagiApp {
 
     /// File, Options, Presets and the tab's own menus.
     fn menus(&mut self, ui: &mut Ui, ctx: &egui::Context, label: impl Fn(&str, &str) -> String) {
-        self.file_menu(ui, &label(icon::FILE, "File"));
+        if self.settings.tab == Tab::Magic {
+            self.magic_file_menu(ui, &label(icon::FILE, "File"));
+        } else {
+            self.file_menu(ui, &label(icon::FILE, "File"));
+        }
         let mut option_events = Vec::new();
         ui.menu_button(label(icon::SLIDERS, "Options"), |ui| {
             option_events = options::menu(
@@ -1487,15 +1577,23 @@ impl MagiApp {
                 &mut self.settings.notify_on_finish,
                 &mut self.settings.delete_unused_recordings,
             );
+            if self.settings.tab == Tab::Magic {
+                ui.separator();
+                ui.label(RichText::new("MAGIC").size(10.5).color(theme::text_faint()));
+                ui.checkbox(&mut self.settings.optimize_training, "Optimize environment when training").on_hover_text(
+                    "While a model trains, show only the training – no canvas, background picture or see-through \
+                     panels – so the computer spends its time on training",
+                );
+            }
         })
         .response
-        .on_hover_text("Options for the Auto Clicker and macros");
+        .on_hover_text("Options for the Auto Clicker, macros and training");
         for event in option_events {
             match event {
                 OptionsEvent::OpenStopHotkeys => self.stop_hotkeys_open = true,
                 OptionsEvent::OpenProcessRules => self.rules_window.open = true,
                 OptionsEvent::OpenDownloads => {
-                    self.settings.settings_page = SettingsPage::Ai;
+                    self.settings.settings_page = SettingsPage::Runtime;
                     self.settings_window.open = true;
                 }
                 OptionsEvent::CreateShortcut => {
@@ -1511,7 +1609,9 @@ impl MagiApp {
                 }
             }
         }
-        if self.settings.tab != Tab::Magic {
+        if self.settings.tab == Tab::Magic {
+            self.magic_presets_menu(ui, &label(icon::BOOKMARK_SIMPLE, "Presets"));
+        } else {
             self.presets_menu(ui, &label(icon::BOOKMARK_SIMPLE, "Presets"));
         }
 
@@ -1537,15 +1637,248 @@ impl MagiApp {
                 }
                 self.view_menu(ui, &label(icon::MONITOR, "View"));
             }
-            Tab::Magic => {}
+            Tab::Magic => {
+                let has_doc = self.magic_tab.doc.is_some();
+                if ui
+                    .add_enabled(has_doc, egui::Button::new(label(icon::PLUS, "Add")))
+                    .on_hover_text("Add a block (or right-click the canvas)")
+                    .clicked()
+                {
+                    ui.close();
+                    self.magic_tab.view.open_palette_in_view();
+                }
+                self.magic_view_menu(ui, &label(icon::MONITOR, "View"));
+                if let Some(doc) = &self.magic_tab.doc {
+                    if self.magic_tab.training() {
+                        let stop =
+                            egui::Button::new(RichText::new(label(icon::STOP, "Stop training")).color(theme::danger()));
+                        if ui.add(stop).clicked()
+                            && let Some(job) = &self.magic_tab.job
+                        {
+                            job.stop();
+                        }
+                    } else {
+                        let problem = doc.training_problem();
+                        let hint =
+                            problem.clone().unwrap_or_else(|| "Run the training stages on the canvas, in order".into());
+                        let train =
+                            egui::Button::new(RichText::new(label(icon::PLAY, "Train")).color(if problem.is_none() {
+                                theme::accent()
+                            } else {
+                                theme::text_faint()
+                            }));
+                        let response = ui.add(train).on_hover_text(&hint);
+                        if response.clicked() {
+                            if problem.is_some() {
+                                self.toast_error(hint);
+                            } else {
+                                self.start_training(ctx);
+                            }
+                        }
+                    }
+                }
+            }
         }
+    }
+
+    /// The Magic tab's File menu: models, not macros.
+    fn magic_file_menu(&mut self, ui: &mut Ui, label: &str) {
+        let mut chosen: Option<MagicPending> = None;
+        let mut save: Option<bool> = None;
+        let mut close = false;
+        let recent = self.settings.recent_models.clone();
+        let has_doc = self.magic_tab.doc.is_some();
+        ui.menu_button(label, |ui| {
+            ui.set_min_width(250.0);
+            let mut item = |ui: &mut Ui, text: String, shortcut: &str, action: MagicPending| {
+                if ui.add(egui::Button::new(text).shortcut_text(shortcut)).clicked() {
+                    chosen = Some(action);
+                    ui.close();
+                }
+            };
+            item(ui, format!("{}  New text model", icon::ROBOT), "Ctrl+N", MagicPending::NewModel { text: true });
+            item(ui, format!("{}  New vision model", icon::EYE), "", MagicPending::NewModel { text: false });
+            item(ui, format!("{}  Open…", icon::FOLDER_OPEN), "Ctrl+O", MagicPending::Open(None));
+            ui.menu_button(format!("{}  Open recent", icon::CLOCK_COUNTER_CLOCKWISE), |ui| {
+                if recent.is_empty() {
+                    ui.weak("Nothing yet");
+                }
+                for path in &recent {
+                    let name = path
+                        .file_name()
+                        .map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+                    if ui.button(name).on_hover_text(path.display().to_string()).clicked() {
+                        chosen = Some(MagicPending::Open(Some(path.clone())));
+                        ui.close();
+                    }
+                }
+            });
+            ui.menu_button(format!("{}  Import", icon::DOWNLOAD_SIMPLE), |ui| {
+                ui.set_min_width(250.0);
+                if ui.button(format!("{}  A GGUF model (LM Studio, llama.cpp)…", icon::CUBE)).clicked() {
+                    chosen = Some(MagicPending::Import(ImportFrom::Gguf));
+                    ui.close();
+                }
+                if ui.button(format!("{}  An ONNX project folder…", icon::FOLDER_OPEN)).clicked() {
+                    chosen = Some(MagicPending::Import(ImportFrom::Folder));
+                    ui.close();
+                }
+                if ui.button(format!("{}  A .zip or .onnx file…", icon::FILE_ZIP)).clicked() {
+                    chosen = Some(MagicPending::Import(ImportFrom::File));
+                    ui.close();
+                }
+            });
+            ui.separator();
+            if ui
+                .add_enabled(has_doc, egui::Button::new(format!("{}  Save", icon::FLOPPY_DISK)).shortcut_text("Ctrl+S"))
+                .clicked()
+            {
+                save = Some(false);
+                ui.close();
+            }
+            if ui
+                .add_enabled(
+                    has_doc,
+                    egui::Button::new(format!("{}  Save as…", icon::FLOPPY_DISK_BACK)).shortcut_text("Ctrl+Shift+S"),
+                )
+                .clicked()
+            {
+                save = Some(true);
+                ui.close();
+            }
+            ui.separator();
+            if ui.add_enabled(has_doc, egui::Button::new(format!("{}  Close the model", icon::X))).clicked() {
+                close = true;
+                ui.close();
+            }
+        });
+        if let Some(action) = chosen {
+            self.magic_guarded(action);
+        }
+        if let Some(choose) = save {
+            self.save_magic(choose);
+        }
+        if close {
+            self.magic_guarded(MagicPending::New);
+        }
+    }
+
+    /// The Magic tab's Presets menu: common architectures, and saved blocks.
+    fn magic_presets_menu(&mut self, ui: &mut Ui, label: &str) {
+        let has_doc = self.magic_tab.doc.is_some();
+        let mut common: Option<usize> = None;
+        let mut insert: Option<NodePreset> = None;
+        let mut delete = None;
+        let mut prompt = false;
+        let has_selection = !self.magic_tab.view.selection.is_empty();
+        let magic_kinds = |preset: &NodePreset| {
+            !preset.fragment.nodes.is_empty() && preset.fragment.nodes.iter().all(|n| n.kind.starts_with("magic."))
+        };
+        ui.menu_button(label, |ui| {
+            ui.set_width(260.0);
+            ui.add_enabled_ui(has_doc, |ui| {
+                ui.menu_button(format!("{}  Commons", icon::STAR), |ui| {
+                    ui.set_width(330.0);
+                    ui.label(RichText::new("Well-known architectures, at desktop size. They replace the architecture blocks on the canvas.").size(11.0).color(theme::text_faint()));
+                    for (index, item) in magi_core::nodes::studio::commons().iter().enumerate() {
+                        let response = ui.add(egui::Button::new(RichText::new(item.name).strong()).min_size(vec2(310.0, 24.0)));
+                        ui.add(egui::Label::new(RichText::new(item.description).size(11.0).color(theme::text_dim())).wrap());
+                        if response.clicked() {
+                            common = Some(index);
+                            ui.close();
+                        }
+                        ui.add_space(4.0);
+                    }
+                });
+            });
+            ui.separator();
+            let mut any = false;
+            for entry in self.presets.entries() {
+                let PresetBody::Nodes(nodes) = &entry.preset.body else { continue };
+                if !magic_kinds(nodes) {
+                    continue;
+                }
+                any = true;
+                ui.horizontal(|ui| {
+                    let width = ui.available_width() - 30.0;
+                    let button = egui::Button::new(entry.preset.name.clone()).truncate().min_size(vec2(width, 22.0));
+                    if ui.add_enabled(has_doc, button).clicked() {
+                        insert = Some(nodes.clone());
+                        ui.close();
+                    }
+                    if widgets::icon_button(ui, icon::TRASH, "Delete this preset").clicked() {
+                        delete = Some(entry.path.clone());
+                    }
+                });
+            }
+            if !any {
+                ui.weak("No saved blocks yet.");
+            }
+            ui.separator();
+            let save = egui::Button::new(format!("{}  Save selected blocks…", icon::FLOPPY_DISK));
+            if ui.add_enabled(has_selection, save).on_disabled_hover_text("Select one or more blocks first").clicked() {
+                prompt = true;
+                ui.close();
+            }
+        });
+        if let Some(index) = common
+            && let Some(doc) = &mut self.magic_tab.doc
+        {
+            let commons = magi_core::nodes::studio::commons();
+            let at = self.magic_tab.view.view_center();
+            let created = magi_core::nodes::studio::apply_common(&mut doc.studio.graph, &commons[index], [at.x, at.y]);
+            doc.sync_canvas();
+            self.magic_tab.view.selection = created.into_iter().collect();
+            self.magic_tab.view.request_fit();
+            self.toast(format!("{} put in place of the architecture", commons[index].name));
+        }
+        if let Some(nodes) = insert
+            && let Some(doc) = &mut self.magic_tab.doc
+        {
+            let at = self.magic_tab.view.view_center();
+            self.magic_tab.view.insert_preset(&mut doc.studio, crate::ui::magic_tab::registry(), &nodes, at);
+        }
+        if let Some(path) = delete {
+            self.presets.delete(&path);
+        }
+        if prompt {
+            self.preset_prompt = Some((PresetKind::MagicBlocks, String::new()));
+        }
+    }
+
+    fn magic_view_menu(&mut self, ui: &mut Ui, label: &str) {
+        ui.menu_button(label, |ui| {
+            ui.set_min_width(220.0);
+            ui.checkbox(&mut self.settings.magic_console, "Console");
+            ui.checkbox(&mut self.settings.magic_panel, "Block settings");
+            ui.separator();
+            ui.checkbox(&mut self.settings.show_grid, "Grid");
+            if ui.add(egui::Button::new(format!("{}  Find…", icon::MAGNIFYING_GLASS)).shortcut_text("Ctrl+F")).clicked()
+            {
+                self.magic_tab.view.open_find();
+                ui.close();
+            }
+            ui.separator();
+            if ui.add(egui::Button::new(format!("{}  Fit to view", icon::CORNERS_OUT)).shortcut_text("F")).clicked() {
+                self.magic_tab.view.request_fit();
+                ui.close();
+            }
+            if ui.button(format!("{}  Actual size", icon::MAGNIFYING_GLASS)).clicked() {
+                self.magic_tab.view.reset_zoom();
+                ui.close();
+            }
+        });
     }
 
     fn undo(&mut self) {
         match self.settings.tab {
             Tab::AutoClicker => self.clicker_history.undo(&mut self.settings.clicker),
             Tab::Macro => self.doc.undo(),
-            Tab::Magic => {}
+            Tab::Magic => {
+                if let Some(doc) = &mut self.magic_tab.doc {
+                    doc.undo();
+                }
+            }
         }
     }
 
@@ -1553,7 +1886,11 @@ impl MagiApp {
         match self.settings.tab {
             Tab::AutoClicker => self.clicker_history.redo(&mut self.settings.clicker),
             Tab::Macro => self.doc.redo(),
-            Tab::Magic => {}
+            Tab::Magic => {
+                if let Some(doc) = &mut self.magic_tab.doc {
+                    doc.redo();
+                }
+            }
         }
     }
 
@@ -1909,8 +2246,20 @@ impl MagiApp {
 
     fn magic(&mut self, ui: &mut Ui) {
         let displays = crate::displays::current();
-        let env = MagicEnv { displays: &displays, engines: self.ai_engines(), dry_run: self.settings.dry_run };
+        let env = MagicEnv {
+            displays: &displays,
+            engines: self.ai_engines(),
+            dry_run: self.settings.dry_run,
+            optimize_training: self.settings.optimize_training,
+            show_console: self.settings.magic_console,
+            show_panel: self.settings.magic_panel,
+            show_grid: self.settings.show_grid,
+        };
         let events = self.magic_tab.show(ui, &env);
+        // Something needing PyTorch, onnx or llama.cpp failed: look at them again.
+        if std::mem::take(&mut self.magic_tab.runtime_failed) && !self.checking_components {
+            self.refresh_components(ui.ctx());
+        }
         for event in events {
             self.magic_event(ui.ctx(), event, &displays);
         }
@@ -1918,7 +2267,6 @@ impl MagiApp {
 
     fn magic_event(&mut self, ctx: &egui::Context, event: MagicEvent, displays: &magi_core::geom::Displays) {
         match event {
-            MagicEvent::New => self.magic_guarded(MagicPending::New),
             MagicEvent::NewModel { text } => self.magic_guarded(MagicPending::NewModel { text }),
             MagicEvent::Toast(text) => self.toast(text),
             MagicEvent::Train => self.start_training(ctx),
@@ -1926,6 +2274,18 @@ impl MagiApp {
                 if let Some(job) = &self.magic_tab.job {
                     job.stop();
                 }
+            }
+            MagicEvent::Compile => self.compile_magic(),
+            MagicEvent::AddToLmStudio => self.add_to_lmstudio(),
+            MagicEvent::OpenFolder(folder) => {
+                let _ = std::fs::create_dir_all(&folder);
+                if let Err(error) = magi_platform::system::open_folder(&folder) {
+                    self.toast_error(format!("Could not open the folder: {error}"));
+                }
+            }
+            MagicEvent::OpenRuntime => {
+                self.settings.settings_page = SettingsPage::Runtime;
+                self.settings_window.open = true;
             }
             MagicEvent::AddDatasetFiles { node, negative } => {
                 let dialog = rfd::FileDialog::new().add_filter("Text datasets", &["jsonl", "json", "md", "txt"]);
@@ -1942,6 +2302,7 @@ impl MagiApp {
                     doc.file.data.insert(file.clone(), bytes);
                     added.push(file);
                 }
+                doc.files_changed();
                 if let Some(block) = doc.studio.graph.node_mut(node) {
                     let mut params: magi_core::nodes::studio::TextDataParams = block.params_or_default();
                     let count = added.len();
@@ -1954,11 +2315,8 @@ impl MagiApp {
                     self.toast(format!("{count} dataset files added"));
                 }
             }
-            MagicEvent::Open => self.magic_guarded(MagicPending::Open),
-            MagicEvent::Import { folder } => self.magic_guarded(MagicPending::Import { folder }),
-            MagicEvent::Save | MagicEvent::SaveAs => {
-                self.save_magic(matches!(event, MagicEvent::SaveAs));
-            }
+            MagicEvent::Open => self.magic_guarded(MagicPending::Open(None)),
+            MagicEvent::Import(from) => self.magic_guarded(MagicPending::Import(from)),
             MagicEvent::UseInMacro => self.use_model_in_macro(),
             MagicEvent::ReplaceModel => {
                 let Some(path) = rfd::FileDialog::new().add_filter("ONNX model", &["onnx"]).pick_file() else { return };
@@ -1993,6 +2351,7 @@ impl MagiApp {
                     doc.file.model.training.push(magi_core::magic::DataItem { file, class, negative });
                     added += 1;
                 }
+                doc.files_changed();
                 self.toast(format!("{added} pictures added"));
             }
             MagicEvent::TryPicture => {
@@ -2046,8 +2405,20 @@ impl MagiApp {
             .python_for_packages()
             .or_else(|| magi_engine::python::resolve_interpreter(&self.python_config()).map(|(path, _)| path));
         let Some(python) = python else {
-            return self.toast_error("Training needs Python with PyTorch. Install them under Settings › AI.");
+            self.settings.settings_page = SettingsPage::Runtime;
+            self.settings_window.open = true;
+            return self.toast_error("Training needs Python with PyTorch: install them under Settings › Runtime.");
         };
+        if let Some(report) = &self.runtime
+            && report.torch.is_none()
+        {
+            self.settings.settings_page = SettingsPage::Runtime;
+            self.settings_window.open = true;
+            return self.toast_error(format!(
+                "PyTorch is not installed in the Python for AI ({}). Install it under Settings › Runtime.",
+                python.display()
+            ));
+        }
         let runtime = match magi_engine::python::runtime_dir(&self.paths.data_dir) {
             Ok(dir) => dir,
             Err(error) => return self.toast_error(format!("The trainer could not be unpacked: {error}")),
@@ -2059,9 +2430,58 @@ impl MagiApp {
             file: doc.file.clone(),
             graph: doc.studio.graph.clone(),
             pipeline,
+            devices: self.training_devices(),
         };
         let repaint = ctx.clone();
         self.magic_tab.job = Some(crate::magic::train::TrainJob::start(request, move || repaint.request_repaint()));
+    }
+
+    /// Saves the Magic tab's model as its Compile block says (after training, too).
+    fn compile_magic(&mut self) {
+        let Some(doc) = &mut self.magic_tab.doc else { return };
+        use crate::magic::train::Level;
+        match doc.compile() {
+            Ok((written, skipped)) => {
+                let first = written.first().cloned();
+                for path in &written {
+                    self.magic_tab.console_line(Level::Done, format!("Saved {}", path.display()));
+                }
+                for note in &skipped {
+                    self.magic_tab.console_line(Level::Warning, note.clone());
+                }
+                self.magic_tab.compiled = written;
+                if let Some(path) = first {
+                    self.remember_model(&path);
+                    self.toast(format!("Saved {}", path.display()));
+                }
+            }
+            Err(error) => {
+                self.magic_tab.console_line(Level::Error, error.clone());
+                self.toast_error(error);
+            }
+        }
+    }
+
+    /// Puts the compiled GGUF file of the Magic tab's model into LM Studio.
+    fn add_to_lmstudio(&mut self) {
+        let Some(doc) = &self.magic_tab.doc else { return };
+        use crate::magic::train::Level;
+        let result = doc
+            .compiled_gguf()
+            .ok_or_else(|| "Save the package with GGUF first.".to_owned())
+            .and_then(|gguf| doc.add_to_lmstudio(&gguf));
+        match result {
+            Ok(written) => {
+                for path in &written {
+                    self.magic_tab.console_line(Level::Done, format!("Added {}", path.display()));
+                }
+                self.toast("Added to LM Studio. It shows up in My Models (restart LM Studio if it was open).");
+            }
+            Err(error) => {
+                self.magic_tab.console_line(Level::Error, error.clone());
+                self.toast_error(error);
+            }
+        }
     }
 
     /// Puts the Magic tab's model into the open macro – replacing an earlier
@@ -2150,7 +2570,16 @@ impl MagiApp {
                 self.save_magic(save_as);
             }
             if open {
-                self.magic_guarded(MagicPending::Open);
+                self.magic_guarded(MagicPending::Open(None));
+            }
+            if new {
+                self.magic_guarded(MagicPending::NewModel { text: true });
+            }
+            if undo {
+                self.undo();
+            }
+            if redo {
+                self.redo();
             }
             return;
         }
@@ -2219,6 +2648,16 @@ impl MagiApp {
         });
         let pythons = self.settings.python_checked.then(|| self.settings.pythons_found.clone());
         let python_auto = self.settings.python_auto.clone();
+        let ai_python = self.python_for_packages().map(|path| {
+            let version = self
+                .settings
+                .pythons_found
+                .iter()
+                .find(|(p, _)| *p == path)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(|| "?".into());
+            (path, version)
+        });
         let env = SettingsEnv {
             capturing: self.capture.as_ref().map(|(target, pending)| (target, pending)),
             python: &python,
@@ -2230,7 +2669,10 @@ impl MagiApp {
             looking_for_python: self.looking_for_python,
             python_downloaded: self.components.python(),
             gpus: &self.gpus,
-            components: &self.component_statuses,
+            machine: &self.machine,
+            runtime: self.runtime.as_ref(),
+            checking_runtime: self.checking_components,
+            ai_python: ai_python.as_ref(),
             installing,
         };
         let events = self.settings_window.show(ctx, &mut self.settings, &env);
@@ -2285,7 +2727,6 @@ impl MagiApp {
                 SettingsEvent::FindPythons => self.find_pythons(ctx),
                 SettingsEvent::CheckComponents => {
                     if !self.checking_components {
-                        self.checking_components = true;
                         self.refresh_components(ctx);
                     }
                 }
@@ -2576,7 +3017,7 @@ impl MagiApp {
             ui.set_width(300.0);
             let title = match kind {
                 PresetKind::Clicker => "Save Auto Clicker settings as a preset",
-                PresetKind::Blocks => "Save the selected blocks as a preset",
+                PresetKind::Blocks | PresetKind::MagicBlocks => "Save the selected blocks as a preset",
             };
             ui.label(RichText::new(title).strong());
             let field =
@@ -2603,6 +3044,15 @@ impl MagiApp {
                         &self.doc.project.assets,
                         &self.registry,
                     )),
+                    PresetKind::MagicBlocks => {
+                        let Some(doc) = &self.magic_tab.doc else { return };
+                        PresetBody::Nodes(NodePreset::capture(
+                            &doc.studio.graph,
+                            &self.magic_tab.view.selection,
+                            &doc.studio.assets,
+                            crate::ui::magic_tab::registry(),
+                        ))
+                    }
                 };
                 let preset = Preset { name: name.trim().to_owned(), description: String::new(), body };
                 match self.presets.save(&preset) {
@@ -2755,6 +3205,8 @@ impl MagiApp {
         }
         if job.frames_left > 0 {
             job.frames_left -= 1;
+        } else if job.not_before.is_some_and(|t| Instant::now() < t) {
+            // Still waiting (`--wait`).
         } else if !job.requested {
             job.requested = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
@@ -2835,6 +3287,10 @@ impl eframe::App for MagiApp {
             }
         }
 
+        if self.train_at_start && self.magic_tab.doc.is_some() {
+            self.train_at_start = false;
+            self.start_training(&ctx);
+        }
         egui::Panel::top("top-bar")
             .frame(egui::Frame::new().fill(theme::bg_app()).inner_margin(egui::Margin::symmetric(10, 7)))
             .show(ui, |ui| self.banner(ui));
@@ -2853,6 +3309,7 @@ impl eframe::App for MagiApp {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.controller.shut_down();
+        magi_ml::llama::stop_servers();
         if self.screenshot.is_none() {
             self.save_settings();
         }
@@ -2903,6 +3360,10 @@ fn rate_preview(ui: &mut Ui, params: &magi_core::nodes::flow::RateParams) {
 }
 
 #[cfg(test)]
+#[path = "app_magic_tests.rs"]
+mod magic_tests;
+
+#[cfg(test)]
 mod tests {
     //! The whole app, driven headlessly. Input the user presses is fed to the
     //! controller exactly as the system listener would.
@@ -2934,6 +3395,8 @@ mod tests {
             show_targets: false,
             select_kind: None,
             settings_page: None,
+            train: false,
+            wait: None,
         };
         let mut harness = Harness::builder()
             .with_size(vec2(width, height))
@@ -3261,9 +3724,7 @@ mod tests {
         harness.state_mut().settings.tab = Tab::Magic;
         harness.state_mut().magic_tab.doc = Some(magic_doc());
         harness.run_steps(2);
-        let displays = magi_core::geom::Displays::default();
-        let ctx = harness.ctx.clone();
-        harness.state_mut().magic_event(&ctx, MagicEvent::New, &displays);
+        harness.state_mut().magic_guarded(MagicPending::New);
         harness.run_steps(3);
         assert!(harness.state().magic_tab.doc.is_some(), "nothing is lost before the answer");
         harness.get_by_label("Save the model?");
@@ -3271,7 +3732,7 @@ mod tests {
         harness.run_steps(3);
         assert!(harness.state().magic_tab.doc.is_some());
 
-        harness.state_mut().magic_event(&ctx, MagicEvent::New, &displays);
+        harness.state_mut().magic_guarded(MagicPending::New);
         harness.run_steps(3);
         harness.get_by_label("Don't save").click();
         harness.run_steps(3);
@@ -3282,7 +3743,7 @@ mod tests {
         harness.state_mut().use_model_in_macro();
         harness.state_mut().settings.tab = Tab::Magic;
         harness.run_steps(2);
-        harness.state_mut().magic_event(&ctx, MagicEvent::New, &displays);
+        harness.state_mut().magic_guarded(MagicPending::New);
         harness.run_steps(2);
         assert!(harness.state().magic_tab.doc.is_none() && harness.state().magic_pending.is_none());
     }

@@ -15,6 +15,7 @@ pub mod action;
 pub mod assets;
 pub mod autoclicker;
 pub mod error;
+pub mod export;
 pub mod geom;
 pub mod graph;
 pub mod host;

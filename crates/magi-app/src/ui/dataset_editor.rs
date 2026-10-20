@@ -32,17 +32,43 @@ pub enum DatasetEvent {
     Save(String, String),
 }
 
+const REQUEST: &str = r#"{"prompt": "What is the opposite of hot?", "response": "Cold."}"#;
+const NEGATIVE: &str = r#"{"prompt": "What is 5 plus 7?", "rejected": "5 plus 7 is 5 plus 7 is"}"#;
+
+/// Samples of each kind, to copy from.
+const EXAMPLES: [(&str, &str); 7] = [
+    ("Request and answer", REQUEST),
+    (
+        "Reasoning",
+        r#"{"prompt": "I have 12 cookies for 4 friends. How many each?", "thinking": "Equal sharing is division: 12 / 4 = 3.", "response": "3 each.", "effort": "medium"}"#,
+    ),
+    (
+        "Tool use",
+        r#"{"tools": [{"name": "get_weather", "description": "Gets the current weather for a place.", "parameters": {"type": "object", "properties": {"location": {"type": "string"}}}}], "messages": [{"role": "user", "content": "Is it warm in Madrid?"}, {"role": "assistant", "content": "", "tool_calls": [{"name": "get_weather", "arguments": {"location": "Madrid"}}]}, {"role": "tool", "content": "{\"temperature_c\": 27, \"conditions\": \"sunny\"}"}, {"role": "assistant", "content": "Yes – sunny and 27 °C."}]}"#,
+    ),
+    (
+        "Conversation",
+        r#"{"messages": [{"role": "user", "content": "Count to three."}, {"role": "assistant", "content": "1, 2, 3."}, {"role": "user", "content": "Now backwards."}, {"role": "assistant", "content": "3, 2, 1."}]}"#,
+    ),
+    ("Answer not to give", NEGATIVE),
+    (
+        "Compaction",
+        r#"{"context": "A long conversation about planning a trip …", "compact": "The user is planning a trip to Rome in May."}"#,
+    ),
+    ("Plain text", r#"{"text": "Text to learn the language from."}"#),
+];
+
 /// Samples to start a new file with, so the format is plain.
 pub fn template(file: &str, negative: bool) -> String {
     if !studio::is_jsonl(file) {
-        return "Plain text to learn the language from. Paragraphs are separated by blank lines.\n".into();
+        return "Plain text to learn the language from. Paragraphs are separated by blank lines.\n\n\
+                Write anything the model should know how to say: how things are named, how sentences flow.\n"
+            .into();
     }
     if negative {
-        return "{\"prompt\": \"Press the Enter key\", \"rejected\": \"<tool>{\\\"name\\\": \\\"press\\\", \\\"args\\\": {\\\"key\\\": \\\"Enter\\\"}}</tool><tool>{\\\"name\\\": \\\"press\\\", \\\"args\\\": {\\\"key\\\": \\\"Enter\\\"}}</tool>\"}\n".into();
+        return format!("{NEGATIVE}\n");
     }
-    "{\"prompt\": \"Press the Enter key\", \"response\": \"<think>One tap of Enter.</think><tool>{\\\"name\\\": \\\"press\\\", \\\"args\\\": {\\\"key\\\": \\\"Enter\\\"}}</tool>Done.\"}\n\
-     {\"messages\": [{\"role\": \"user\", \"content\": \"Say hello\"}, {\"role\": \"assistant\", \"content\": \"Hello!\"}]}\n"
-        .into()
+    format!("{REQUEST}\n")
 }
 
 impl DatasetEditor {
@@ -89,47 +115,75 @@ impl DatasetEditor {
 
     fn body(&mut self, ui: &mut Ui, spec: &TextSpec, events: &mut Vec<DatasetEvent>) {
         let jsonl = studio::is_jsonl(&self.file);
-        let checks: Vec<Result<&'static str, String>> =
-            self.samples.iter().map(|s| studio::check_sample(jsonl, s, spec)).collect();
-        let problems = checks.iter().filter(|c| c.is_err()).count();
 
+        // The toolbar first: what it changes is checked below, in the same frame.
         widgets::button_row(ui, |ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.search)
                     .hint_text(format!("{}  Search the samples", icon::MAGNIFYING_GLASS))
-                    .desired_width(220.0),
+                    .desired_width(200.0),
             );
-            widgets::segmented(
-                ui,
-                &mut self.filter,
-                &[(Filter::All, "All"), (Filter::Problems, if problems > 0 { "With problems" } else { "Problems" })],
-            );
-            if ui.button(format!("{}  Add sample", icon::PLUS)).clicked() {
-                let sample = if jsonl { "{\"prompt\": \"\", \"response\": \"\"}" } else { "" };
+            widgets::segmented(ui, &mut self.filter, &[(Filter::All, "All"), (Filter::Problems, "Problems only")]);
+            if ui.button(format!("{}  Add sample", icon::PLUS)).on_hover_text("An empty sample at the end").clicked() {
+                let sample = if jsonl { r#"{"prompt": "", "response": ""}"# } else { "" };
                 self.samples.push(sample.to_owned());
                 self.selected = Some(self.samples.len() - 1);
+                self.filter = Filter::All;
+                self.search.clear();
                 self.dirty = true;
+            }
+            if jsonl {
+                ui.menu_button(format!("{}  Add an example", icon::LIGHTBULB), |ui| {
+                    for (name, sample) in EXAMPLES {
+                        if ui.button(name).clicked() {
+                            self.samples.push(sample.to_owned());
+                            self.selected = Some(self.samples.len() - 1);
+                            self.filter = Filter::All;
+                            self.search.clear();
+                            self.dirty = true;
+                            ui.close();
+                        }
+                    }
+                });
             }
             let save = egui::Button::new(format!("{}  Keep changes", icon::CHECK));
             if ui
                 .add_enabled(self.dirty, save)
-                .on_hover_text("Into the model; save it to keep them in the .magic file")
+                .on_hover_text("Puts them into the model; save the model to keep them in its .magic file")
                 .clicked()
             {
                 events.push(DatasetEvent::Save(self.file.clone(), self.content()));
                 self.dirty = false;
             }
         });
+
+        let checks: Vec<Result<&'static str, String>> =
+            self.samples.iter().map(|s| studio::check_sample(jsonl, s, spec)).collect();
+        let problems = checks.iter().filter(|c| c.is_err()).count();
         ui.label(
             RichText::new(format!(
                 "{} samples · {}{}",
                 self.samples.len(),
                 if jsonl { "one JSON object per line" } else { "paragraphs of plain text" },
-                if problems > 0 { format!(" · {problems} with problems") } else { String::new() }
+                match problems {
+                    0 => " · no problems".to_owned(),
+                    1 => " · 1 with a problem".to_owned(),
+                    n => format!(" · {n} with problems"),
+                }
             ))
             .size(11.5)
             .color(if problems > 0 { theme::warning() } else { theme::text_dim() }),
         );
+        if jsonl {
+            widgets::note(
+                ui,
+                "Each line is one sample: {\"prompt\", \"response\"} for a request and its answer (with \"thinking\" \
+                 for its reasoning, \"effort\" for its level, \"tools\" for the tools offered), {\"messages\": […]} for a \
+                 conversation – every answer in it is learned, tool calls as \"tool_calls\", results as \"tool\" \
+                 messages – {\"prompt\", \"rejected\"} for an answer not to give, {\"context\", \"compact\"} for \
+                 compaction, or {\"text\"}. Add an example to see each.",
+            );
+        }
         ui.separator();
 
         let needle = self.search.trim().to_lowercase();
@@ -142,7 +196,11 @@ impl DatasetEditor {
         let mut duplicate = None;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             if shown.is_empty() {
-                ui.weak(if self.samples.is_empty() { "No samples yet." } else { "No sample matches." });
+                ui.weak(match (self.samples.is_empty(), self.filter) {
+                    (true, _) => "No samples yet: add one, or add an example to change.",
+                    (false, Filter::Problems) => "No sample has a problem.",
+                    (false, Filter::All) => "No sample matches the search.",
+                });
             }
             for index in shown {
                 let selected = self.selected == Some(index);
@@ -216,5 +274,20 @@ impl DatasetEditor {
             self.selected = None;
             self.dirty = true;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_example_is_a_valid_sample() {
+        let spec =
+            TextSpec { effort: Some(Default::default()), thinking: Some(Default::default()), ..TextSpec::default() };
+        for (name, sample) in EXAMPLES {
+            assert!(studio::check_sample(true, sample, &spec).is_ok(), "{name}: {sample}");
+        }
+        assert!(studio::check_sample(true, template("a.jsonl", true).trim(), &spec).is_ok());
     }
 }

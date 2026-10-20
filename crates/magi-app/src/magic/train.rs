@@ -8,7 +8,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use magi_core::magic::{Architecture, InputSpec, Layout, MagicFile, ModelKind, TextSpec, TrainingRecord};
+use magi_core::magic::{Architecture, InputSpec, Layout, MagicFile, ModelKind, TrainingRecord};
 use magi_core::nodes::studio::{self, Pipeline, PlanFiles};
 use serde_json::Value;
 
@@ -29,7 +29,6 @@ pub struct Trained {
     pub weights: Vec<u8>,
     pub record: TrainingRecord,
     pub architecture: Architecture,
-    pub text: Option<TextSpec>,
     pub input: Option<InputSpec>,
 }
 
@@ -48,9 +47,21 @@ pub struct Telemetry {
     /// What it made, until the Magic tab takes it.
     pub trained: Option<Trained>,
     steps_before: u64,
+    stage_started: Option<Instant>,
+    /// A failure was passed on (so the optional parts are checked once for it).
+    pub reported: bool,
 }
 
 impl Telemetry {
+    pub fn push(&mut self, level: Level, text: impl Into<String>) {
+        self.line(level, text);
+    }
+
+    /// Seconds since the stage running began.
+    pub fn stage_seconds(&self) -> f64 {
+        self.stage_started.map_or(0.0, |t| t.elapsed().as_secs_f64())
+    }
+
     fn line(&mut self, level: Level, text: impl Into<String>) {
         self.lines.push((level, text.into()));
         if self.lines.len() > 2000 {
@@ -75,6 +86,8 @@ pub struct Request {
     pub file: MagicFile,
     pub graph: magi_core::graph::Graph,
     pub pipeline: Pipeline,
+    /// CUDA devices to train on; empty: the CPU.
+    pub devices: Vec<u32>,
 }
 
 impl TrainJob {
@@ -140,7 +153,7 @@ fn run(
     let out_dir = work.join("out");
     std::fs::create_dir_all(&data_dir).map_err(|e| format!("The training folder could not be made: {e}"))?;
     let model = &request.file.model;
-    let kind = request.pipeline.kind();
+    let kind = request.pipeline.kind(&request.file.model);
 
     // The datasets, as files.
     let mut written = std::collections::BTreeMap::new();
@@ -179,7 +192,7 @@ fn run(
     let mut input = None;
     let mut pictures = None;
     if kind == ModelKind::Vision {
-        let side = request.pipeline.size.context.clamp(8, 1024);
+        let side = request.pipeline.architecture.context.clamp(8, 1024);
         let spec = InputSpec { width: side, height: side, layout: Layout::Nchw, softmax: true, ..model.input.clone() };
         say(Level::Info, "Preparing the pictures…".into());
         let path = data_dir.join("pictures.bin");
@@ -197,6 +210,7 @@ fn run(
         weights,
         pictures,
         out_dir: out_dir.to_string_lossy().into_owned(),
+        devices: request.devices.clone(),
     };
     let plan = studio::plan(&request.pipeline, &request.graph, model, &files)?;
     let plan_path = work.join("plan.json");
@@ -253,6 +267,7 @@ fn run(
                     s.steps_before = s.losses.last().map_or(0, |l| l[0] as u64);
                     s.stage = text("stage");
                     s.progress = None;
+                    s.stage_started = Some(Instant::now());
                     let name = stage_name(&s.stage).to_owned();
                     s.line(Level::Stage, format!("{name}…"));
                 }
@@ -290,7 +305,7 @@ fn run(
         let tail: Vec<&String> = errors.iter().rev().take(12).collect::<Vec<_>>().into_iter().rev().collect();
         let detail = tail.iter().map(|l| l.as_str()).collect::<Vec<_>>().join("\n");
         if detail.contains("No module named 'torch'") {
-            return Err("PyTorch is not installed in this Python. Install it under Settings › AI.".into());
+            return Err("PyTorch is not installed in this Python. Install it under Settings › Runtime.".into());
         }
         return Err(if succeeded || detail.is_empty() {
             "Training stopped.".into()
@@ -301,8 +316,8 @@ fn run(
 
     let onnx = std::fs::read(out_dir.join("model.onnx")).unwrap_or_default();
     if onnx.is_empty() {
-        return Err("Training finished, but the model could not be exported. Install PyTorch again under \
-                    Settings › AI (it adds onnx, which exporting needs)."
+        return Err("Training finished, but no model came out of it: the trainer could not export it. The lines \
+                    above say why."
             .into());
     }
     let record = TrainingRecord {
@@ -318,14 +333,12 @@ fn run(
     if let Some(seconds) = report.get("seconds").and_then(Value::as_f64) {
         say(Level::Info, format!("{} steps in {seconds:.0} s · {} parameters.", record.steps, record.parameters));
     }
-    let text = (kind == ModelKind::Text).then(|| studio::shaped_text(&request.pipeline, model));
     Ok(Trained {
         kind,
         onnx,
         weights: std::fs::read(out_dir.join("weights.safetensors")).unwrap_or_default(),
         record,
         architecture: request.pipeline.architecture.clone(),
-        text,
         input,
     })
 }
@@ -369,37 +382,34 @@ fn write_pictures(file: &MagicFile, spec: &InputSpec, path: &Path) -> Result<usi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use magi_core::graph::NodeId;
-    use magi_core::nodes::studio::{FinetuneParams, SizeParams, StageParams, TextDataParams, kinds};
+    use magi_core::nodes::studio::kinds;
 
-    /// The whole way: a new text model's canvas, a dataset, the trainer in
-    /// Python, and the trained model back in the document, answering.
+    /// The whole way, as the Magic tab does it: a new text model (the example
+    /// agent and its datasets), the trainer in Python, the trained model back
+    /// in the document, the package compiled into a folder – and the model
+    /// answering from the saved file.
     #[test]
     #[ignore = "needs Python with PyTorch and onnx (MAGI_TEST_PYTHON, or python on the PATH)"]
     fn a_new_text_model_trains_end_to_end() {
         let mut doc = crate::magic::MagicDoc::new(crate::magic::new_model(true), None, Vec::new());
-        let samples = "{\"prompt\": \"hi\", \"response\": \"yo\"}\n".repeat(8);
-        doc.file.data.insert("data/text/hi.jsonl".into(), samples.into_bytes());
-        let ids: Vec<(NodeId, String)> = doc.studio.graph.nodes().map(|n| (n.id, n.kind.clone())).collect();
+        let folder = std::env::temp_dir().join(format!("magi-compile-test-{}", std::process::id()));
+        let ids: Vec<(magi_core::graph::NodeId, String)> =
+            doc.studio.graph.nodes().map(|n| (n.id, n.kind.clone())).collect();
         for (id, kind) in ids {
             let node = doc.studio.graph.node_mut(id).unwrap();
             match kind.as_str() {
-                kinds::SIZE => node.set_params(&SizeParams { width: 32, heads: 2, context: 32 }),
-                kinds::PRETRAIN => node.set_params(&StageParams { steps: 20, batch: 4, lr: 0.01 }),
-                kinds::FINETUNE => node.set_params(&FinetuneParams {
-                    method: "full".into(),
-                    steps: 150,
-                    lr: 0.01,
-                    ..FinetuneParams::default()
-                }),
-                kinds::TEXT_DATA => node
-                    .set_params(&TextDataParams { positive: vec!["data/text/hi.jsonl".into()], negative: Vec::new() }),
+                kinds::COMPILE => node.set_param("folder", folder.to_string_lossy()),
+                // Quicker than the example's own settings, for a test.
+                kinds::PRETRAIN => node.set_param("steps", 150),
+                kinds::FINETUNE => node.set_param("steps", 300),
                 _ => {}
             }
         }
         doc.sync_canvas();
+        assert_eq!(doc.training_problem(), None);
         let pipeline = studio::pipeline(&doc.studio.graph).unwrap();
         let work = std::env::temp_dir().join(format!("magi-train-test-{}", std::process::id()));
+        let devices: Vec<u32> = std::env::var("MAGI_TEST_GPU").ok().and_then(|g| g.parse().ok()).into_iter().collect();
         let request = Request {
             python: std::env::var_os("MAGI_TEST_PYTHON").map_or_else(|| "python".into(), PathBuf::from),
             runtime: Path::new(env!("CARGO_MANIFEST_DIR")).join("../../runtime/python"),
@@ -407,6 +417,7 @@ mod tests {
             file: doc.file.clone(),
             graph: doc.studio.graph.clone(),
             pipeline,
+            devices,
         };
         let job = TrainJob::start(request, || {});
         while job.is_running() {
@@ -420,11 +431,18 @@ mod tests {
         drop(state);
         doc.apply_trained(trained);
         assert_eq!(doc.file.model.trained.as_ref().unwrap().stages, ["pretrain", "sft"]);
-        assert!(!doc.file.weights.is_empty());
-        let spec = doc.file.model.text.clone().unwrap();
-        let mut model = magi_ml::TextModel::load(&doc.file.onnx, spec.context as usize).unwrap();
-        let answer = magi_ml::ask(&mut model, &spec, "hi", 8, 0.0, 1).unwrap();
-        assert_eq!(answer.text, "yo", "{answer:?}");
+
+        let (written, skipped) = doc.compile().unwrap();
+        assert!(skipped.is_empty(), "{skipped:?}");
+        assert!(written.iter().any(|p| p.extension().is_some_and(|e| e == "gguf")), "{written:?}");
+        let saved = MagicFile::load(&written[0]).unwrap();
+        assert!(!saved.weights.is_empty() && !saved.onnx.is_empty());
+        let spec = saved.model.text.clone().unwrap();
+        let mut model = magi_ml::TextModel::load(&saved.onnx, spec.context as usize).unwrap();
+        let answer = magi_ml::ask(&mut model, &spec, "Press Enter", 60, 0.0, 1).unwrap();
+        assert_eq!(answer.tools.first().map(|t| t.name.as_str()), Some("press"), "{answer:?}");
+        assert_eq!(answer.tools[0].args["key"], "Enter", "{answer:?}");
         let _ = std::fs::remove_dir_all(work);
+        let _ = std::fs::remove_dir_all(folder);
     }
 }

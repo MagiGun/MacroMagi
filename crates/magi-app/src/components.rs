@@ -1,16 +1,19 @@
 //! Optional downloads: parts some features need that MacroMagi does not ship,
-//! installed into (and removed from) the data folder on request.
+//! installed into (and removed from) the data folder – or, for Python
+//! packages, the Python used for AI – on request. Settings › Runtime lists them.
 //!
 //! | Part | For | From |
 //! | --- | --- | --- |
-//! | ONNX Runtime | faster AI models on the CPU | Microsoft's GitHub releases |
-//! | ONNX Runtime for graphics cards | AI models on any DirectX 12 graphics card (Windows) | Microsoft's NuGet packages |
+//! | PyTorch (CPU) / PyTorch for NVIDIA | training models in the Magic tab | pip (PyTorch's own index), into the AI Python |
+//! | onnx | exporting trained models so MacroMagi runs them | pip, into the AI Python |
+//! | ONNX Runtime | faster ONNX models on the CPU | Microsoft's GitHub releases |
+//! | ONNX Runtime for graphics cards | ONNX models on any DirectX 12 graphics card (Windows) | Microsoft's NuGet packages |
+//! | llama.cpp (CPU, CUDA 12, CUDA 13, Vulkan) | running GGUF models | llama.cpp's GitHub releases |
 //! | Python | the Python engine, without installing Python (Windows; managed on the Engine page) | python.org |
-//! | PyTorch | training models (coming to the Magic tab) | pip, into a Python |
 //!
-//! Each part lives in its own folder under `data/components`. A part in use
-//! cannot be deleted on Windows (its files are locked); it is then marked and
-//! removed the next time MacroMagi starts.
+//! Each downloaded part lives in its own folder under `data/components`. A
+//! part in use cannot be deleted on Windows (its files are locked); it is then
+//! marked and removed the next time MacroMagi starts.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -21,51 +24,114 @@ const ORT_VERSION: &str = "1.31.0";
 const ORT_DIRECTML_VERSION: &str = "1.24.4";
 const DIRECTML_VERSION: &str = "1.15.4";
 const PYTHON_VERSION: &str = "3.13.14";
+/// PyTorch's builds for NVIDIA graphics cards: CUDA 12.8 covers cards from the GTX 900s to the RTX 50s.
+const TORCH_CUDA_INDEX: &str = "https://download.pytorch.org/whl/cu128";
+const TORCH_CPU_INDEX: &str = "https://download.pytorch.org/whl/cpu";
+const LLAMA_RELEASES: &str = "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=15";
 /// Marks a folder to be deleted at the next start.
 const REMOVE_MARK: &str = ".remove";
+/// Holds the version of a part downloaded from a "latest" release.
+const VERSION_FILE: &str = "VERSION";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Component {
     OnnxRuntime,
     OnnxRuntimeGpu,
     Python,
+    /// PyTorch for the CPU.
     PyTorch,
+    /// PyTorch for NVIDIA graphics cards (CUDA).
+    PyTorchCuda,
+    /// The onnx package, which exports trained models.
+    Onnx,
+    LlamaCpu,
+    LlamaCuda12,
+    LlamaCuda13,
+    LlamaVulkan,
 }
 
 /// How far an install has got: what it is doing, and the share done when known.
 pub type Report<'a> = &'a dyn Fn(&str, Option<f32>);
 
 impl Component {
-    pub const ALL: [Component; 4] =
-        [Component::OnnxRuntime, Component::OnnxRuntimeGpu, Component::Python, Component::PyTorch];
-    /// The parts listed on the AI settings page. Python is on the Engine page.
-    pub const AI: [Component; 3] = [Component::OnnxRuntime, Component::OnnxRuntimeGpu, Component::PyTorch];
+    pub const ALL: [Component; 10] = [
+        Component::OnnxRuntime,
+        Component::OnnxRuntimeGpu,
+        Component::Python,
+        Component::PyTorch,
+        Component::PyTorchCuda,
+        Component::Onnx,
+        Component::LlamaCpu,
+        Component::LlamaCuda12,
+        Component::LlamaCuda13,
+        Component::LlamaVulkan,
+    ];
+    /// For training, in the AI Python.
+    pub const TRAINING: [Component; 3] = [Component::PyTorchCuda, Component::PyTorch, Component::Onnx];
+    /// For running ONNX models.
+    pub const ONNX: [Component; 2] = [Component::OnnxRuntime, Component::OnnxRuntimeGpu];
+    /// For running GGUF models, most capable first.
+    pub const LLAMA: [Component; 4] =
+        [Component::LlamaCuda13, Component::LlamaCuda12, Component::LlamaVulkan, Component::LlamaCpu];
 
     pub fn name(self) -> &'static str {
         match self {
             Component::OnnxRuntime => "ONNX Runtime",
             Component::OnnxRuntimeGpu => "ONNX Runtime for graphics cards",
             Component::Python => "Python",
-            Component::PyTorch => "PyTorch",
+            Component::PyTorch => "PyTorch for the CPU",
+            Component::PyTorchCuda => "PyTorch for NVIDIA graphics cards",
+            Component::Onnx => "onnx",
+            Component::LlamaCpu => "llama.cpp for the CPU",
+            Component::LlamaCuda12 => "llama.cpp CUDA 12",
+            Component::LlamaCuda13 => "llama.cpp CUDA 13",
+            Component::LlamaVulkan => "llama.cpp Vulkan",
+        }
+    }
+
+    /// Engine (runs models) or framework (trains or exports them), as a badge.
+    pub fn kind(self) -> &'static str {
+        match self {
+            Component::PyTorch | Component::PyTorchCuda | Component::Onnx => "Training",
+            Component::Python => "Python",
+            _ => "Engine",
         }
     }
 
     pub fn description(self) -> &'static str {
         match self {
             Component::OnnxRuntime => {
-                "Runs AI models faster on the CPU than the built-in engine. AI models work without it."
+                "Runs ONNX models faster on the CPU than the built-in engine. AI models work without it."
             }
             Component::OnnxRuntimeGpu => {
-                "Runs AI models on a graphics card (any DirectX 12 card, through DirectML). Also does what ONNX \
+                "Runs ONNX models on a graphics card (any DirectX 12 card, through DirectML). Also does what ONNX \
                  Runtime does."
             }
             Component::Python => {
                 "Python for the Python engine and Python Script blocks, on computers that do not have it."
             }
             Component::PyTorch => {
-                "For training and fine-tuning models in the Magic tab, with onnx to export them. Installed into \
-                 the Python chosen under Settings › Engine."
+                "Trains models in the Magic tab on the processor. Smaller download; slower for anything but small \
+                 models. Replaces the NVIDIA build if that is installed."
             }
+            Component::PyTorchCuda => {
+                "Trains models in the Magic tab on NVIDIA graphics cards (CUDA 12.8: GTX 900s to RTX 50s), many times \
+                 faster than the CPU. Also trains on the CPU. Replaces the CPU build."
+            }
+            Component::Onnx => {
+                "Exports trained models so MacroMagi can run them. Training needs it, whichever PyTorch is installed."
+            }
+            Component::LlamaCpu => "Runs GGUF models (from LM Studio, Hugging Face or trained here) on the processor.",
+            Component::LlamaCuda12 => {
+                "Runs GGUF models on NVIDIA graphics cards with CUDA 12 – for cards before the RTX 50s. Includes \
+                 the CUDA runtime."
+            }
+            Component::LlamaCuda13 => {
+                "Runs GGUF models on NVIDIA graphics cards with CUDA 13 – the RTX 20s to the RTX 50s. Includes \
+                 the CUDA runtime."
+            }
+            Component::LlamaVulkan => "Runs GGUF models on any Vulkan graphics card: NVIDIA, AMD or Intel.",
         }
     }
 
@@ -76,6 +142,12 @@ impl Component {
             Component::OnnxRuntimeGpu => "about 40 MB",
             Component::Python => "about 11 MB",
             Component::PyTorch => "about 250 MB",
+            Component::PyTorchCuda => "about 3 GB",
+            Component::Onnx => "about 20 MB",
+            Component::LlamaCpu => "about 25 MB",
+            Component::LlamaCuda12 => "about 500 MB",
+            Component::LlamaCuda13 => "about 600 MB",
+            Component::LlamaVulkan => "about 40 MB",
         }
     }
 
@@ -93,6 +165,16 @@ impl Component {
             Component::Python if !cfg!(windows) => {
                 Some("Python is part of most Linux and macOS systems; install it from python.org if it is missing.")
             }
+            Component::PyTorchCuda if cfg!(target_os = "macos") => {
+                Some("Macs have no NVIDIA graphics cards; PyTorch for the CPU uses Apple's graphics by itself.")
+            }
+            Component::LlamaCpu | Component::LlamaCuda12 | Component::LlamaCuda13 | Component::LlamaVulkan
+                if !cfg!(windows) =>
+            {
+                Some(
+                    "Install llama.cpp with your package manager (it provides llama-server); MacroMagi finds it there.",
+                )
+            }
             _ => None,
         }
     }
@@ -102,7 +184,29 @@ impl Component {
             Component::OnnxRuntime => "onnxruntime",
             Component::OnnxRuntimeGpu => "onnxruntime-gpu",
             Component::Python => "python",
-            Component::PyTorch => "pytorch",
+            Component::PyTorch | Component::PyTorchCuda | Component::Onnx => "pytorch",
+            Component::LlamaCpu => "llama-cpu",
+            Component::LlamaCuda12 => "llama-cuda12",
+            Component::LlamaCuda13 => "llama-cuda13",
+            Component::LlamaVulkan => "llama-vulkan",
+        }
+    }
+
+    fn is_package(self) -> bool {
+        matches!(self, Component::PyTorch | Component::PyTorchCuda | Component::Onnx)
+    }
+
+    fn is_llama(self) -> bool {
+        Component::LLAMA.contains(&self)
+    }
+
+    /// The release asset names of a llama.cpp build: the program, and the CUDA runtime it needs.
+    fn llama_assets(self) -> (&'static str, Option<&'static str>) {
+        match self {
+            Component::LlamaCuda12 => ("-bin-win-cuda-12", Some("cudart-llama-bin-win-cuda-12")),
+            Component::LlamaCuda13 => ("-bin-win-cuda-13", Some("cudart-llama-bin-win-cuda-13")),
+            Component::LlamaVulkan => ("-bin-win-vulkan", None),
+            _ => ("-bin-win-cpu", None),
         }
     }
 }
@@ -119,6 +223,32 @@ pub enum Status {
     Missing,
     /// Removed, but some files were in use: gone after a restart.
     RemovedAfterRestart,
+}
+
+impl Status {
+    pub fn present(&self) -> bool {
+        matches!(self, Status::Installed { .. } | Status::OnSystem(_))
+    }
+}
+
+/// What PyTorch in the AI Python is.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TorchInfo {
+    pub version: String,
+    /// The CUDA version of an NVIDIA build.
+    pub cuda: Option<String>,
+    /// The graphics cards it can train on, in CUDA order.
+    pub devices: Vec<String>,
+}
+
+/// Where every part stands, with what PyTorch and llama.cpp can use.
+#[derive(Clone, Debug, Default)]
+pub struct RuntimeReport {
+    pub statuses: Vec<(Component, Status)>,
+    pub torch: Option<TorchInfo>,
+    pub onnx: Option<String>,
+    /// The devices llama.cpp can use: id (`CUDA0`) and description.
+    pub llama_devices: Vec<(String, String)>,
 }
 
 #[derive(Clone)]
@@ -234,6 +364,15 @@ fn python_output(python: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// Runs pip in a Python, saying what it does.
+fn pip(python: &Path, args: &[&str], progress: Report<'_>, doing: &str) -> Result<String, String> {
+    progress(doing, None);
+    let mut all = vec!["-m", "pip"];
+    all.extend_from_slice(args);
+    all.extend_from_slice(&["--disable-pip-version-check", "--no-warn-script-location"]);
+    python_output(python, &all)
+}
+
 impl Components {
     pub fn new(data_dir: &Path, app_dir: &Path) -> Self {
         Self { root: data_dir.join("components"), app_dir: app_dir.to_owned() }
@@ -272,7 +411,8 @@ impl Components {
         match component {
             Component::OnnxRuntime | Component::OnnxRuntimeGpu => dir.join(Self::library_name()).is_file(),
             Component::Python => dir.join("python.exe").is_file(),
-            Component::PyTorch => false,
+            c if c.is_llama() => dir.join(llama_server_name()).is_file(),
+            _ => false,
         }
     }
 
@@ -302,32 +442,92 @@ impl Components {
         self.installed(Component::Python).then_some(path)
     }
 
-    /// Where a part stands. `python` is the interpreter PyTorch is looked for in.
-    /// May take a moment for PyTorch (it starts Python).
-    pub fn status(&self, component: Component, python: Option<&Path>) -> Status {
+    /// The llama.cpp server to run GGUF models with: the chosen build if it is
+    /// installed, else the most capable one installed, else one on the system.
+    pub fn llama_server(&self, preferred: Option<Component>) -> Option<(Option<Component>, PathBuf)> {
+        let installed = |c: Component| self.installed(c).then(|| (Some(c), self.dir(c).join(llama_server_name())));
+        if let Some(found) = preferred.filter(|c| c.is_llama()).and_then(installed) {
+            return Some(found);
+        }
+        if let Some(found) = Component::LLAMA.into_iter().find_map(installed) {
+            return Some(found);
+        }
+        let beside = self.app_dir.join(llama_server_name());
+        if beside.is_file() {
+            return Some((None, beside));
+        }
+        on_path(llama_server_name()).map(|path| (None, path))
+    }
+
+    /// Where every part stands. `python` is the AI Python, where PyTorch and onnx
+    /// are looked for. Starts Python and llama.cpp: call it off the UI thread.
+    pub fn report(&self, python: Option<&Path>) -> RuntimeReport {
+        let mut report = RuntimeReport::default();
+        if let Some(python) = python {
+            let probe = "import torch, json\n\
+                         print(json.dumps({'version': torch.__version__, 'cuda': torch.version.cuda, \
+                         'devices': [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())] \
+                         if torch.cuda.is_available() else []}))";
+            if let Ok(text) = python_output(python, &["-c", probe])
+                && let Ok(value) = serde_json::from_str::<serde_json::Value>(text.lines().last().unwrap_or_default())
+            {
+                report.torch = Some(TorchInfo {
+                    version: value["version"].as_str().unwrap_or_default().to_owned(),
+                    cuda: value["cuda"].as_str().map(str::to_owned),
+                    devices: value["devices"]
+                        .as_array()
+                        .map(|d| d.iter().filter_map(|n| n.as_str().map(str::to_owned)).collect())
+                        .unwrap_or_default(),
+                });
+            }
+            report.onnx = python_output(python, &["-c", "import onnx; print(onnx.__version__)"]).ok();
+        }
+        for component in Component::ALL {
+            let status = self.status(component, python, &report);
+            report.statuses.push((component, status));
+        }
+        if let Some((_, server)) = self.llama_server(None) {
+            report.llama_devices = magi_ml::llama::list_devices(&server);
+        }
+        report
+    }
+
+    fn status(&self, component: Component, python: Option<&Path>, report: &RuntimeReport) -> Status {
         let dir = self.dir(component);
-        if dir.join(REMOVE_MARK).exists() {
+        if !component.is_package() && dir.join(REMOVE_MARK).exists() {
             return Status::RemovedAfterRestart;
         }
+        let in_python = |detail: String| {
+            let ours = python.is_some_and(|p| self.python().is_some_and(|o| o == p));
+            if ours { Status::Installed { bytes: 0, detail } } else { Status::OnSystem(detail) }
+        };
+        let where_ = python.map(|p| format!(" · {}", p.display())).unwrap_or_default();
         match component {
-            Component::PyTorch => {
-                let Some(python) = python else { return Status::Missing };
-                // Training exports models with onnx, so PyTorch counts as there only with it.
-                match python_output(python, &["-c", "import torch, onnx; print(torch.__version__)"]) {
-                    Ok(version) => {
-                        let ours = self.python().is_some_and(|p| p == python);
-                        let detail = format!("version {version}, in {}", python.display());
-                        if ours { Status::Installed { bytes: 0, detail } } else { Status::OnSystem(detail) }
-                    }
-                    Err(_) => Status::Missing,
+            Component::PyTorch => match &report.torch {
+                Some(torch) if torch.cuda.is_none() => in_python(format!("{}{where_}", torch.version)),
+                _ => Status::Missing,
+            },
+            Component::PyTorchCuda => match &report.torch {
+                Some(torch) if torch.cuda.is_some() => {
+                    let cards = match torch.devices.len() {
+                        0 => " · no NVIDIA card found".to_owned(),
+                        1 => format!(" · {}", torch.devices[0]),
+                        n => format!(" · {n} cards"),
+                    };
+                    in_python(format!("{} (CUDA {}){cards}", torch.version, torch.cuda.as_deref().unwrap_or("?")))
                 }
-            }
+                _ => Status::Missing,
+            },
+            Component::Onnx => match &report.onnx {
+                Some(version) => in_python(format!("{version}{where_}")),
+                None => Status::Missing,
+            },
             _ if self.installed(component) => {
                 let detail = match component {
-                    Component::OnnxRuntime => format!("version {ORT_VERSION}"),
-                    Component::OnnxRuntimeGpu => format!("version {ORT_DIRECTML_VERSION}, DirectML {DIRECTML_VERSION}"),
-                    Component::Python => format!("version {PYTHON_VERSION}"),
-                    Component::PyTorch => String::new(),
+                    Component::OnnxRuntime => ORT_VERSION.to_string(),
+                    Component::OnnxRuntimeGpu => format!("{ORT_DIRECTML_VERSION}, DirectML {DIRECTML_VERSION}"),
+                    Component::Python => PYTHON_VERSION.to_string(),
+                    _ => std::fs::read_to_string(dir.join(VERSION_FILE)).unwrap_or_default().trim().to_owned(),
                 };
                 Status::Installed { bytes: folder_size(&dir), detail }
             }
@@ -339,6 +539,9 @@ impl Components {
                     Status::Missing
                 }
             }
+            c if c.is_llama() && c == Component::LlamaCpu && !cfg!(windows) => {
+                on_path(llama_server_name()).map_or(Status::Missing, |p| Status::OnSystem(p.display().to_string()))
+            }
             _ => Status::Missing,
         }
     }
@@ -349,15 +552,30 @@ impl Components {
             return Err(reason.to_owned());
         }
         let dir = self.dir(component);
-        if component != Component::PyTorch {
+        if !component.is_package() {
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         }
         let result = self.install_into(component, &dir, python, progress);
-        if result.is_err() && component != Component::PyTorch {
+        if result.is_err() && !component.is_package() {
             let _ = std::fs::remove_dir_all(&dir);
         }
         result
+    }
+
+    /// pip, set up first in a Python downloaded by MacroMagi.
+    fn ensure_pip(&self, python: &Path, progress: Report<'_>) -> Result<(), String> {
+        if python_output(python, &["-m", "pip", "--version"]).is_ok() {
+            return Ok(());
+        }
+        progress("Setting up pip…", None);
+        let script = download("https://bootstrap.pypa.io/get-pip.py", progress)?;
+        let path = self.root.join("get-pip.py");
+        std::fs::create_dir_all(&self.root).map_err(|e| e.to_string())?;
+        std::fs::write(&path, script).map_err(|e| e.to_string())?;
+        let result = python_output(python, &[&path.to_string_lossy(), "--no-warn-script-location"]);
+        let _ = std::fs::remove_file(&path);
+        result.map(|_| ()).map_err(|e| format!("could not set up pip: {e}"))
     }
 
     fn install_into(
@@ -454,54 +672,107 @@ impl Components {
                     "Python {PYTHON_VERSION} installed. Choose it under Settings › Engine, or leave the choice on automatic."
                 ))
             }
-            Component::PyTorch => {
+            Component::PyTorch | Component::PyTorchCuda => {
                 let python = python.ok_or(
                     "no Python was found to install PyTorch into. Choose or download one under Settings › Engine.",
                 )?;
-                // A private Python has no pip until it is given one.
-                if python_output(python, &["-m", "pip", "--version"]).is_err() {
-                    progress("Setting up pip…", None);
-                    let script = download("https://bootstrap.pypa.io/get-pip.py", progress)?;
-                    let path = self.root.join("get-pip.py");
-                    std::fs::create_dir_all(&self.root).map_err(|e| e.to_string())?;
-                    std::fs::write(&path, script).map_err(|e| e.to_string())?;
-                    let result = python_output(python, &[&path.to_string_lossy(), "--no-warn-script-location"]);
-                    let _ = std::fs::remove_file(&path);
-                    result.map_err(|e| format!("could not set up pip: {e}"))?;
+                self.ensure_pip(python, progress)?;
+                // One build at a time: the other is taken out first.
+                if python_output(python, &["-c", "import torch"]).is_ok() {
+                    pip(python, &["uninstall", "-y", "torch"], progress, "Taking out the PyTorch that is there…")?;
                 }
-                progress("Downloading and installing PyTorch (this takes a while)…", None);
-                python_output(
-                    python,
-                    &[
-                        "-m",
-                        "pip",
-                        "install",
-                        "--disable-pip-version-check",
-                        "--no-warn-script-location",
-                        "torch",
-                        "--index-url",
-                        "https://download.pytorch.org/whl/cpu",
-                    ],
-                )
-                .map_err(|e| format!("pip could not install PyTorch: {e}"))?;
-                progress("Installing onnx, which training exports models with…", None);
-                python_output(
-                    python,
-                    &["-m", "pip", "install", "--disable-pip-version-check", "--no-warn-script-location", "onnx"],
-                )
-                .map_err(|e| format!("pip could not install onnx: {e}"))?;
-                Ok(format!("PyTorch installed into {}.", python.display()))
+                let (index, what) = if component == Component::PyTorchCuda {
+                    (
+                        TORCH_CUDA_INDEX,
+                        "Downloading and installing PyTorch for NVIDIA graphics cards (about 3 GB; this takes a while)…",
+                    )
+                } else {
+                    (TORCH_CPU_INDEX, "Downloading and installing PyTorch (this takes a while)…")
+                };
+                pip(python, &["install", "torch", "--index-url", index], progress, what)
+                    .map_err(|e| format!("pip could not install PyTorch: {e}"))?;
+                if python_output(python, &["-c", "import onnx"]).is_err() {
+                    pip(python, &["install", "onnx"], progress, "Installing onnx, which training exports models with…")
+                        .map_err(|e| format!("pip could not install onnx: {e}"))?;
+                }
+                Ok(format!("{} installed into {}.", component.name(), python.display()))
+            }
+            Component::Onnx => {
+                let python =
+                    python.ok_or("no Python was found to install onnx into. Choose one under Settings › Engine.")?;
+                self.ensure_pip(python, progress)?;
+                pip(python, &["install", "onnx"], progress, "Installing onnx…")
+                    .map_err(|e| format!("pip could not install onnx: {e}"))?;
+                Ok(format!("onnx installed into {}.", python.display()))
+            }
+            c => {
+                // llama.cpp: the newest release that has a build for this part. Its
+                // "latest" release can be one without builds, so recent ones are searched.
+                progress("Looking up llama.cpp's releases…", None);
+                let text = ureq::get(LLAMA_RELEASES)
+                    .header("Accept", "application/vnd.github+json")
+                    .call()
+                    .map_err(|e| format!("could not reach GitHub: {e}"))?
+                    .body_mut()
+                    .read_to_string()
+                    .map_err(|e| format!("could not read GitHub's answer: {e}"))?;
+                let releases: serde_json::Value =
+                    serde_json::from_str(&text).map_err(|e| format!("GitHub sent something unexpected: {e}"))?;
+                let (program, runtime) = c.llama_assets();
+                let find = |assets: &[(String, String)], part: &str| {
+                    assets
+                        .iter()
+                        .find(|(name, _)| name.contains(part) && name.contains("x64") && name.ends_with(".zip"))
+                        .map(|(_, url)| url.clone())
+                };
+                let found = releases.as_array().into_iter().flatten().find_map(|release| {
+                    let assets: Vec<(String, String)> = release["assets"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|a| {
+                            Some((a["name"].as_str()?.to_owned(), a["browser_download_url"].as_str()?.to_owned()))
+                        })
+                        .collect();
+                    let program_url = find(&assets, program)?;
+                    let runtime_url = match runtime {
+                        Some(part) => Some(find(&assets, part)?),
+                        None => None,
+                    };
+                    Some((release["tag_name"].as_str().unwrap_or_default().to_owned(), program_url, runtime_url))
+                });
+                let (tag, program_url, runtime_url) =
+                    found.ok_or_else(|| format!("none of llama.cpp's recent releases has a {} build", c.name()))?;
+                let archive = download(&program_url, progress)?;
+                progress("Unpacking…", None);
+                unzip_all(&archive, dir)?;
+                if let Some(url) = runtime_url {
+                    progress("Downloading the CUDA runtime…", None);
+                    let archive = download(&url, progress)?;
+                    progress("Unpacking the CUDA runtime…", None);
+                    unzip_all(&archive, dir)?;
+                }
+                if !dir.join(llama_server_name()).is_file() {
+                    return Err("the download did not contain llama-server".into());
+                }
+                let _ = std::fs::write(dir.join(VERSION_FILE), &tag);
+                Ok(format!("{} ({tag}) installed.", c.name()))
             }
         }
     }
 
     /// Removes a part. Returns a message to show.
     pub fn uninstall(&self, component: Component, python: Option<&Path>) -> Result<String, String> {
-        if component == Component::PyTorch {
-            let python = python.ok_or("there is no Python to remove PyTorch from")?;
-            python_output(python, &["-m", "pip", "uninstall", "-y", "--disable-pip-version-check", "torch"])
-                .map_err(|e| format!("pip could not remove PyTorch: {e}"))?;
-            return Ok(format!("PyTorch removed from {}.", python.display()));
+        if component.is_package() {
+            let python = python.ok_or("there is no Python to remove it from")?;
+            let package = if component == Component::Onnx { "onnx" } else { "torch" };
+            python_output(python, &["-m", "pip", "uninstall", "-y", "--disable-pip-version-check", package])
+                .map_err(|e| format!("pip could not remove {package}: {e}"))?;
+            return Ok(format!("{} removed from {}.", component.name(), python.display()));
+        }
+        if component.is_llama() {
+            // Its server may be running a model.
+            magi_ml::llama::stop_servers();
         }
         let dir = self.dir(component);
         match std::fs::remove_dir_all(&dir) {
@@ -514,6 +785,16 @@ impl Components {
             Err(_) => Ok(format!("{} removed.", component.name())),
         }
     }
+}
+
+fn llama_server_name() -> &'static str {
+    if cfg!(windows) { "llama-server.exe" } else { "llama-server" }
+}
+
+/// A program on the PATH.
+fn on_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os("PATH")
+        .and_then(|paths| std::env::split_paths(&paths).map(|dir| dir.join(name)).find(|p| p.is_file()))
 }
 
 /// A command that opens no console window.
@@ -639,6 +920,23 @@ mod tests {
             }
         }
         assert!(components.uninstall(Component::OnnxRuntimeGpu, None).unwrap().contains("restarts"), "in use");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod llama_install {
+    use super::*;
+
+    #[test]
+    #[ignore = "downloads llama.cpp (about 25 MB)"]
+    fn llama_cpp_installs_from_its_releases() {
+        let dir = std::env::temp_dir().join(format!("magi-llama-{}", std::process::id()));
+        let components = Components::new(&dir, &dir);
+        let message = components.install(Component::LlamaCpu, None, &|_, _| {}).unwrap();
+        assert!(message.contains("installed"), "{message}");
+        let (_, server) = components.llama_server(None).unwrap();
+        assert!(server.is_file());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

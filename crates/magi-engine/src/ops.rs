@@ -1293,18 +1293,9 @@ impl RunCx {
         }
         let seed =
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64);
-        let answer = {
-            let mut model = loaded.model.lock().unwrap_or_else(|p| p.into_inner());
-            magi_ml::ask(
-                &mut model,
-                &loaded.spec,
-                &request,
-                params.max_tokens as usize,
-                params.temperature as f32,
-                seed,
-            )
-            .map_err(|e| EngineError::new(e.0))?
-        };
+        let answer = loaded
+            .ask(&request, params.max_tokens as usize, params.temperature as f32, seed)
+            .map_err(|e| EngineError::new(e.0))?;
         if params.run_tools {
             for call in &answer.tools {
                 self.agent_tool(call, node)?;

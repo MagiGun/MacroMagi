@@ -91,10 +91,10 @@ MacroMagi is a small, portable desktop tool for automating keyboard, mouse and c
 
 **Magic: AI models**
 
-- A **Magic** tab with a node canvas for AI models: start from zero or from a trained model, pick architecture blocks (transformer, compressed sparse attention, mixture of experts, Mamba-2, a dual-persona router), wire in datasets, and run pretraining, fine-tuning (LoRA, DoRA), reinforcement learning with reward rules and context compaction – on your own computer, with PyTorch.
-- **Text models** that think, answer and call tools in one syntax; **vision models** that watch the screen. Datasets are edited and checked in the app. Models from elsewhere (ONNX, or the project they come in) import and are set up on the same canvas.
+- A **Magic** tab with a node canvas for AI models: start from zero or from a trained model, build the architecture from blocks – or take DeepSeek-V4, DeepSeek-V3 or Llama from *Presets › Commons* – wire in datasets, and run pretraining, fine-tuning (LoRA, DoRA), reinforcement learning with reward rules and context compaction on your own computer, on one or several graphics cards. A new text model is a working example that trains in a minute or two.
+- **Text models** that think, answer and call tools in one syntax; **vision models** that watch the screen. Datasets are written and checked in the app. Trained text models save as `.magic`, `.gguf` (LM Studio, llama.cpp) and Hugging Face folders; GGUF and ONNX models from elsewhere import and run.
 - **AI Agent** runs a text model in a macro and can carry out its press, type and click tool calls; **AI Watch** and **AI Model** run a vision model, with its adjustable settings (confidence, delays) changeable per block.
-- Models run on the CPU or a graphics card – automatically on whichever is faster for that model. Optional parts (ONNX Runtime, Python, PyTorch) are installed and removed from the settings.
+- Models run on the CPU or a graphics card. *Settings › Runtime* installs and removes PyTorch, onnx, llama.cpp and ONNX Runtime; *Settings › Hardware* chooses the cards.
 
 **Control and safety**
 
@@ -248,23 +248,30 @@ Wire *Detected* or *Found* into a **Wait Until** to wait for a sound, or into a 
 
 ### Magic: AI models
 
-The **Magic** tab is a canvas for AI models, like the Macro tab's. A model travels along a *Model* wire: where it starts, its architecture blocks, its training stages fed by datasets, and the package. Its setup – name, answers, screen area, tools – is in *inspector* blocks that open their settings on the right. [docs/MAGIC.md](docs/MAGIC.md) describes every block.
+The **Magic** tab is a canvas for AI models, like the Macro tab's, with its File, Presets, Add, View and undo buttons in the banner. Blocks pass the model along wires:
+- the **Model** wire runs from a start, through the architecture and the training stages, to the package and the block that tries it;
+- **Setup** blocks (Model Info, Text & Tools…) chain into the start, and the model is what they say;
+- datasets and an **Optimizer** wire into the stages that use them;
+- a **Mixture of Experts** wires into the layers that use it.
 
-**Text models** read a request and write an answer; they can think first and call tools, written one way: `<tool>{"name": "press", "args": {"key": "Enter"}}</tool>`.
+Select a block to change it and see what is wired into it. [docs/MAGIC.md](docs/MAGIC.md) describes every block.
 
-1. **New → Text model** starts a pipeline: Start from Zero → Model Size → Transformer → Pretraining → Fine-Tuning → Compile. Add or swap architecture blocks (Compressed Sparse Attention, Micro-MoE Router, Mamba-2 / SSM, Encoder/Decoder Split, Dual-Persona Router) from *Add block*.
-2. **Give it data**: select the **Text Dataset** block, add `.jsonl`, `.md` or `.txt` files or start new ones, and edit them in the dataset editor, which checks every sample and tool call. *What to do* teaches answers; *What not to do* makes answers less likely.
-3. **Train**. The console shows each stage, the loss and any warnings. Add **Reinforcement Learning** with reward rules (right answer, valid tool calls, short answers, no loops) after fine-tuning if you like. Training needs PyTorch (*Settings → AI*) and uses a graphics card when PyTorch can.
-4. **Try It**: ask it something; see its answer, its thinking and its tool calls. Then **Use in Macro**: the model goes into the macro with an **AI Agent** block.
+**Text models** read a request and write an answer; they can think first – at a chosen effort – and call the tools they are offered.
 
-**Vision models** tell pictures apart – a gauge that is never drawn the same way twice, an indicator over a moving picture – where Image Detection cannot. **New → Vision model** trains one from pictures in the **Vision Dataset** block: pictures of each answer, and pictures an answer was mistaken for. Or bring one made elsewhere:
+1. **File › New text model** opens a working example: **Magi**, a small assistant with Thinking and Reasoning Effort set up, general tools (web search, calculator, weather, time) and small example datasets of plain English, reasoning, tool use and chat titles.
+2. Select **Compile .magic Package** and choose the folder it saves into.
+3. **Train** (in the banner). The console shows each stage, the loss and any warnings; the model is saved into the folder when training ends – as a `.magic` file, and as a `.gguf` for LM Studio and llama.cpp. Training needs PyTorch (*Settings › Runtime*) and runs on the graphics cards chosen under *Settings › Hardware*.
+4. **Prompt Model**: load it once, set its context window, thinking and effort, ask it something, and see its answer, its thinking and its tool calls. **Use in Macro** (in Compile) puts it into the macro with an **AI Agent** block; **Add to LM Studio** puts the GGUF into LM Studio with its Enable Thinking and Reasoning Effort controls.
 
-1. **Import** an ONNX model (`.onnx`), or the folder or ZIP of the project it comes from. MacroMagi reads the project's files – it never runs them – for what the answers mean, which ones call for action, how pictures are prepared, the screen area and the key, and lists what it found and what it guessed.
-2. **Check and adjust**: the screen area (a square in the middle of a display, which scales with the display, or a fixed area you pick), each answer's name, whether it acts, how sure the model must be and how long to wait, the key with its hold time and cooldown, and *adjustable settings* – sliders that move several values at once, offered again in every block that uses the model.
-3. **Try it**: *Watch the screen* shows what the model sees and how sure it is of each answer, live. The key is only pressed when *Press the key when it acts* is on. *Picture…* tries a picture file.
-4. **Save** a `.magic` file, and/or press **Use in Macro**: the model goes into the open macro with a Start and an **AI Watch** block ready to run. Using it again after a change updates the model in the macro.
+Swap in another architecture from **Presets › Commons** – Magi, Qwen3, Qwen3 Thinking, Gemma 3, Mistral, GLM-4, DeepSeek-V4 (compressed sparse and heavily compressed attention, DeepSeekMoE, hyper-connections, multi-token prediction), DeepSeek-V3 (latent attention, DeepSeekMoE) or Llama – or build your own from the blocks and save it under Presets. Add **Reinforcement Learning** with reward rules (right answer, valid tool calls, short answers, no loops) after fine-tuning. Datasets are written and checked in the dataset editor.
 
-An imported model opens on the canvas with *Inference / Config Only* and its setup blocks. It can be set up and used, but not trained further: that needs its weights, which only models trained in MacroMagi carry. To train one of those further, start from *Load Base Model*.
+**GGUF models** from LM Studio, Hugging Face or Ollama import with *File › Import*, run with llama.cpp (*Settings › Runtime*), and work in the AI Agent block like models trained here.
+
+**Vision models** tell pictures apart where Image Detection cannot: a gauge that is never drawn the same way twice, or an indicator over a moving picture.
+- **File › New vision model** trains one from pictures in the **Vision Dataset** block: pictures of each answer, and pictures an answer was mistaken for.
+- Or bring one made elsewhere: **File › Import** an ONNX model, or the folder or ZIP of its project. MacroMagi reads the project's files (it never runs them) for what the answers mean, which call for action, how pictures are prepared, the screen area and the key, and lists what it found and what it guessed.
+
+Set it up with **Screen Area**, **Answers** (each answer's name, whether it acts, how sure the model must be, how long to wait), **When It Acts** and **Sliders**. Try it with **Test Model**: *Watch the screen* shows what the model sees and how sure it is, live.
 
 **AI Agent** asks a text model – its own request, or a value wired in – and gives the answer, the thinking, the first tool call and its arguments. With *Carry out its tool calls* on, it presses, types, clicks, moves, waits and logs as the model says; other tools are left to the blocks after it.
 
@@ -272,7 +279,10 @@ An imported model opens on the canvas with *Inference / Config Only* and its set
 
 Projects made for **DBD Auto Skill Check** – its repository or its packaged app, as a folder or ZIP – import with their ten answers, the five that press Space, their 51% confidence, the 5 ms delay of the frontier answer, and the three sliders that project offers, and run as they do there.
 
-**Where models run** (*Settings → AI*): *Automatic* measures the CPU and each graphics card on the model and keeps the fastest – for tiny models that is often the CPU – or choose one. MacroMagi runs models with a built-in engine; the optional downloads on the same page add **ONNX Runtime** (faster on the CPU) and **ONNX Runtime for graphics cards** (any DirectX 12 card, Windows). The page also downloads **PyTorch** (with onnx, for training in the Magic tab) into the Python macros use, detects copies already on your computer, and uninstalls what it installed (also from *Options → Downloads…*).
+**Settings › Runtime** installs what trains and runs models, each with its version: PyTorch for NVIDIA graphics cards or for the CPU, onnx, llama.cpp (CUDA 13, CUDA 12, Vulkan, CPU), ONNX Runtime for the CPU and for graphics cards. It shows which Python training uses. **Settings › Hardware** shows the processor, memory and graphics cards, and chooses where things run:
+- **training**: one card or several;
+- **GGUF models**: which cards, and how much of the model goes on them;
+- **ONNX models**: *Automatic* measures each option and keeps the fastest.
 
 > A model keeps the licence of the project it came from; the Magic tab shows the licence an import found. Check it before you share a `.magic` file or a macro that contains a model.
 
@@ -321,7 +331,7 @@ The **Options** menu holds rules shared by the Auto Clicker and macros:
 | Dry run | Run without sending any input; the console lists what would have been sent. |
 | Notify when a macro finishes | A sound and a desktop notification when a macro ends by itself (not when you stop it). For a notification in the middle of a macro, use a **Notification** block. |
 | Create desktop shortcut | Puts a shortcut to MacroMagi, with its icon, on the desktop. |
-| Downloads… | Opens the optional downloads in *Settings → AI*. |
+| Downloads… | Opens the optional downloads in *Settings › Runtime*. |
 
 Options can travel inside a `.magi` file (see [Files](#files-magi-mp-and-magic)).
 

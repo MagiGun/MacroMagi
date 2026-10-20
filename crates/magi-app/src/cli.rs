@@ -64,6 +64,8 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         show_targets: false,
         select_kind: None,
         settings_page: None,
+        train: false,
+        wait: None,
     };
     let mut positional: Vec<&str> = Vec::new();
     let mut engine = None;
@@ -100,6 +102,11 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 });
             }
             "--cards" => options.show_cards = true,
+            "--train" => options.train = true,
+            "--wait" => {
+                let seconds = value("--wait")?.parse().map_err(|_| "--wait needs a number of seconds".to_owned())?;
+                options.wait = Some(seconds);
+            }
             "--targets" => options.show_targets = true,
             "--select" => options.select_kind = Some(value("--select")?.to_owned()),
             "--settings" => {

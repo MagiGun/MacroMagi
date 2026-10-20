@@ -8,23 +8,58 @@ File-format changes are called out explicitly; see [docs/FILE_FORMAT.md](docs/FI
 
 ### Added
 
-- **The Magic tab is a node canvas** for building, training, setting up and trying AI models, with the Macro tab's panning, zooming, wires, groups and searchable block list, a settings panel for the selected block, and a console with the loss as a chart.
-- **Text models**: they read a request and write an answer, can think inside thinking tags, and call tools in one syntax (`<tool>{"name": …, "args": {…}}</tool>`). Text & Tools sets the system prompt, the tools (with *Add MacroMagi's tools*), personas, chat tags and how it writes; Try It asks it something and shows its answer, thinking and tool calls.
-- **Training on your computer** with PyTorch: *Start from Zero*, *Load Base Model* or *Inference / Config Only*; architecture blocks (Model Size, Transformer, Compressed Sparse Attention, Micro-MoE Router, Encoder/Decoder Split, Mamba-2 / SSM, Dual-Persona Router, Vision Encoder); stages (Pretraining with a context curriculum, Fine-Tuning with all weights or LoRA/DoRA adapters and “what not to do” samples, Reinforcement Learning with reward rules, Context Compaction, Vision Training with negative pictures); Optimizer & Memory (AdamW, Muon, SGD, recomputed activations, optimizer state in system memory, accumulation, CPU or graphics card). See [docs/MAGIC.md](docs/MAGIC.md).
-- **Text Dataset** block and **dataset editor**: `.jsonl`, `.md` and `.txt` files in the `.magic` file, searched, filtered, checked (JSON, sample shape, every tool call) and edited in place. **Vision Dataset** block: pictures per answer and pictures it was mistaken for, with thumbnails.
-- **AI Agent** block: asks a text model and gives its answer, thinking, first tool call and arguments; optionally carries out press, type, click, move, wait and log calls. **Use in Macro** adds a text model with Start → AI Agent → Log.
-- **Compile .magic Package** and **Use in Macro** blocks on the canvas.
+- **The Magic tab is a node canvas** for building, training, trying and packaging AI models. It has the Macro tab's panning, zooming, wires, groups and searchable block list, a panel for the selected block (its settings, and what is wired into it), and a console with the loss as a chart.
+- **Every wire means something.** The *Model* wire runs from a start through the architecture and training stages to Compile .magic Package and Prompt Model / Test Model. Setup blocks (Model Info, Text & Tools, Screen Area, Answers…) chain into the start's *Setup* input, and the model is what they say. *Feed-forward* wires take a Mixture of Experts or Persona Router into layer blocks. *Optimizer* wires take an Optimizer into the stages it drives. Blocks that are not connected where they would be used say so on their faces.
+- **The banner works for the Magic tab**:
+  - **File**: New text model, New vision model, Open, Open recent, Import (GGUF, ONNX project, `.zip`/`.onnx`), Save, Save as, Close.
+  - **Options**: *Optimize environment when training*.
+  - **Presets**: *Commons*, saved Magic blocks, *Save selected blocks*.
+  - **Add**, **View**, undo/redo, and **Train** / **Stop training**.
+- **Presets › Commons**: Magi (MacroMagi's own layout for small agents), Qwen3, Qwen3 Thinking, Gemma 3, Mistral, GLM-4, DeepSeek-V4, DeepSeek-V3 and Llama, each scaled down, put in place of the canvas's architecture (with the setup blocks they need).
+- **Thinking** and **Reasoning Effort** setup blocks: training learns answers with and without reasoning and at each effort level; Prompt Model and LM Studio get a Thinking switch and a Reasoning Effort choice.
+- **Transformer Layers' finer options**: normalized queries and keys, GeGLU, norms before and after each part, local windows with global layers, partial rotary positions, attention biases; Model Size adds tied and scaled embeddings.
+- **Architecture blocks**:
+  - attention: Transformer Layers (the Llama layout: RMSNorm, rotary positions, grouped key/value heads, SwiGLU), Sliding Window Attention, Latent Attention (MLA), Compressed Sparse Attention (V4's CSA with its lightning indexer), Heavily Compressed Attention (V4's HCA), Mamba-2 / SSM;
+  - feed-forward: Mixture of Experts (DeepSeekMoE with softmax, sigmoid or √softplus gating, bias or loss balancing, hash routing), Dual-Persona Router;
+  - whole-model: Hyper-Connections (V4's mHC), Multi-Token Prediction, Encoder/Decoder Split, Vision Encoder.
+- **Training on your computer** with PyTorch, on the CPU or one or several NVIDIA graphics cards:
+  - stages: Pretraining with a context curriculum, Fine-Tuning (all weights, LoRA or DoRA, with "what not to do" samples), Reinforcement Learning with reward rules, Context Compaction, Vision Training with negative pictures;
+  - an Optimizer block per stage: AdamW, Muon as DeepSeek-V4 trains with it, or SGD, with cosine or constant schedules, warm-up, clipping, accumulation, recomputed activations and offloaded optimizer state.
+- **A new text model is a working example**: Magi, a 3.5M-parameter assistant with Thinking and Reasoning Effort, four general tools, and small original datasets – plain English, conversation, reasoning at three efforts, tool use with results, chat titles, answers to avoid. It trains in a few minutes on a recent graphics card.
+- **Compile .magic Package** saves the model into the folder you choose when training ends: `.magic`, and for Llama, Qwen3 and Gemma 3 layouts a **GGUF** file (F16, Q8_0 or Q4_0, with its size and precision for LM Studio) and a **Hugging Face** folder (Llama, Qwen3). The chat template takes OpenAI-style messages, tools, `enable_thinking` and `reasoning_effort`; llama.cpp reads thinking, answer and tool calls apart. Its panel has *Save package now*, *Add to LM Studio* (the GGUF plus a `model.yaml` with Enable Thinking and Reasoning Effort), *Use in Macro* and *Open folder*.
+- **Prompt Model** keeps the model loaded (*Load*, *Unload*), runs it with the built-in engine or llama.cpp, and sets the context window, thinking, effort, longest answer and temperature; it shows the answer, thinking and tool calls. **Test Model** watches the screen or tries a picture.
+- **GGUF models**: import them (*File › Import*), prompt them, and run them in macros with llama.cpp, on the graphics cards you choose.
+- **Text Dataset** block and **dataset editor**: `.jsonl`, `.md` and `.txt` files in the `.magic` file, searched, filtered, checked (JSON, sample shape, every tool call) and edited in place, with *Add an example* and *Add the examples*. **Vision Dataset** block: pictures per answer and pictures it was mistaken for, with thumbnails.
+- **AI Agent** block: asks a text model (ONNX or GGUF) and gives its answer, thinking, first tool call and arguments; optionally carries out press, type, click, move, wait and log calls. *Use in Macro* adds a text model with Start → AI Agent → Log.
+- **Settings › Runtime**: what trains and runs models, each with its version, *Install*, *Uninstall* and *Install again*. It covers PyTorch for NVIDIA graphics cards (CUDA 12.8) or for the CPU, onnx, llama.cpp (CUDA 13, CUDA 12, Vulkan, CPU, from its latest release), and ONNX Runtime for the CPU and for graphics cards. It shows which Python training uses.
+- **Settings › Hardware**: the processor, memory and graphics cards. It chooses where training runs (Automatic, the CPU, or chosen cards), how GGUF models use cards (which build, how many layers, which cards), and where ONNX models run.
+- **Options › Optimize environment when training** (on by default): while a model trains, the Magic tab shows only the training, and the background picture and see-through panels are off.
+- If MacroMagi ever fails, it writes `crash.log` into the data folder and says so, instead of closing without a word.
+- Settings › Runtime and Hardware are looked at when MacroMagi starts and whenever something that needs them fails; *Check again* looks now.
 
 ### Changed
 
-- Opening a `.magic` file from an earlier version builds its canvas from it: its setup as inspector blocks, ready to use.
-- *Settings → AI* installs onnx along with PyTorch, which training needs to export models; PyTorch counts as installed only with it.
+- Opening a `.magic` file from an earlier version builds its canvas from it, with its setup blocks chained into a *Use As It Is* start.
+- Settings › AI became **Runtime** and **Hardware**. PyTorch and onnx are listed separately, so an installed PyTorch shows as installed.
 - AI Watch and AI Model report an error when given a text model.
-- On the Magic tab, Ctrl+S and Ctrl+Shift+S save the model and Ctrl+O opens one.
+- On the Magic tab, Ctrl+N, Ctrl+O, Ctrl+S, Ctrl+Shift+S, Ctrl+Z and Ctrl+Y work on the model.
+
+### Fixed
+
+- The dataset editor closed MacroMagi when a sample was added.
+- Installing llama.cpp failed when its latest release had no Windows builds; the newest recent release that has them is used.
+- Every prompt reloaded the model.
+- llama.cpp servers MacroMagi started could outlive it after a crash; Windows now closes them with it.
+- LM Studio showed no size or precision for exported GGUF files, and the example model named every chat "type".
 
 ### File format
 
-`.magic` additions, all optional; earlier files load unchanged: `kind`, `text`, `architecture`, `studio` (the canvas), `datasets` and `trained` in `magic.json`; `model/weights.safetensors` and `data/text/…` in the archive; `negative` on pictures; `weights` and `datasets` under `include`. New macro block `ai.agent`.
+`.magic` additions, all optional; earlier files load unchanged:
+- in `magic.json`: `kind`, `text` (with `tool_tag`, `thinking` and `effort`), `architecture`, `studio` (the canvas), `datasets`, `trained` and `gguf` (a GGUF file the model runs);
+- in the archive: `model/weights.safetensors` and `data/text/…`;
+- `negative` on pictures, and `weights` and `datasets` under `include`.
+
+New macro block `ai.agent`.
 
 ## 0.1.4
 

@@ -30,6 +30,9 @@ use tract_onnx::tract_hir::internal::DimLike;
 
 pub use prepare::{prepare, resize_rgb, softmax};
 
+pub mod llama;
+pub use llama::{LlamaConfig, ask_gguf, set_llama};
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 #[error("{0}")]
 pub struct MlError(pub String);
@@ -495,6 +498,46 @@ pub struct Answer {
     pub tools: Vec<magi_core::magic::ToolCall>,
 }
 
+/// How to answer one request. Zero `max_tokens`, a negative `temperature`
+/// and zero `context` use the model's own.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AskOptions {
+    pub max_tokens: usize,
+    pub temperature: f32,
+    pub seed: u64,
+    /// The context window, in tokens (GGUF models; ONNX models have theirs built in).
+    pub context: usize,
+    /// Think before answering; `None` follows the model.
+    pub thinking: Option<bool>,
+    /// The reasoning effort, one of the model's levels; empty follows the model.
+    pub effort: String,
+}
+
+impl Default for AskOptions {
+    fn default() -> Self {
+        Self { max_tokens: 0, temperature: -1.0, seed: 0, context: 0, thinking: None, effort: String::new() }
+    }
+}
+
+/// Asks a text model something, with the options of a request.
+pub fn ask_with(
+    model: &mut TextModel,
+    spec: &magi_core::magic::TextSpec,
+    request: &str,
+    options: &AskOptions,
+) -> Result<Answer, MlError> {
+    let prompt = spec.encode(&spec.prompt_with(request, options.thinking, &options.effort));
+    let how = Generation {
+        max_tokens: if options.max_tokens == 0 { spec.max_tokens as usize } else { options.max_tokens },
+        temperature: if options.temperature < 0.0 { spec.temperature } else { options.temperature },
+        top_k: spec.top_k as usize,
+        stop: spec.special_id(&spec.end_tag).into_iter().collect(),
+        seed: options.seed,
+    };
+    let raw = spec.decode(&model.generate(&prompt, &how)?);
+    Ok(Answer { text: spec.visible(&raw), thinking: spec.thinking(&raw), tools: spec.tool_calls(&raw), raw })
+}
+
 /// Asks a text model something, the way its spec says to: the chat template
 /// around the request, its own way of writing, stopping at the end of its turn.
 /// `max_tokens` 0 and `temperature` below 0 use the spec's.
@@ -506,16 +549,7 @@ pub fn ask(
     temperature: f32,
     seed: u64,
 ) -> Result<Answer, MlError> {
-    let prompt = spec.encode(&spec.prompt(request));
-    let how = Generation {
-        max_tokens: if max_tokens == 0 { spec.max_tokens as usize } else { max_tokens },
-        temperature: if temperature < 0.0 { spec.temperature } else { temperature },
-        top_k: spec.top_k as usize,
-        stop: spec.special_id(&spec.end_tag).into_iter().collect(),
-        seed,
-    };
-    let raw = spec.decode(&model.generate(&prompt, &how)?);
-    Ok(Answer { text: spec.visible(&raw), thinking: spec.thinking(&raw), tools: spec.tool_calls(&raw), raw })
+    ask_with(model, spec, request, &AskOptions { max_tokens, temperature, seed, ..Default::default() })
 }
 
 /// The next token: the likeliest (temperature 0), or one drawn from the `top_k` likeliest.
@@ -545,9 +579,17 @@ mod tests {
 
     #[test]
     fn a_trained_text_model_answers_on_the_built_in_engine() {
-        // Trained in MacroMagi's trainer to answer "hi" with "yo".
+        // Trained in MacroMagi's trainer to answer "hi" with "yo", before tool turns existed:
+        // its tags are the older ones, and it has no tool tag (models of then keep working).
         let onnx = include_bytes!("../tests/data/tiny_text.onnx");
-        let spec = magi_core::magic::TextSpec { context: 32, ..magi_core::magic::TextSpec::default() };
+        let mut spec = magi_core::magic::TextSpec {
+            context: 32,
+            specials: Vec::new(),
+            tool_tags: ("<tool>".into(), "</tool>".into()),
+            tool_tag: String::new(),
+            ..magi_core::magic::TextSpec::default()
+        };
+        spec.ensure_specials();
         let mut model = TextModel::load(onnx, 32).unwrap();
         let prompt = spec.encode(&spec.prompt("hi"));
         // Different lengths go through the same model.
@@ -651,5 +693,30 @@ mod tests {
         assert_eq!(candidates(Device::Cpu), [Engine::BuiltIn]);
         assert_eq!(candidates(Device::Auto), [Engine::BuiltIn]);
         assert!(candidates(Device::Gpu { index: 0 }).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod exported_models {
+    use super::*;
+
+    /// With MAGI_TEST_ONNX (a text model's ONNX) and MAGI_TEST_CONTEXT: the
+    /// built-in engine loads it and gives a score for every token.
+    #[test]
+    #[ignore = "needs an ONNX text model made by the trainer"]
+    fn the_built_in_engine_runs_a_trained_text_model() {
+        let path = std::env::var("MAGI_TEST_ONNX").expect("MAGI_TEST_ONNX");
+        let context: usize = std::env::var("MAGI_TEST_CONTEXT").ok().and_then(|c| c.parse().ok()).unwrap_or(256);
+        let onnx = std::fs::read(path).unwrap();
+        let spec = magi_core::magic::TextSpec { context: context as u32, ..Default::default() };
+        let mut model = TextModel::load(&onnx, context).unwrap();
+        let prompt = spec.encode(&spec.prompt("Press Enter"));
+        let scores = model.next_scores(&prompt).unwrap();
+        assert_eq!(scores.len(), spec.vocab_size());
+        assert!(scores.iter().all(|s| s.is_finite()));
+        let started = std::time::Instant::now();
+        let how = Generation { max_tokens: 20, temperature: 0.0, top_k: 0, stop: vec![256], seed: 1 };
+        let answer = model.generate(&prompt, &how).unwrap();
+        println!("{} tokens in {:?}: {:?}", answer.len(), started.elapsed(), spec.decode(&answer));
     }
 }

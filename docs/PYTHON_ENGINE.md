@@ -164,16 +164,16 @@ The runtime's source is built into the MacroMagi executable. On first use it is 
 
 ## The trainer
 
-`runtime/python/magi_train` trains the Magic tab's models. It is a separate package: the macro runtime above uses only the standard library, and the trainer needs **PyTorch** and **onnx**, which *Settings → AI → Downloads* installs into the same Python. The Magic tab starts it as `python -u magi_train_run.py plan.json` and reads one JSON object per line from it.
+`runtime/python/magi_train` trains the Magic tab's models. It is a separate package: the macro runtime above uses only the standard library, and the trainer needs **PyTorch** and **onnx**, which *Settings › Runtime* installs into the same Python (shown there as *Python for AI*). The Magic tab starts it as `python -u magi_train_run.py plan.json` and reads one JSON object per line from it.
 
 | Module | Holds |
 | --- | --- |
 | `tokens.py` | The byte-level tokenizer and chat template, the same as `TextSpec` in Rust. |
-| `data.py` | Reading `.jsonl`, `.md` and `.txt` datasets into samples. |
-| `blocks.py` | The architecture blocks, the text and vision models, LoRA and DoRA adapters. |
-| `optim.py` | AdamW, Muon (Newton–Schulz orthogonalised updates) and SGD; moving optimizer state to system memory. |
+| `data.py` | Reading `.jsonl`, `.md` and `.txt` datasets into samples: a sample per assistant turn, with thinking on and off, effort levels, the sample's tools and tool results. |
+| `blocks.py` | The architecture blocks – Llama-layout layers, latent attention, DeepSeek-V4's compressed sparse and heavily compressed attention, DeepSeekMoE, hyper-connections, multi-token prediction, Mamba-2 – the text and vision models, LoRA and DoRA adapters. |
+| `optim.py` | AdamW, Muon (as DeepSeek-V4 uses it: Nesterov momentum, hybrid Newton–Schulz, rescaled updates) and SGD; warm-up and cosine schedules; moving optimizer state to system memory. |
 | `safetensors.py` | Reading and writing weights without the `safetensors` package, and without pickle. |
-| `train.py` | The stages – pretraining, fine-tuning, reinforcement learning, compaction, vision – and the ONNX export. |
+| `train.py` | The stages – pretraining, fine-tuning, reinforcement learning, compaction, vision – each with its own optimizer, on the CPU or one or several graphics cards (DataParallel), and the ONNX export. |
 
 The plan format and what each stage does are in [MAGIC.md](MAGIC.md).
 

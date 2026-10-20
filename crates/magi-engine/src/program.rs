@@ -144,11 +144,11 @@ impl Program {
         }
         let bytes = self.assets.model(id).ok_or_else(|| EngineError::new(format!("model `{id}` is missing")))?;
         let file = MagicFile::from_bytes(bytes).map_err(|e| EngineError::new(e.to_string()))?;
-        if file.onnx.is_empty() {
-            return Err(EngineError::new("this .magic file does not include the model itself"));
-        }
         if file.model.kind == ModelKind::Text {
             return Err(EngineError::new("this is a text model: run it with an AI Agent block"));
+        }
+        if file.onnx.is_empty() {
+            return Err(EngineError::new("this .magic file does not include the model itself"));
         }
         let model = magi_ml::Model::load(&file.onnx, &file.model.input).map_err(|e| EngineError::new(e.0))?;
         let loaded = Arc::new(LoadedModel { spec: file.model, model: Mutex::new(model) });
@@ -169,11 +169,17 @@ impl Program {
         let Some(spec) = file.model.text.clone().filter(|_| file.model.kind == ModelKind::Text) else {
             return Err(EngineError::new("this is a vision model: run it with an AI Watch or AI Model block"));
         };
-        if file.onnx.is_empty() {
-            return Err(EngineError::new("this .magic file does not include the model itself; train it first"));
-        }
-        let model = magi_ml::TextModel::load(&file.onnx, spec.context as usize).map_err(|e| EngineError::new(e.0))?;
-        let loaded = Arc::new(LoadedText { spec, model: Mutex::new(model) });
+        let runner = if let Some(path) = &file.model.gguf {
+            TextRunner::Gguf { path: path.into(), own: file.model.architecture.is_some() }
+        } else {
+            if file.onnx.is_empty() {
+                return Err(EngineError::new("this .magic file does not include the model itself; train it first"));
+            }
+            let model =
+                magi_ml::TextModel::load(&file.onnx, spec.context as usize).map_err(|e| EngineError::new(e.0))?;
+            TextRunner::Onnx(Mutex::new(model))
+        };
+        let loaded = Arc::new(LoadedText { spec, runner });
         self.text_models.lock().unwrap_or_else(|p| p.into_inner()).insert(id.to_owned(), Arc::clone(&loaded));
         Ok(loaded)
     }
@@ -222,7 +228,34 @@ impl Program {
 /// An AI model of the macro, loaded.
 pub struct LoadedText {
     pub spec: magi_core::magic::TextSpec,
-    pub model: Mutex<magi_ml::TextModel>,
+    pub runner: TextRunner,
+}
+
+/// How a text model runs: its ONNX model in MacroMagi, or a GGUF file with llama.cpp.
+pub enum TextRunner {
+    Onnx(Mutex<magi_ml::TextModel>),
+    Gguf { path: std::path::PathBuf, own: bool },
+}
+
+impl LoadedText {
+    /// Asks the model; `max_tokens` 0 and `temperature` below 0 use its own settings.
+    pub fn ask(
+        &self,
+        request: &str,
+        max_tokens: usize,
+        temperature: f32,
+        seed: u64,
+    ) -> Result<magi_ml::Answer, magi_ml::MlError> {
+        match &self.runner {
+            TextRunner::Onnx(model) => {
+                let mut model = model.lock().unwrap_or_else(|p| p.into_inner());
+                magi_ml::ask(&mut model, &self.spec, request, max_tokens, temperature, seed)
+            }
+            TextRunner::Gguf { path, own } => {
+                magi_ml::ask_gguf(path, &self.spec, *own, request, max_tokens, temperature, seed)
+            }
+        }
+    }
 }
 
 pub struct LoadedModel {

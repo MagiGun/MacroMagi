@@ -2617,8 +2617,10 @@ dependencies = [
  "ort",
  "prost",
  "serde",
+ "serde_json",
  "thiserror 2.0.21",
  "tract-onnx",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

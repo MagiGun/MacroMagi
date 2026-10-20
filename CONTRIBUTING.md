@@ -25,7 +25,7 @@ MacroMagi is source available under the [MacroMagi Terms](TERMS.md). By contribu
 ## Getting set up
 
 1. Install [Rust](https://rustup.rs). The repository pins its toolchain in `rust-toolchain.toml`; `rustup` fetches the right version, with `rustfmt` and `clippy`, the first time you build.
-2. Optional: install Python 3.8 or newer (on Windows, *Settings → AI → Downloads* in the app can fetch one). It is needed only for the Python engine and the tests that exercise it; those tests skip themselves without it.
+2. Optional: install Python 3.8 or newer (on Windows, *Settings › Engine* in the app can fetch one). It is needed only for the Python engine and the tests that exercise it; those tests skip themselves without it.
 3. On Linux, install the system packages listed in the [README](README.md#building-from-source).
 
 ```bash

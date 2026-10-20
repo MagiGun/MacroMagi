@@ -1,0 +1,467 @@
+//! The Magic tab, driven through its interface: the banner's menus, every
+//! block's panel and its buttons, the dataset editor, presets and undo – and,
+//! with Python and PyTorch, training a model with the Train button and
+//! prompting it with the Prompt Model block.
+
+use egui::accesskit::Role;
+use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable;
+use magi_core::nodes::studio::{self, kinds};
+
+use super::*;
+
+fn harness(dir_name: &str) -> Harness<'static, MagiApp> {
+    let dir = std::env::temp_dir().join(format!("magi-magic-test-{dir_name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let paths = Paths { app_dir: dir.clone(), data_dir: dir.join("data") };
+    let settings = Settings { dry_run: true, tab: Tab::Magic, ..Settings::default() };
+    let options = StartupOptions {
+        open: None,
+        example: None,
+        tab: Some(Tab::Magic),
+        screenshot: None,
+        show_cards: false,
+        show_targets: false,
+        select_kind: None,
+        settings_page: None,
+        train: false,
+        wait: None,
+    };
+    let mut harness = Harness::builder()
+        .with_size(vec2(1400.0, 900.0))
+        .build_eframe(move |cc| MagiApp::new(cc, paths, settings, options));
+    harness.run_steps(4);
+    harness
+}
+
+/// Clicks the first widget whose label contains `text`.
+fn click(harness: &mut Harness<'_, MagiApp>, text: &str) {
+    harness
+        .query_all_by_label_contains(text)
+        .next()
+        .unwrap_or_else(|| panic!("nothing labelled “{text}”"))
+        .scroll_to_me();
+    harness.run_steps(2);
+    harness
+        .query_all_by_label_contains(text)
+        .next()
+        .unwrap_or_else(|| panic!("nothing labelled “{text}”"))
+        .click_accesskit();
+    harness.run_steps(3);
+}
+
+fn shows(harness: &Harness<'_, MagiApp>, text: &str) -> bool {
+    harness.query_all_by_label_contains(text).next().is_some()
+}
+
+/// Types into the first multi-line text box, as a person does: focus it, then type.
+fn type_request(harness: &mut Harness<'_, MagiApp>, text: &str) {
+    harness.get_by_role(Role::MultilineTextInput).focus();
+    harness.run_steps(2);
+    harness.get_by_role(Role::MultilineTextInput).type_text(text);
+    harness.run_steps(2);
+}
+
+fn doc<'a>(harness: &'a Harness<'_, MagiApp>) -> &'a MagicDoc {
+    harness.state().magic_tab.doc.as_ref().expect("a model is open")
+}
+
+fn node_of(harness: &Harness<'_, MagiApp>, kind: &str) -> magi_core::graph::NodeId {
+    doc(harness).studio.graph.nodes().find(|n| n.kind == kind).unwrap_or_else(|| panic!("no {kind}")).id
+}
+
+fn select(harness: &mut Harness<'_, MagiApp>, kind: &str) {
+    let id = node_of(harness, kind);
+    harness.state_mut().magic_tab.view.selection = [id].into();
+    harness.run_steps(3);
+}
+
+#[test]
+fn the_magic_tab_works_through_its_interface() {
+    let mut h = harness("ui");
+    // The empty tab offers a new model; the example agent opens.
+    click(&mut h, "New text model");
+    assert_eq!(doc(&h).title(), "Magi");
+    let text = doc(&h).file.model.text.clone().unwrap();
+    assert_eq!(text.tools.len(), 4, "general tools come with it, not MacroMagi's");
+    assert!(text.thinking.is_some() && text.effort.is_some(), "Thinking and Reasoning Effort are chained in");
+
+    // The banner holds the model's menus.
+    click(&mut h, "File");
+    assert!(shows(&h, "New vision model") && shows(&h, "Import") && shows(&h, "Save as"));
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert!(shows(&h, "Train"), "the banner has Train");
+    assert!(doc(&h).training_problem().unwrap().contains("folder"), "training needs Compile's folder");
+
+    // Every block's panel opens.
+    let ids: Vec<_> = doc(&h).studio.graph.nodes().map(|n| n.id).collect();
+    for id in ids {
+        h.state_mut().magic_tab.view.selection = [id].into();
+        h.run_steps(3);
+    }
+    // And every kind of block, added from the list.
+    let all: Vec<String> = crate::ui::magic_tab::registry().iter().map(|d| d.id.clone()).collect();
+    for kind in &all {
+        let state = h.state_mut();
+        let at = state.magic_tab.view.view_center();
+        let doc = state.magic_tab.doc.as_mut().unwrap();
+        let id = state.magic_tab.view.add_node(&mut doc.studio, crate::ui::magic_tab::registry(), kind, at).unwrap();
+        state.magic_tab.view.selection = [id].into();
+        h.run_steps(3);
+        let state = h.state_mut();
+        let doc = state.magic_tab.doc.as_mut().unwrap();
+        doc.studio.graph.remove(id);
+        h.run_steps(1);
+    }
+
+    // Model Info: what the block says is what the model is.
+    select(&mut h, kinds::INFO);
+    let field =
+        h.query_all_by_role(Role::TextInput).find(|n| n.value().as_deref() == Some("Magi")).expect("the name field");
+    field.click();
+    h.run_steps(1);
+    h.query_all_by_role(Role::TextInput).find(|n| n.value().as_deref() == Some("Magi")).unwrap().type_text("!");
+    h.run_steps(3);
+    assert_eq!(doc(&h).title(), "Magi!");
+
+    // Text & Tools: a tool is added.
+    select(&mut h, kinds::TEXT);
+    click(&mut h, "Add a tool");
+    assert_eq!(doc(&h).file.model.text.as_ref().unwrap().tools.len(), 5);
+    click(&mut h, "Add MacroMagi's tools");
+    assert_eq!(doc(&h).file.model.text.as_ref().unwrap().tools.len(), 11);
+
+    // Thinking and Reasoning Effort: their blocks change the model.
+    select(&mut h, kinds::THINKING);
+    click(&mut h, "Think unless asked not to");
+    assert!(!doc(&h).file.model.text.as_ref().unwrap().thinking.as_ref().unwrap().on_by_default);
+    select(&mut h, kinds::EFFORT);
+    click(&mut h, "Add a level");
+    assert_eq!(doc(&h).file.model.text.as_ref().unwrap().effort.as_ref().unwrap().levels.len(), 4);
+
+    // Prompt Model: its context window and controls, before there is anything to load.
+    select(&mut h, kinds::PROMPT);
+    assert!(shows(&h, "Context window") && shows(&h, "Not loaded") && shows(&h, "Reasoning effort"));
+
+    // The Text Dataset: new files open in the editor, which adds, filters and keeps samples.
+    select(&mut h, kinds::TEXT_DATA);
+    click(&mut h, "New .jsonl");
+    assert!(h.state().magic_tab.dataset_open(), "the editor opened");
+    click(&mut h, "Add sample");
+    click(&mut h, "Problems only");
+    assert!(shows(&h, "Problem"), "the empty sample is a problem");
+    click(&mut h, "Add an example");
+    click(&mut h, "Conversation");
+    click(&mut h, "Keep changes");
+    let file = "data/text/to-do-1.jsonl";
+    let saved = String::from_utf8(doc(&h).file.data[file].clone()).unwrap();
+    assert_eq!(saved.lines().count(), 3, "{saved}");
+    click(&mut h, "New .md");
+    click(&mut h, "Add sample");
+    click(&mut h, "Keep changes");
+    assert!(doc(&h).file.data.contains_key("data/text/to-do-1.md"));
+    assert!(doc(&h).file.model.datasets.iter().any(|f| f == file), "the model keeps the new files");
+
+    // Reinforcement learning's rules.
+    {
+        let state = h.state_mut();
+        let at = state.magic_tab.view.view_center();
+        let doc = state.magic_tab.doc.as_mut().unwrap();
+        let id =
+            state.magic_tab.view.add_node(&mut doc.studio, crate::ui::magic_tab::registry(), kinds::RL, at).unwrap();
+        state.magic_tab.view.selection = [id].into();
+    }
+    h.run_steps(3);
+    let rules = |h: &Harness<'_, MagiApp>| {
+        doc(h)
+            .studio
+            .graph
+            .nodes()
+            .find(|n| n.kind == kinds::RL)
+            .unwrap()
+            .params_or_default::<studio::RlParams>()
+            .rules
+            .len()
+    };
+    let before = rules(&h);
+    click(&mut h, "Add a rule");
+    assert_eq!(rules(&h), before + 1);
+
+    // Presets › Commons puts DeepSeek-V4 in place of the architecture; undo takes it back.
+    click(&mut h, "Presets");
+    click(&mut h, "Commons");
+    click(&mut h, "DeepSeek-V4 (small)");
+    let layers = |h: &Harness<'_, MagiApp>| {
+        studio::pipeline(&doc(h).studio.graph)
+            .unwrap()
+            .architecture
+            .layers
+            .iter()
+            .map(|l| l["attention"]["kind"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(layers(&h), ["window", "csa", "hca", "csa", "hca"]);
+    h.state_mut().undo();
+    h.run_steps(3);
+    assert_eq!(layers(&h), ["full"; 8], "the Magi layout");
+    h.state_mut().redo();
+    h.run_steps(3);
+    assert_eq!(layers(&h)[0], "window");
+
+    // View: the console can be hidden.
+    click(&mut h, "View");
+    click(&mut h, "Console");
+    assert!(!h.state().settings.magic_console);
+
+    // Compile: a folder makes the pipeline ready.
+    let compile = node_of(&h, kinds::COMPILE);
+    let folder = std::env::temp_dir().join("magi-ui-compile");
+    h.state_mut()
+        .magic_tab
+        .doc
+        .as_mut()
+        .unwrap()
+        .studio
+        .graph
+        .node_mut(compile)
+        .unwrap()
+        .set_param("folder", folder.to_string_lossy());
+    h.run_steps(3);
+    assert_eq!(doc(&h).training_problem(), None);
+    select(&mut h, kinds::COMPILE);
+    assert!(shows(&h, "Save package now") && shows(&h, "Use in Macro") && shows(&h, "GGUF precision"));
+
+    // A vision model, after the question about the unsaved one.
+    click(&mut h, "File");
+    click(&mut h, "New vision model");
+    click(&mut h, "Don't save");
+    assert_eq!(doc(&h).file.model.kind, magi_core::magic::ModelKind::Vision);
+    select(&mut h, kinds::ANSWERS);
+    click(&mut h, "Add answer");
+    assert_eq!(doc(&h).file.model.classes.len(), 3, "the Answers block makes the model's answers");
+    select(&mut h, kinds::IMAGE_DATA);
+    assert!(shows(&h, "Pictures an answer was mistaken for") || shows(&h, "Not “"));
+    select(&mut h, kinds::TEST);
+    assert!(shows(&h, "Watch the screen"));
+}
+
+/// The whole way, as a person does it: New text model, a folder for Compile,
+/// Train, then Prompt Model. With MAGI_TEST_LLAMA (a folder with
+/// llama-server), the exported GGUF is imported and prompted too.
+#[test]
+#[ignore = "needs Python with PyTorch and onnx (MAGI_TEST_PYTHON)"]
+fn a_model_trains_and_answers_through_the_interface() {
+    let mut h = harness("train");
+    if let Some(python) = std::env::var_os("MAGI_TEST_PYTHON") {
+        h.state_mut().settings.python_path = Some(python.into());
+    }
+    if let Ok(gpu) = std::env::var("MAGI_TEST_GPU") {
+        h.state_mut().settings.train_gpus = Some(gpu.parse().ok().into_iter().collect());
+    }
+    click(&mut h, "New text model");
+    let folder = std::env::temp_dir().join(format!("magi-ui-train-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&folder);
+    {
+        let doc = h.state_mut().magic_tab.doc.as_mut().unwrap();
+        let ids: Vec<_> = doc.studio.graph.nodes().map(|n| (n.id, n.kind.clone())).collect();
+        for (id, kind) in ids {
+            let node = doc.studio.graph.node_mut(id).unwrap();
+            if kind == kinds::COMPILE {
+                node.set_param("folder", folder.to_string_lossy());
+            }
+        }
+    }
+    h.run_steps(3);
+    click(&mut h, "Train");
+    assert!(h.state().magic_tab.training(), "training started");
+    assert!(shows(&h, "Training “Magi”"), "the training view replaces the canvas");
+    let began = std::time::Instant::now();
+    while h.state().magic_tab.training() {
+        assert!(began.elapsed().as_secs() < 1800, "training took too long");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        h.run_steps(1);
+    }
+    h.run_steps(5);
+    let lines: Vec<String> = h
+        .state()
+        .magic_tab
+        .job
+        .as_ref()
+        .map(|j| j.state.lock().unwrap().lines.iter().map(|(_, l)| l.clone()).collect())
+        .unwrap_or_default();
+    assert!(doc(&h).file.model.trained.is_some(), "{lines:#?}");
+    let magic = folder.join("Magi.magic");
+    let gguf = folder.join("Magi-F16.gguf");
+    assert!(magic.is_file() && gguf.is_file(), "{lines:#?}");
+    assert_eq!(doc(&h).path.as_deref(), Some(magic.as_path()), "the open model is the saved one");
+
+    // Prompt Model with the built-in engine: it loads once, then answers from memory.
+    select(&mut h, kinds::PROMPT);
+    let ask = |h: &mut Harness<'_, MagiApp>, request: &str| {
+        type_request(h, request);
+        click(h, "Send");
+        let began = std::time::Instant::now();
+        while h.state().magic_tab.chat_waiting() {
+            assert!(began.elapsed().as_secs() < 300, "no answer");
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            h.run_steps(1);
+        }
+        h.run_steps(3);
+        h.state()
+            .magic_tab
+            .last_answer()
+            .cloned()
+            .unwrap_or_else(|| panic!("no answer: {:?}", h.state().magic_tab.chat_state()))
+    };
+    let answer = ask(&mut h, "What is 487 times 26?");
+    assert_eq!(answer.tools.first().map(|t| t.name.as_str()), Some("calculator"), "{answer:?}");
+    assert!(shows(&h, "Loaded"), "the model stays loaded");
+    let began = std::time::Instant::now();
+    let _ = ask(&mut h, "Hello!");
+    let second = began.elapsed();
+    // Thinking off, from the block's switch.
+    click(&mut h, "Thinking");
+    assert_eq!(
+        doc(&h).studio.graph.node(node_of(&h, kinds::PROMPT)).unwrap().param::<String>("thinking").as_deref(),
+        Some("off")
+    );
+    let answer = ask(&mut h, "Which is bigger, 0.7 or 0.65?");
+    assert!(answer.thinking.is_empty(), "{answer:?}");
+    eprintln!("a loaded model answered in {second:?}");
+
+    // The GGUF it exported, run with llama.cpp: compiled, then imported.
+    if let Some(llama) = std::env::var_os("MAGI_TEST_LLAMA") {
+        let into = h.state().paths.data_dir.join("components").join("llama-cpu");
+        copy_dir(std::path::Path::new(&llama), &into);
+        h.state_mut().applied_llama = None;
+        h.run_steps(2);
+        select(&mut h, kinds::PROMPT);
+        click(&mut h, "llama.cpp");
+        click(&mut h, "Thinking");
+        let answer = ask(&mut h, "What is 487 times 26?");
+        assert_eq!(answer.tools.first().map(|t| t.name.as_str()), Some("calculator"), "{answer:?}");
+        assert!(magi_ml::llama::is_loaded(&gguf), "llama.cpp keeps it loaded");
+        click(&mut h, "Unload");
+        assert!(!magi_ml::llama::is_loaded(&gguf));
+
+        let imported = crate::magic::import::import_gguf(&gguf).unwrap();
+        h.state_mut().set_magic_doc(Some(MagicDoc::new(imported.file, None, imported.notes)));
+        h.run_steps(3);
+        select(&mut h, kinds::PROMPT);
+        // MacroMagi knows its own model again: its tags, tools, Thinking and Reasoning Effort.
+        let text = doc(&h).file.model.text.clone().unwrap();
+        assert!(text.thinking.is_some() && text.effort.is_some() && text.tools.len() == 4, "{text:?}");
+        assert!(shows(&h, "Reasoning effort"));
+        let answer = ask(&mut h, "Who are you?");
+        assert!(!answer.raw.is_empty(), "{answer:?}");
+        magi_ml::llama::stop_servers();
+    }
+    let _ = std::fs::remove_dir_all(&folder);
+}
+
+fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap().flatten() {
+        let path = entry.path();
+        if path.is_file() {
+            std::fs::copy(&path, to.join(entry.file_name())).unwrap();
+        }
+    }
+}
+
+/// A vision model, the way a person makes one: New vision model, pictures of
+/// each answer in the Vision Dataset, a folder for Compile, Train – and the
+/// trained model telling a new picture apart.
+#[test]
+#[ignore = "needs Python with PyTorch and onnx (MAGI_TEST_PYTHON)"]
+fn a_vision_model_trains_through_the_interface() {
+    let mut h = harness("vision");
+    if let Some(python) = std::env::var_os("MAGI_TEST_PYTHON") {
+        h.state_mut().settings.python_path = Some(python.into());
+    }
+    if let Ok(gpu) = std::env::var("MAGI_TEST_GPU") {
+        h.state_mut().settings.train_gpus = Some(gpu.parse().ok().into_iter().collect());
+    }
+    click(&mut h, "New vision model");
+    // Pictures, as Add… puts them in: reddish ones are "Yes", bluish ones "No".
+    let picture = |seed: u32, red: bool| {
+        let mut image = image::RgbImage::new(48, 48);
+        for (x, y, pixel) in image.enumerate_pixels_mut() {
+            let noise = ((x * 31 + y * 17 + seed * 7) % 40) as u8;
+            *pixel = if red {
+                image::Rgb([200 + noise / 2, 30 + noise, 30])
+            } else {
+                image::Rgb([30, 40 + noise, 200 + noise / 2])
+            };
+        }
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        bytes.into_inner()
+    };
+    let folder = std::env::temp_dir().join(format!("magi-ui-vision-{}", std::process::id()));
+    {
+        let doc = h.state_mut().magic_tab.doc.as_mut().unwrap();
+        for i in 0..24 {
+            for (class, red) in [(0usize, true), (1, false)] {
+                let file = format!("data/train/{class}/{i:04}.png");
+                doc.file.data.insert(file.clone(), picture(i, red));
+                doc.file.model.training.push(magi_core::magic::DataItem { file, class, negative: false });
+            }
+        }
+        doc.files_changed();
+        let ids: Vec<_> = doc.studio.graph.nodes().map(|n| (n.id, n.kind.clone())).collect();
+        for (id, kind) in ids {
+            let node = doc.studio.graph.node_mut(id).unwrap();
+            match kind.as_str() {
+                kinds::COMPILE => node.set_param("folder", folder.to_string_lossy()),
+                kinds::VISION_TRAIN => node.set_param("steps", 120),
+                _ => {}
+            }
+        }
+    }
+    h.run_steps(3);
+    select(&mut h, kinds::IMAGE_DATA);
+    assert!(shows(&h, "“Yes” · 24"), "the Vision Dataset block shows the pictures");
+    assert_eq!(doc(&h).training_problem(), None);
+    click(&mut h, "Train");
+    let began = std::time::Instant::now();
+    while h.state().magic_tab.training() {
+        assert!(began.elapsed().as_secs() < 900, "training took too long");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        h.run_steps(1);
+    }
+    h.run_steps(5);
+    let lines: Vec<String> = h
+        .state()
+        .magic_tab
+        .job
+        .as_ref()
+        .map(|j| j.state.lock().unwrap().lines.iter().map(|(_, l)| l.clone()).collect())
+        .unwrap_or_default();
+    assert!(doc(&h).file.model.trained.is_some(), "{lines:#?}");
+    assert!(folder.join("My vision model.magic").is_file(), "{lines:#?}");
+    // A picture it has not seen.
+    let fresh = magi_vision::decode(&picture(99, true)).unwrap();
+    let mut model = magi_ml::Model::load(&doc(&h).file.onnx, &doc(&h).file.model.input).unwrap();
+    let p = model.classify(&fresh.rgba, fresh.width, fresh.height).unwrap();
+    assert!(p[0] > 0.8, "{p:?}");
+    let _ = std::fs::remove_dir_all(&folder);
+}
+
+/// Writes the example text and vision models into MAGI_EXPORT_DIR (for screenshots).
+#[test]
+#[ignore = "writes files for screenshots"]
+fn write_the_example_models() {
+    let dir = std::path::PathBuf::from(std::env::var("MAGI_EXPORT_DIR").expect("MAGI_EXPORT_DIR"));
+    for (text, name) in [(true, "example-text.magic"), (false, "example-vision.magic")] {
+        let mut doc = MagicDoc::new(crate::magic::new_model(text), None, Vec::new());
+        doc.sync_canvas();
+        doc.file.save(&dir.join(name)).unwrap();
+    }
+    let mut doc = MagicDoc::new(crate::magic::new_model(true), None, Vec::new());
+    let deepseek = studio::commons().into_iter().find(|c| c.name.starts_with("DeepSeek-V4")).unwrap();
+    studio::apply_common(&mut doc.studio.graph, &deepseek, [0.0, 0.0]);
+    doc.sync_canvas();
+    doc.file.save(&dir.join("example-deepseek.magic")).unwrap();
+}
