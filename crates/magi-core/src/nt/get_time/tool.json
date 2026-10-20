@@ -1,0 +1,21 @@
+{
+  "name": "get_time",
+  "description": "Gets the current date and time for a place (a city, or a time zone such as Europe/Paris).",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "location": {
+        "type": "string",
+        "description": "a city or time zone; empty: this computer's"
+      }
+    },
+    "required": [
+      "location"
+    ]
+  },
+  "run": {
+    "kind": "python",
+    "entry": "run.py",
+    "timeout_ms": 60000
+  }
+}

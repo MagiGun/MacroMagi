@@ -31,6 +31,8 @@ use tract_onnx::tract_hir::internal::DimLike;
 pub use prepare::{prepare, resize_rgb, softmax};
 
 pub mod llama;
+pub mod native;
+pub mod tools;
 pub use llama::{LlamaConfig, ask_gguf, set_llama};
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -376,6 +378,25 @@ fn fastest(onnx: &[u8], spec: &InputSpec, candidates: &[Engine]) -> Engine {
 enum TextBackend {
     BuiltIn(std::sync::Arc<TypedRunnableModel>),
     OnnxRuntime(ort::session::Session),
+    /// MacroMagi's own engine, with a key/value cache ([`native`]).
+    Native(Box<native::NativeModel>),
+}
+
+/// Draws numbers for sampling: xorshift64*, enough for picking tokens.
+pub(crate) struct Random(u64);
+
+impl Random {
+    pub(crate) fn new(seed: u64) -> Self {
+        Self(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1)
+    }
+
+    pub(crate) fn next(&mut self) -> f64 {
+        let state = &mut self.0;
+        *state ^= *state >> 12;
+        *state ^= *state << 25;
+        *state ^= *state >> 27;
+        (state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11) as f64 / (1u64 << 53) as f64
+    }
 }
 
 /// How a text model writes.
@@ -424,12 +445,42 @@ impl TextModel {
         Ok(TextModel { backend, context: context.max(1) })
     }
 
+    /// Loads a model trained in MacroMagi on the native engine, from its
+    /// weights: a key/value cache, prefix reuse, context scaling and tiered
+    /// memory. `data_dir` holds the cache's files unless `memory` says otherwise.
+    pub fn load_native(
+        architecture: &magi_core::magic::Architecture,
+        weights: &[u8],
+        memory: &magi_core::magic::MemorySpec,
+        data_dir: &Path,
+    ) -> Result<TextModel, MlError> {
+        let model = native::NativeModel::load(architecture, weights, memory, data_dir)?;
+        let context = model.context;
+        Ok(TextModel { backend: TextBackend::Native(Box::new(model)), context })
+    }
+
+    /// Whether it runs on the native engine (with its cache).
+    pub fn is_native(&self) -> bool {
+        matches!(self.backend, TextBackend::Native(_))
+    }
+
+    /// What the native engine's cache holds.
+    pub fn telemetry(&self) -> Option<native::KvTelemetry> {
+        match &self.backend {
+            TextBackend::Native(model) => Some(model.telemetry()),
+            _ => None,
+        }
+    }
+
     /// The scores for the token after `tokens` (the last `context` of them).
     ///
     /// The model always reads its full context: the tokens, then padding.
     /// It reads causally, so padding after a token never changes the scores
     /// at it – and one fixed size runs fastest.
     pub fn next_scores(&mut self, tokens: &[u32]) -> Result<Vec<f32>, MlError> {
+        if let TextBackend::Native(model) = &mut self.backend {
+            return model.scores(&tokens[tokens.len().saturating_sub(self.context)..], 0);
+        }
         let window = &tokens[tokens.len().saturating_sub(self.context)..];
         if window.is_empty() {
             return Err(MlError::new("there is nothing to continue"));
@@ -448,6 +499,7 @@ impl TextModel {
                     .copied()
                     .collect()
             }
+            TextBackend::Native(_) => unreachable!("answered above"),
             TextBackend::OnnxRuntime(session) => {
                 let error = |e: ort::Error| MlError::new(e.to_string());
                 let tensor =
@@ -462,19 +514,21 @@ impl TextModel {
 
     /// Writes an answer after `prompt`. Returns its tokens, without the stop token.
     pub fn generate(&mut self, prompt: &[u32], how: &Generation) -> Result<Vec<u32>, MlError> {
+        self.generate_after(prompt, how, 0)
+    }
+
+    /// Generates, telling the native engine that the first `prefix` tokens
+    /// (the system text) may be kept on disk.
+    pub fn generate_after(&mut self, prompt: &[u32], how: &Generation, prefix: usize) -> Result<Vec<u32>, MlError> {
+        if let TextBackend::Native(model) = &mut self.backend {
+            return model.generate(prompt, how, prefix);
+        }
         let mut tokens = prompt.to_vec();
         let mut answer = Vec::new();
-        let mut state = how.seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
-        let mut random = move || {
-            // xorshift64*: enough for drawing tokens.
-            state ^= state >> 12;
-            state ^= state << 25;
-            state ^= state >> 27;
-            (state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11) as f64 / (1u64 << 53) as f64
-        };
+        let mut random = Random::new(how.seed);
         for _ in 0..how.max_tokens {
             let scores = self.next_scores(&tokens)?;
-            let next = pick(&scores, how.temperature, how.top_k, random());
+            let next = pick(&scores, how.temperature, how.top_k, random.next());
             if how.stop.contains(&next) {
                 break;
             }
@@ -511,11 +565,44 @@ pub struct AskOptions {
     pub thinking: Option<bool>,
     /// The reasoning effort, one of the model's levels; empty follows the model.
     pub effort: String,
+    /// llama.cpp: the key/value cache's type (`f16`, `q8_0`, `q4_0`); empty: its own.
+    pub kv_cache: String,
+    /// llama.cpp: flash attention (a quantized cache needs it).
+    pub flash_attention: bool,
+    /// llama.cpp: the model's context scaling, passed when a longer context than it trained at is asked for.
+    pub scaling: Option<magi_core::magic::RopeScaling>,
 }
 
 impl Default for AskOptions {
     fn default() -> Self {
-        Self { max_tokens: 0, temperature: -1.0, seed: 0, context: 0, thinking: None, effort: String::new() }
+        Self {
+            max_tokens: 0,
+            temperature: -1.0,
+            seed: 0,
+            context: 0,
+            thinking: None,
+            effort: String::new(),
+            kv_cache: String::new(),
+            flash_attention: false,
+            scaling: None,
+        }
+    }
+}
+
+impl AskOptions {
+    /// The context scaling of a model trained in MacroMagi.
+    pub fn with_scaling(mut self, architecture: Option<&magi_core::magic::Architecture>) -> Self {
+        self.scaling = architecture.and_then(|a| a.rope_scaling.clone());
+        self
+    }
+
+    /// The cache settings of a model's Memory & Cache block.
+    pub fn with_memory(mut self, memory: Option<&magi_core::magic::MemorySpec>) -> Self {
+        if let Some(memory) = memory {
+            self.kv_cache = if memory.precision == "f32" { "f32".into() } else { memory.precision.clone() };
+            self.flash_attention = memory.flash_attention;
+        }
+        self
     }
 }
 
@@ -526,7 +613,31 @@ pub fn ask_with(
     request: &str,
     options: &AskOptions,
 ) -> Result<Answer, MlError> {
-    let prompt = spec.encode(&spec.prompt_with(request, options.thinking, &options.effort));
+    let raw = complete(model, spec, &spec.prompt_with(request, options.thinking, &options.effort), options)?;
+    Ok(Answer { text: spec.visible(&raw), thinking: spec.thinking(&raw), tools: spec.tool_calls(&raw), raw })
+}
+
+/// How long the system part of a prompt is, in tokens: the system prompt,
+/// effort and tools, the same request after request.
+pub fn system_tokens(spec: &magi_core::magic::TextSpec, text: &str) -> usize {
+    text.find(&spec.end_tag)
+        .filter(|_| text.starts_with(&spec.system_tag))
+        .map_or(0, |end| spec.encode(&text[..end + spec.end_tag.len()]).len())
+}
+
+/// What a model writes after a prompt (already in its chat template), as raw text.
+pub fn complete(
+    model: &mut TextModel,
+    spec: &magi_core::magic::TextSpec,
+    text: &str,
+    options: &AskOptions,
+) -> Result<String, MlError> {
+    let mut prompt = spec.encode(text);
+    // A shorter context window than the model's: only the latest part of the text.
+    if options.context > 0 && prompt.len() > options.context {
+        prompt.drain(..prompt.len() - options.context);
+    }
+    let prefix = system_tokens(spec, text).min(prompt.len());
     let how = Generation {
         max_tokens: if options.max_tokens == 0 { spec.max_tokens as usize } else { options.max_tokens },
         temperature: if options.temperature < 0.0 { spec.temperature } else { options.temperature },
@@ -534,8 +645,7 @@ pub fn ask_with(
         stop: spec.special_id(&spec.end_tag).into_iter().collect(),
         seed: options.seed,
     };
-    let raw = spec.decode(&model.generate(&prompt, &how)?);
-    Ok(Answer { text: spec.visible(&raw), thinking: spec.thinking(&raw), tools: spec.tool_calls(&raw), raw })
+    Ok(spec.decode(&model.generate_after(&prompt, &how, prefix)?))
 }
 
 /// Asks a text model something, the way its spec says to: the chat template

@@ -174,7 +174,7 @@ fn run(
         let bytes = if params.path.trim().is_empty() {
             request.file.weights.clone()
         } else {
-            let base = MagicFile::load(Path::new(params.path.trim()))
+            let base = magi_core::szi::open(Path::new(params.path.trim()))
                 .map_err(|e| format!("The base model could not be opened: {e}"))?;
             base.weights
         };
@@ -329,6 +329,7 @@ fn run(
         steps: report.get("steps").and_then(Value::as_u64).unwrap_or(0),
         loss: report.get("loss").and_then(Value::as_f64).unwrap_or(f64::NAN),
         parameters: report.get("parameters").and_then(Value::as_u64).unwrap_or(0),
+        system: None,
     };
     if let Some(seconds) = report.get("seconds").and_then(Value::as_f64) {
         say(Level::Info, format!("{} steps in {seconds:.0} s · {} parameters.", record.steps, record.parameters));
@@ -357,7 +358,7 @@ pub fn stage_name(stage: &str) -> &str {
 
 /// Writes the model's pictures as the trainer reads them: a JSON header line,
 /// then each picture as float32 `[3, h, w]`. Returns how many there are.
-fn write_pictures(file: &MagicFile, spec: &InputSpec, path: &Path) -> Result<usize, String> {
+pub(crate) fn write_pictures(file: &MagicFile, spec: &InputSpec, path: &Path) -> Result<usize, String> {
     let mut items = Vec::new();
     let mut body: Vec<u8> = Vec::new();
     for item in file.model.training.iter().chain(&file.model.finetune) {
@@ -398,7 +399,11 @@ mod tests {
         for (id, kind) in ids {
             let node = doc.studio.graph.node_mut(id).unwrap();
             match kind.as_str() {
-                kinds::COMPILE => node.set_param("folder", folder.to_string_lossy()),
+                kinds::COMPILE => {
+                    node.set_param("folder", folder.to_string_lossy());
+                    // Not into this computer's LM Studio.
+                    node.set_param("lmstudio", false);
+                }
                 // Quicker than the example's own settings, for a test.
                 kinds::PRETRAIN => node.set_param("steps", 150),
                 kinds::FINETUNE => node.set_param("steps", 300),

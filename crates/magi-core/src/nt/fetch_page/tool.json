@@ -1,0 +1,21 @@
+{
+  "name": "fetch_page",
+  "description": "Reads the text of a web page.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "url": {
+        "type": "string",
+        "description": "the page's address"
+      }
+    },
+    "required": [
+      "url"
+    ]
+  },
+  "run": {
+    "kind": "python",
+    "entry": "run.py",
+    "timeout_ms": 60000
+  }
+}

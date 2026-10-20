@@ -79,7 +79,7 @@ impl Component {
         match self {
             Component::OnnxRuntime => "ONNX Runtime",
             Component::OnnxRuntimeGpu => "ONNX Runtime for graphics cards",
-            Component::Python => "Python",
+            Component::Python => "Embedded Python",
             Component::PyTorch => "PyTorch for the CPU",
             Component::PyTorchCuda => "PyTorch for NVIDIA graphics cards",
             Component::Onnx => "onnx",
@@ -321,6 +321,21 @@ fn unzip_files(archive: &[u8], wanted: &[&str], into: &Path) -> Result<usize, St
 }
 
 /// Unpacks a whole ZIP archive into `into`.
+/// A file of that name in a folder or the folders in it.
+fn find_file(dir: &Path, name: &str) -> Option<PathBuf> {
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_file(&path, name) {
+                return Some(found);
+            }
+        } else if entry.file_name().to_string_lossy().eq_ignore_ascii_case(name) {
+            return Some(path);
+        }
+    }
+    None
+}
+
 fn unzip_all(archive: &[u8], into: &Path) -> Result<(), String> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive)).map_err(|e| e.to_string())?;
     zip.extract(into).map_err(|e| e.to_string())
@@ -719,10 +734,17 @@ impl Components {
                 let releases: serde_json::Value =
                     serde_json::from_str(&text).map_err(|e| format!("GitHub sent something unexpected: {e}"))?;
                 let (program, runtime) = c.llama_assets();
+                // The CUDA runtime's zip (`cudart-llama-bin-win-cuda-…`) also contains the program's
+                // pattern: only the runtime pattern may match it.
                 let find = |assets: &[(String, String)], part: &str| {
                     assets
                         .iter()
-                        .find(|(name, _)| name.contains(part) && name.contains("x64") && name.ends_with(".zip"))
+                        .find(|(name, _)| {
+                            name.contains(part)
+                                && name.contains("x64")
+                                && name.ends_with(".zip")
+                                && name.starts_with("cudart") == part.starts_with("cudart")
+                        })
                         .map(|(_, url)| url.clone())
                 };
                 let found = releases.as_array().into_iter().flatten().find_map(|release| {
@@ -751,6 +773,15 @@ impl Components {
                     let archive = download(&url, progress)?;
                     progress("Unpacking the CUDA runtime…", None);
                     unzip_all(&archive, dir)?;
+                }
+                // Some builds keep their files in a folder inside the zip: bring them up.
+                if !dir.join(llama_server_name()).is_file()
+                    && let Some(inner) =
+                        find_file(dir, llama_server_name()).and_then(|p| p.parent().map(Path::to_path_buf))
+                {
+                    for entry in std::fs::read_dir(&inner).map_err(|e| e.to_string())?.flatten() {
+                        let _ = std::fs::rename(entry.path(), dir.join(entry.file_name()));
+                    }
                 }
                 if !dir.join(llama_server_name()).is_file() {
                     return Err("the download did not contain llama-server".into());

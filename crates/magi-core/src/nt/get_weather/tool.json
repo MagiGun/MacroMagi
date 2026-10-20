@@ -1,0 +1,21 @@
+{
+  "name": "get_weather",
+  "description": "Gets the current weather for a place.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "location": {
+        "type": "string",
+        "description": "a city or place"
+      }
+    },
+    "required": [
+      "location"
+    ]
+  },
+  "run": {
+    "kind": "python",
+    "entry": "run.py",
+    "timeout_ms": 60000
+  }
+}

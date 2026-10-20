@@ -163,6 +163,14 @@ impl Shared {
             self.monitor.log(LogLevel::Error, error.node, error.message);
         }
         let removed = self.runs().remove(&run);
+        // When the macro stops – nothing runs any more – its AI models are unloaded, Unload blocks or not.
+        if self.runs().is_empty() {
+            let unloaded = self.program.unload_models();
+            if unloaded > 0 {
+                let models = if unloaded == 1 { "the AI model".to_owned() } else { format!("{unloaded} AI models") };
+                self.monitor.log(LogLevel::Info, None, format!("Unloaded {models}: the macro stopped."));
+            }
+        }
         if let Some(active) = removed {
             self.monitor.run_finished(FinishedRun { node: active.node, by_itself: !active.stop.is_stopped(), failed });
         }

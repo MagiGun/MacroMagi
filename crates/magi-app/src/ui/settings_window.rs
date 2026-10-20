@@ -740,7 +740,11 @@ fn engine(ui: &mut Ui, settings: &mut Settings, env: &SettingsEnv<'_>, events: &
         ),
     }
 
-    section(ui, "Download Python");
+    section(ui, "Embedded Python");
+    widgets::note(
+        ui,
+        "A Python kept in MacroMagi's own folder, apart from any Python on this computer. \"Not installed\" here is about this one only: a Python found above works just as well.",
+    );
     match Component::Python.unavailable() {
         Some(_) => {
             widgets::note(
@@ -909,23 +913,21 @@ fn runtime_row(
                         ui.label(RichText::new("Removed at the next start").size(11.0).color(theme::warning()));
                     }
                     (_, None, Some(s)) if s.present() => {
-                        ui.menu_button(icon::DOTS_THREE_VERTICAL, |ui| {
-                            if ui.add_enabled(idle, egui::Button::new(format!("{}  Uninstall", icon::TRASH))).clicked()
-                            {
-                                events.push(SettingsEvent::Remove(component));
-                                ui.close();
-                            }
-                            if ui
-                                .add_enabled(
-                                    idle,
-                                    egui::Button::new(format!("{}  Install again (latest)", icon::ARROWS_CLOCKWISE)),
-                                )
-                                .clicked()
-                            {
-                                events.push(SettingsEvent::Install(component));
-                                ui.close();
-                            }
-                        });
+                        // Right to left: the buttons, then what is installed.
+                        if ui
+                            .add_enabled(idle, egui::Button::new(format!("{}  Uninstall", icon::TRASH)))
+                            .on_hover_text("Removes it from this computer")
+                            .clicked()
+                        {
+                            events.push(SettingsEvent::Remove(component));
+                        }
+                        if ui
+                            .add_enabled(idle, egui::Button::new(icon::ARROWS_CLOCKWISE))
+                            .on_hover_text("Install again (the latest)")
+                            .clicked()
+                        {
+                            events.push(SettingsEvent::Install(component));
+                        }
                         ui.label(
                             RichText::new(format!("{}  Installed", icon::CHECK)).size(11.5).color(theme::success()),
                         );

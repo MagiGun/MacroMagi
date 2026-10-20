@@ -16,7 +16,8 @@ Requests and conversations may also carry:
                  <think>...</think> at the start of an answer works too)
     "tools"      the tools offered: [{"name", "description", "parameters"}]
                  (OpenAI's {"type": "function", "function": {...}} works too)
-    "effort"     the reasoning effort the answer was written at ("low", "high"...)
+    "effort"     the reasoning effort the answer was written at ("low", "high"...),
+                 or a list of them: the sample is learned at each
     "system"     a system prompt instead of the model's own
 
 Assistant messages may have "tool_calls": [{"name": ..., "arguments": {...}}],
@@ -75,7 +76,8 @@ def conversation(tokenizer, messages, system=None, tools=None, effort=None):
     """A sample per assistant turn: everything before it, then the turn.
 
     A model with a Thinking block learns each turn both ways: with its
-    reasoning, and – after an empty thinking span – without it. Earlier answers are
+    reasoning, and – after an empty thinking span – without it. A model
+    without one learns no reasoning: the samples' is left out. Earlier answers are
     read back without their reasoning, except since the last request (as the chat
     template writes them)."""
     spec = tokenizer.spec
@@ -99,7 +101,8 @@ def conversation(tokenizer, messages, system=None, tools=None, effort=None):
         content = _string(message.get("content", "") or "")
         if role == "assistant":
             reasoning, answer = _split_thinking(spec, content)
-            reasoning = str(message.get("thinking", "") or reasoning).strip()
+            # Reasoning is learned only with the Thinking block chained in (and on).
+            reasoning = str(message.get("thinking", "") or reasoning).strip() if switch else ""
             body = answer + _calls_text(spec, message.get("tool_calls"))
             thought = think_open + reasoning + think_close if reasoning else ""
             if switch:
@@ -124,11 +127,77 @@ def conversation(tokenizer, messages, system=None, tools=None, effort=None):
     return samples
 
 
-def read(path, tokenizer):
-    """Every sample in a dataset file."""
+def efforts_of(item):
+    """The reasoning efforts a sample names: none, one ("effort": "high") or several (a list)."""
+    effort = item.get("effort")
+    names = [effort] if isinstance(effort, str) else effort if isinstance(effort, list) else []
+    out = []
+    for name in names:
+        if isinstance(name, str) and name.strip() and name.strip() not in out:
+            out.append(name.strip())
+    return out
+
+
+def learned_at(item, spec):
+    """The levels a request is learned at: the model's levels it names, or the default one."""
+    effort = spec.get("effort") or {}
+    levels = effort.get("levels") or []
+    own = [level for level in efforts_of(item) if level in levels]
+    return own or [effort.get("default", "")]
+
+
+def _items(path):
+    if not (path.lower().endswith(".jsonl") or path.lower().endswith(".json")):
+        return
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                item = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(item, dict):
+                yield item
+
+
+def effort_counts(paths, spec):
+    """[(level, samples)] across dataset files, in the order of the model's levels
+    (dataset.rs, effort_counts)."""
+    levels = (spec.get("effort") or {}).get("levels") or []
+    counts = {level: 0 for level in levels}
+    for path in paths:
+        for item in _items(path):
+            if "prompt" in item or "messages" in item:
+                for level in learned_at(item, spec):
+                    counts[level] = counts.get(level, 0) + 1
+    return [(level, counts.get(level, 0)) for level in levels]
+
+
+def donor(counts, level):
+    """The level whose samples a level without any learns from: the nearest one with
+    samples, the lower one first (dataset.rs, donor)."""
+    names = [name for name, _ in counts]
+    if level not in names:
+        return None
+    index = names.index(level)
+    if counts[index][1] > 0:
+        return None
+    for distance in range(1, len(counts)):
+        for i in (index - distance, index + distance):
+            if 0 <= i < len(counts) and counts[i][1] > 0:
+                return counts[i][0]
+    return None
+
+
+def read(path, tokenizer, donors=None):
+    """Every sample in a dataset file. A request is learned at each reasoning effort it
+    names, and also at the levels `donors` ({level: donor}) fill from those."""
     with open(path, encoding="utf-8", errors="replace") as handle:
         content = handle.read()
     samples = []
+    spec = tokenizer.spec
     if path.lower().endswith(".jsonl") or path.lower().endswith(".json"):
         for line in content.splitlines():
             line = line.strip()
@@ -140,27 +209,37 @@ def read(path, tokenizer):
                 continue
             if not isinstance(item, dict):
                 continue
-            extra = {"system": item.get("system"), "tools": item.get("tools"), "effort": item.get("effort")}
-            if "messages" in item and isinstance(item["messages"], list):
-                samples.extend(conversation(tokenizer, item["messages"], **extra))
-            elif "context" in item and "compact" in item:
-                samples.append(Sample(prompt=str(item["context"]), response=str(item["compact"]), kind="compact"))
-            elif "prompt" in item and ("rejected" in item or "bad" in item):
-                prompt = tokenizer.prompt(str(item["prompt"]), extra["system"], extra["tools"], extra["effort"])
-                samples.append(Sample(prompt=prompt, response=str(item.get("rejected", item.get("bad"))), kind="negative"))
-            elif "prompt" in item:
-                messages = [
-                    {"role": "user", "content": str(item["prompt"])},
-                    {"role": "assistant", "content": str(item.get("response", "")), "thinking": item.get("thinking", "")},
-                ]
-                samples.extend(conversation(tokenizer, messages, **extra))
-            elif "text" in item:
-                samples.append(Sample(text=str(item["text"]), kind="text"))
+            levels = [None]
+            if spec.get("effort") and ("prompt" in item or "messages" in item):
+                levels = learned_at(item, spec)
+                levels += [level for level, source in (donors or {}).items() if source in levels and level not in levels]
+            for effort in levels:
+                samples.extend(_samples_of(item, tokenizer, effort))
     else:
         for block in content.split("\n\n"):
             if block.strip():
                 samples.append(Sample(text=block.strip(), kind="text"))
     return samples
+
+
+def _samples_of(item, tokenizer, effort):
+    extra = {"system": item.get("system"), "tools": item.get("tools"), "effort": effort}
+    if "messages" in item and isinstance(item["messages"], list):
+        return conversation(tokenizer, item["messages"], **extra)
+    if "context" in item and "compact" in item:
+        return [Sample(prompt=str(item["context"]), response=str(item["compact"]), kind="compact")]
+    if "prompt" in item and ("rejected" in item or "bad" in item):
+        prompt = tokenizer.prompt(str(item["prompt"]), extra["system"], extra["tools"], extra["effort"])
+        return [Sample(prompt=prompt, response=str(item.get("rejected", item.get("bad"))), kind="negative")]
+    if "prompt" in item:
+        messages = [
+            {"role": "user", "content": str(item["prompt"])},
+            {"role": "assistant", "content": str(item.get("response", "")), "thinking": item.get("thinking", "")},
+        ]
+        return conversation(tokenizer, messages, **extra)
+    if "text" in item:
+        return [Sample(text=str(item["text"]), kind="text")]
+    return []
 
 
 def compact_pair(tokenizer, sample):

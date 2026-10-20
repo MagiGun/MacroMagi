@@ -66,6 +66,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         settings_page: None,
         train: false,
         wait: None,
+        dataset: None,
     };
     let mut positional: Vec<&str> = Vec::new();
     let mut engine = None;
@@ -108,6 +109,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 options.wait = Some(seconds);
             }
             "--targets" => options.show_targets = true,
+            "--dataset" => options.dataset = Some(value("--dataset")?.to_owned()),
             "--select" => options.select_kind = Some(value("--select")?.to_owned()),
             "--settings" => {
                 let page = value("--settings")?.to_lowercase();

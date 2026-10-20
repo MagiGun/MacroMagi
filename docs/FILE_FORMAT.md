@@ -222,11 +222,14 @@ AI Watch and AI Model have `model` (the id of a `model` asset) and `settings`: v
 "params": { "model": "mdl-3a…", "settings": { "thresh": 60 }, "display": 0, "press": true, "duration_ms": 0, "max_fps": 0 }
 ```
 
-AI Agent (`ai.agent`) runs a text model. `max_tokens` 0 and `temperature` below 0 use the model's own settings.
+AI Agent (`ai.agent`) runs a text model. `max_tokens` 0, `temperature` below 0, `context` 0, `thinking` `"model"` and an empty `effort` use the model's own settings. `native_tools` runs the model's native tools, at most `max_steps` calls per request.
 
 ```json
-"params": { "model": "mdl-7c…", "request": "Say hello", "run_tools": false, "max_tokens": 0, "temperature": -1 }
+"params": { "model": "mdl-7c…", "request": "Say hello", "run_tools": false, "max_tokens": 0, "temperature": -1,
+            "thinking": "model", "effort": "", "context": 0, "native_tools": true, "max_steps": 6 }
 ```
+
+AI Load Model (`ai.load`) and AI Unload Model (`ai.unload`) have `model` only.
 
 ### Recordings
 
@@ -357,19 +360,22 @@ Missing fields take their defaults. Files from the first version, which had only
 
 A nodes preset may also carry `groups` whose blocks are all in it. When it is inserted, its nodes get fresh ids and its assets are imported (images, sounds and models are de-duplicated by content). Variables are not part of a preset: settings bound to a variable the receiving macro does not have use their defaults until it is created. This is also the format MacroMagi puts on the clipboard when blocks are copied, prefixed with `macromagi-nodes:`.
 
-## `.magic` – AI models
+## `.magic` – AI workspaces and models
 
-A `.magic` file is a ZIP archive holding a small AI model – a vision model or a text model – and everything needed to use it and train it further. The Magic tab reads and writes it; macros embed it as a `model` asset.
+A `.magic` file is a ZIP archive: a Magic tab **workspace** (the canvas, the setup, the datasets and pictures) and, unless a Magi package holds it, the AI model itself – a vision model or a text model. The Magic tab reads and writes it; macros embed it, with the model, as a `model` asset.
 
 ```text
 magic.json                    required – the description below
 model/model.onnx              the model, in ONNX format (left out when include.model is false)
-model/weights.safetensors     its weights, to train it further (models trained in MacroMagi; optional)
+model/weights.safetensors     its weights (models trained in MacroMagi; optional)
 data/text/<file>              text datasets: .jsonl, .md or .txt (optional)
 data/train/<class>/<file>     pictures of each answer, one folder per class (optional)
 data/not/<class>/<file>       pictures an answer was mistaken for (optional)
 data/tune/<class>/<file>      fine-tuning pictures of earlier versions (optional)
+nt/<tool>/<file>              the model's own native tools (optional)
 ```
+
+Since 0.1.6, compiling a text model writes a Magi package (below) and the workspace's `package` names it; the workspace then leaves out `model/` (`include.model` and `include.weights` false), and opening it takes the model from the package – the path given, or `szi/<file>` beside the workspace. A model asset in a macro always holds its model, and its weights when MacroMagi's native engine runs it.
 
 The weights are in the [safetensors](https://github.com/huggingface/safetensors) layout: an 8-byte header length, a JSON header, then raw little-endian tensors. They are data only; loading them runs no code.
 
@@ -414,7 +420,7 @@ The weights are in the [safetensors](https://github.com/huggingface/safetensors)
 | `kind` | `vision` (the default, and what files without it are) or `text`. |
 | `text` | Text models: how they read and write – see below. |
 | `architecture` | The shape of a model trained in MacroMagi, as the trainer builds it: `width`, `heads`, `kv_heads`, `context`, `positions` (`rope` or `learned`), `rope_theta`, optional `hyper_connections` (`{"streams", "sinkhorn"}`) and `mtp` (`{"weight"}`), `prefix_split`, `tied` and `embed_scale` (optional booleans), `layers` (one per layer: `{"attention": {"kind": "full" \| "window" \| "mla" \| "csa" \| "hca" \| "ssm", …}, "ffn": {"kind": "dense" \| "moe" \| "persona", …}, "norm": "pre" \| "sandwich"}`; `full` attention may have `qk_norm`, `bias`, `rotary` and `window`, a `dense` feed-forward `activation`: `swiglu` or `geglu`), `conv` for vision models, and `blocks`: the canvas blocks it was made from, each `{ "kind", "params", "ffn" }`. Models whose layers match the Llama, Qwen3 or Gemma 3 layout export to GGUF ([MAGIC.md](MAGIC.md#packages-magic-gguf-hugging-face)). |
-| `studio` | The Magic tab's canvas: `nodes`, `wires` and `groups` as in a [nodes preset](#kind-nodes), with the Magic tab's block types (`magic.*`, listed in [MAGIC.md](MAGIC.md#blocks)). Setup blocks keep their part of the model in `params.value` (Model Info: `name`, `description`, `author`, `license`, `source`; Text & Tools: the `text` object; Thinking: `text.thinking`; Reasoning Effort: `text.effort`; Screen Area: `capture`; Answers: `classes`; When It Acts: `action`; Sliders: `settings`; Picture Preparation: `input`), and the description above is what the setup blocks chained into the start say. Files without it get a canvas built from their description. |
+| `studio` | The Magic tab's canvas: `nodes`, `wires` and `groups` as in a [nodes preset](#kind-nodes), with the Magic tab's block types (`magic.*`, listed in [MAGIC.md](MAGIC.md#blocks)). Setup blocks keep their part of the model in `params.value` (Model Info: `name`, `description`, `author`, `license`, `source`; Text: the `text` object; Tools: the `text.tools` the program carries out; Native Tools: the `text.tools` with `native`; Thinking: `text.thinking`; Reasoning Effort: `text.effort`; Screen Area: `capture`; Answers: `classes`; When It Acts: `action`; Sliders: `settings`; Picture Preparation: `input`), and the description above is what the setup blocks chained into the start say. Files without it get a canvas built from their description. |
 | `gguf` | A GGUF model file the model runs with llama.cpp, where it is on disk. It is not inside the archive. |
 | `datasets` | The text datasets in the archive, by path (`data/text/…`). |
 | `trained` | What training the model went through: `stages` (`pretrain`, `sft`, `rl`, `compaction`, `vision`), `steps`, the final `loss`, `parameters`. |
@@ -440,7 +446,24 @@ A text model's `text`:
 
 Tokens are the 256 byte values of UTF-8 text (ids 0–255), then each of `specials` in order (ids 256 on); special tags are matched longest first. A request is `system_tag system end_tag user_tag request end_tag assistant_tag` (the system part only when there is one), and the answer ends at `end_tag`. The system part is the system prompt, then `Reasoning effort: <level>` (with `effort`), then the tools (with `tool_tag`), separated by blank lines – [MAGIC.md](MAGIC.md#how-text-is-read-and-written) shows it. With `thinking`, a request that does not think ends with an empty `think_tags` pair. Tool calls are `tool_tags.0` + `{"name": …, "arguments": {…}}` + `tool_tags.1`, and a tool's result is `tool_tag result end_tag`. `tool_tag`, `thinking` and `effort` are optional: files without `tool_tag` (made before it) keep their tokens, write calls with `"args"`, and read results as user turns. The ONNX model takes `tokens` (int64, `[1, length]`) and gives `logits` (`[1, length, vocabulary]`).
 
-A model asset inside a `.magi` file is the same archive with `training`, `finetune`, the datasets, the weights and their files left out.
+Since 0.1.6, `text.tools[].native` marks a native tool, `memory` is the Memory & Cache block's settings (`precision`, `hot_mb`, `warm_mb`, `disk_dir`, `disk_gb`, `persist_prefix`, `read_blocks`, `flash_attention`), `architecture.rope_scaling` is the Context Scaler's (`kind`: `yarn`, `ntk` or `none`; `factor`, `original`, `target`), `trained.system` is the system prompt the model was trained with, and `package` names its Magi package.
+
+A model asset inside a `.magi` file is the same archive with `training`, `finetune` and the datasets left out, and the weights too unless the native engine runs the model.
+
+## `.szi` – Magi models
+
+A Magi model is a folder, written by Compile Package (*Magi Model (.szi)*) into `<project>/szi/` and by a workspace exported as Python into `szi/`:
+
+```text
+<name>.szi            the description: JSON, below
+weights.safetensors   the weights (MacroMagi's native engine runs these)
+model.onnx            the same model for ONNX runtimes (optional)
+nt/<tool>/tool.json   each native tool: {"name", "description", "parameters", "run": {"kind": "python" | "command", "entry", "timeout_ms"}}
+nt/<tool>/run.py      its program: arguments as JSON on standard input, its result as JSON on standard output
+README.md             what it is
+```
+
+The `.szi` file is `{"format": "magi.szi", "version": 1, "app", "family", "files": {"weights", "onnx", "native_tools"}, …}` followed by the fields of `magic.json` (name, `kind`, `text`, `architecture`, `memory`, `trained`…) without the canvas and the datasets. `family` is `Magi-F` (up to a billion parameters), `Magi-S` (up to thirty billion) or `Magi-T`. MacroMagi opens it with File › Open, takes it as a base model, and CodeMagi will run it.
 
 ## Shared vocabulary
 
@@ -463,5 +486,5 @@ A model asset inside a `.magi` file is the same archive with `training`, `finetu
 `version` is a single integer per format, currently `1` for all three.
 
 - A reader **rejects** files with a higher version than it knows, with a message asking the user to update.
-- Within a version, changes are additive: new optional fields with defaults, new block types, new stroke types. Readers ignore fields they do not know. (`options`, `clicker`, `look` strokes and the extended Auto Clicker settings were added this way in 0.1.0; `variables`, bound settings, `groups`, `display` on positions and areas, the `key_down`/`key_up`/`mouse_down`/`mouse_up`/`display` strokes and `audio` assets in 0.1.1; `model` assets, image and sound lists with groups, `mode`, `detail`, `match_ms`, `device` and the variables' `reset` in 0.1.2; group `parent`, the `input.autotype` and `vision.read_text` blocks, AI Watch's `acted` output and mouse buttons as a model's key in 0.1.3; the `vision.screenshot`, `window.display`, `window.current` and `files.*` blocks, Image Detection's `picture` input and the Auto Typer's `ignore` in 0.1.4; the `ai.agent` block and the `.magic` fields `kind`, `text`, `architecture`, `studio`, `datasets`, `trained`, `gguf`, `negative` and the weights in 0.1.5. Files from earlier versions load unchanged; earlier versions may refuse files that use later additions.)
+- Within a version, changes are additive: new optional fields with defaults, new block types, new stroke types. Readers ignore fields they do not know. (`options`, `clicker`, `look` strokes and the extended Auto Clicker settings were added this way in 0.1.0; `variables`, bound settings, `groups`, `display` on positions and areas, the `key_down`/`key_up`/`mouse_down`/`mouse_up`/`display` strokes and `audio` assets in 0.1.1; `model` assets, image and sound lists with groups, `mode`, `detail`, `match_ms`, `device` and the variables' `reset` in 0.1.2; group `parent`, the `input.autotype` and `vision.read_text` blocks, AI Watch's `acted` output and mouse buttons as a model's key in 0.1.3; the `vision.screenshot`, `window.display`, `window.current` and `files.*` blocks, Image Detection's `picture` input and the Auto Typer's `ignore` in 0.1.4; the `ai.agent` block and the `.magic` fields `kind`, `text`, `architecture`, `studio`, `datasets`, `trained`, `gguf`, `negative` and the weights in 0.1.5; the `ai.load` and `ai.unload` blocks, AI Agent's `thinking`, `effort`, `context`, `native_tools` and `max_steps`, the `.magic` fields `package`, `memory`, `rope_scaling`, `trained.system` and `tools[].native`, `nt/` files, and `.szi` models in 0.1.6; the `magic.native_tools` block, Compile Package's `magic` and `lmstudio_quant`, and a list of levels as a dataset sample's `effort` in 0.1.7. Files from earlier versions load unchanged; earlier versions may refuse files that use later additions.)
 - A change that old readers would misread bumps the version, and the new reader migrates old files on load.

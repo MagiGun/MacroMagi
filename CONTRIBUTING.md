@@ -73,7 +73,7 @@ echo '{"show_variables": true}' > "$MACROMAGI_DATA_DIR/settings.json"
 cargo run --release -p magi-app -- --screenshot docs/images/functions.png --tab macro --example 3 --size 1280x820 --select flow.delay
 ```
 
-`--tab magic` opens the Magic tab, and a `.magic` file named on the command line opens in it. `--settings <page>` opens the settings window on a page (`general`, `appearance`, `hotkeys`, `recording`, `engine`, `ai`). `--targets` opens *View → Screen targets* at start; it covers the screen, so it is for checking the overlay by hand rather than for `--screenshot`.
+`--tab magic` opens the Magic tab, and a `.magic` file named on the command line opens in it. `--dataset <file>[:view]` opens a dataset file of the Magic tab's model (a new example model when none is open) in the dataset editor, such as `--dataset data/text/tools.jsonl:model` (views: `chat`, `model`, `raw`); `--dataset ""` opens the example model without the editor, for `--select`. `--settings <page>` opens the settings window on a page (`general`, `appearance`, `hotkeys`, `recording`, `engine`, `ai`). `--targets` opens *View → Screen targets* at start; it covers the screen, so it is for checking the overlay by hand rather than for `--screenshot`.
 
 ## Where things live
 

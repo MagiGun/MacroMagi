@@ -1293,9 +1293,29 @@ impl RunCx {
         }
         let seed =
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64);
-        let answer = loaded
-            .ask(&request, params.max_tokens as usize, params.temperature as f32, seed)
-            .map_err(|e| EngineError::new(e.0))?;
+        let options = magi_ml::AskOptions {
+            max_tokens: params.max_tokens as usize,
+            temperature: params.temperature as f32,
+            seed,
+            context: params.context as usize,
+            thinking: match params.thinking.as_str() {
+                "on" => Some(true),
+                "off" => Some(false),
+                _ => None,
+            },
+            effort: params.effort.trim().to_owned(),
+            ..Default::default()
+        };
+        let steps = if params.native_tools { params.max_steps as usize } else { 0 };
+        let done = loaded.ask(&request, &options, steps).map_err(|e| EngineError::new(e.0))?;
+        for step in &done.steps {
+            self.monitor.log(
+                LogLevel::Info,
+                Some(node),
+                format!("{}  {}  ›  {}", step.call.name, step.call.args, step.result),
+            );
+        }
+        let answer = done.answer;
         if params.run_tools {
             for call in &answer.tools {
                 self.agent_tool(call, node)?;
@@ -1310,6 +1330,19 @@ impl RunCx {
         outputs.insert("calls".into(), serde_json::json!(answer.tools.len()));
         outputs.insert("raw".into(), Value::String(answer.raw));
         Ok(outputs)
+    }
+
+    /// Loads a text model now (an **AI Load Model** block).
+    pub fn ai_load(&mut self, model: &str) -> OpResult<()> {
+        let loaded = self.program.text_model(model)?;
+        loaded.warm_up().map_err(|e| EngineError::new(e.0))?;
+        Ok(())
+    }
+
+    /// Unloads a text model (an **AI Unload Model** block).
+    pub fn ai_unload(&mut self, model: &str) -> OpResult<()> {
+        self.program.unload_text_model(model);
+        Ok(())
     }
 
     /// Carries out one tool call of an AI Agent block. Tools MacroMagi does

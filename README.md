@@ -14,7 +14,7 @@ MacroMagi is a small, portable desktop tool for automating keyboard, mouse and c
   <img src="docs/images/recording.png" alt="A Play Recording block with its information card, and its timeline, Trim and Cut in the block settings" width="500">
 </p>
 
-> **Status: early development (0.1.5, unreleased).** The features below work and are covered by tests, but things will change. Windows is the tested platform; see [Platform support](#platform-support).
+> **Status: early development (0.1.6, unreleased).** The features below work and are covered by tests, but things will change. Windows is the tested platform; see [Platform support](#platform-support).
 
 ## Contents
 
@@ -260,12 +260,14 @@ Select a block to change it and see what is wired into it. [docs/MAGIC.md](docs/
 
 **Text models** read a request and write an answer; they can think first – at a chosen effort – and call the tools they are offered.
 
-1. **File › New text model** opens a working example: **Magi**, a small assistant with Thinking and Reasoning Effort set up, general tools (web search, calculator, weather, time) and small example datasets of plain English, reasoning, tool use and chat titles.
-2. Select **Compile .magic Package** and choose the folder it saves into.
+1. **File › New text model** opens a working example: **Magi**, a tiny Magi-F1 model with Thinking and Reasoning Effort (standard or superior), native tools it runs itself (web search, calculator, weather, time), YaRN to 32K tokens, and its training recipe – pretraining, fine-tuning and reinforcement learning on its own datasets and on ones taken from open datasets (simple texts, conversations, math, Python, tool calls; credited in [SOURCES.md](crates/magi-core/src/nodes/examples/SOURCES.md)).
+2. Select **Compile Package** and choose the folder it saves into.
 3. **Train** (in the banner). The console shows each stage, the loss and any warnings; the model is saved into the folder when training ends – as a `.magic` file, and as a `.gguf` for LM Studio and llama.cpp. Training needs PyTorch (*Settings › Runtime*) and runs on the graphics cards chosen under *Settings › Hardware*.
-4. **Prompt Model**: load it once, set its context window, thinking and effort, ask it something, and see its answer, its thinking and its tool calls. **Use in Macro** (in Compile) puts it into the macro with an **AI Agent** block; **Add to LM Studio** puts the GGUF into LM Studio with its Enable Thinking and Reasoning Effort controls.
+4. **Prompt Model**: ask it something on MacroMagi's native engine (a key/value cache: milliseconds a token), with its context window, thinking and effort; it runs its native tools and answers with their results. **Use in Macro** (in Compile) puts it into the macro between **AI Load Model** and **AI Unload Model**, with an **AI Agent** block; a stopped macro unloads its models anyway. **Add to LM Studio** puts it into LM Studio once, with its Enable Thinking and Reasoning Effort controls and the tool-use badge.
 
-Swap in another architecture from **Presets › Commons** – Magi, Qwen3, Qwen3 Thinking, Gemma 3, Mistral, GLM-4, DeepSeek-V4 (compressed sparse and heavily compressed attention, DeepSeekMoE, hyper-connections, multi-token prediction), DeepSeek-V3 (latent attention, DeepSeekMoE) or Llama – or build your own from the blocks and save it under Presets. Add **Reinforcement Learning** with reward rules (right answer, valid tool calls, short answers, no loops) after fine-tuning. Datasets are written and checked in the dataset editor.
+Compiling writes one folder per project: the `.magic` workspace, the **Magi package** (`.szi`: the model, its weights and native tools), and if you like GGUF, Hugging Face and ONNX. **File › Export as Python** writes the workspace as a folder with `run.py` that trains the same model without MacroMagi. The **Context Scaler** block trains short and runs long (YaRN, up to 256K tokens), and **Memory & Cache** keeps long contexts in hot, warm and on-disk tiers.
+
+Swap in another architecture from **Presets › Commons** – Magi, Qwen3, Qwen3 Thinking, Gemma 3, Mistral, GLM-4, DeepSeek-V4 (compressed sparse and heavily compressed attention, DeepSeekMoE, hyper-connections, multi-token prediction), DeepSeek-V3 (latent attention, DeepSeekMoE) or Llama – or build your own from the blocks and save it under Presets. Add **Reinforcement Learning** with reward rules (right answer, valid tool calls, short answers, no loops) after fine-tuning. Datasets are written in the **dataset editor** – as the chat they teach, as the model reads them, or as JSON – with reasoning efforts per sample (several at once), and *Scan for issues* finds problems, repeats, overlong samples, efforts without samples and words the pretraining text never uses.
 
 **GGUF models** from LM Studio, Hugging Face or Ollama import with *File › Import*, run with llama.cpp (*Settings › Runtime*), and work in the AI Agent block like models trained here.
 

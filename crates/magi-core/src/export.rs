@@ -92,7 +92,7 @@ pub fn write_safetensors(tensors: &[(String, &Tensor)], metadata: Option<Value>)
     out
 }
 
-fn f16_to_f32(h: u16) -> f32 {
+pub fn f16_to_f32(h: u16) -> f32 {
     let sign = u32::from(h >> 15) << 31;
     let exp = u32::from((h >> 10) & 0x1f);
     let frac = u32::from(h & 0x3ff);
@@ -193,21 +193,33 @@ fn jinja_str(text: &str) -> String {
 /// the reasoning effort (`reasoning_effort`) and the tools offered, tool
 /// results in their own turns, and an empty thinking span when thinking is
 /// off (`enable_thinking`). Earlier answers lose their reasoning.
+///
+/// It is laid out the way common tool-calling templates are (tools listed one
+/// by one, calls and tool turns written directly), which is how LM Studio
+/// tells that a model was trained to call tools.
 pub fn chat_template(text: &TextSpec) -> String {
     let s = jinja_str;
     let (system, user, assistant, end) = (&text.system_tag, &text.user_tag, &text.assistant_tag, &text.end_tag);
     let (think_open, think_close) = (&text.think_tags.0, &text.think_tags.1);
+    let with_tools = !text.tool_tag.is_empty();
     let mut t = String::new();
-    t.push_str("{%- set ns = namespace(system='', content='', last_user=-1) -%}");
-    t.push_str(
-        "{%- if messages and messages[0].role == 'system' -%}\
-         {%- if messages[0].content is string -%}{%- set ns.system = messages[0].content | trim -%}{%- endif -%}\
-         {%- set rest = messages[1:] -%}\
-         {%- else -%}{%- set rest = messages -%}{%- endif -%}",
-    );
+    // A message's text, whether it is a string or a list of parts.
+    let content = |var: &str| {
+        format!(
+            "{{%- if {var}.content is string -%}}{{%- set ns.content = {var}.content -%}}\
+             {{%- else -%}}{{%- set ns.content = '' -%}}\
+             {{%- for part in {var}.content or [] -%}}{{%- if part.text is defined -%}}{{%- set ns.content = ns.content + part.text -%}}{{%- endif -%}}{{%- endfor -%}}\
+             {{%- endif -%}}"
+        )
+    };
+    t.push_str("{%- set ns = namespace(content='', last_user=-1) -%}");
+    t.push_str("{%- set system_text = '' -%}");
+    t.push_str("{%- if messages and messages[0].role == 'system' -%}");
+    t.push_str(&content("messages[0]"));
+    t.push_str("{%- set system_text = ns.content | trim -%}{%- endif -%}");
     if !text.system.trim().is_empty() {
         t.push_str(&format!(
-            "{{%- if not ns.system -%}}{{%- set ns.system = {} -%}}{{%- endif -%}}",
+            "{{%- if not system_text -%}}{{%- set system_text = {} -%}}{{%- endif -%}}",
             s(text.system.trim())
         ));
     }
@@ -215,23 +227,36 @@ pub fn chat_template(text: &TextSpec) -> String {
         let levels: Vec<String> = effort.levels.iter().map(|l| s(l)).collect();
         t.push_str(&format!(
             "{{%- if reasoning_effort is defined and reasoning_effort in [{levels}] -%}}\
-             {{%- set effort = reasoning_effort -%}}{{%- else -%}}{{%- set effort = {default} -%}}{{%- endif -%}}\
-             {{%- if ns.system -%}}{{%- set ns.system = ns.system + '\\n\\n' -%}}{{%- endif -%}}\
-             {{%- set ns.system = ns.system + 'Reasoning effort: ' + effort -%}}",
+             {{%- set effort = reasoning_effort -%}}{{%- else -%}}{{%- set effort = {default} -%}}{{%- endif -%}}",
             levels = levels.join(", "),
             default = s(&effort.default),
         ));
     }
-    if !text.tool_tag.is_empty() {
+    // The system turn: the system text, the effort and the tools, separated by blank lines.
+    let mut any = vec!["system_text"];
+    if text.effort.is_some() {
+        any.push("true");
+    }
+    if with_tools {
+        any.push("tools");
+    }
+    t.push_str(&format!("{{%- if {} -%}}{{{{- {} }}}}", any.join(" or "), s(system)));
+    t.push_str("{%- if system_text -%}{{- system_text }}{%- endif -%}");
+    if text.effort.is_some() {
+        t.push_str("{%- if system_text -%}{{- '\n\n' }}{%- endif -%}{{- 'Reasoning effort: ' + effort }}");
+    }
+    if with_tools {
+        let before = if text.effort.is_some() { "true" } else { "system_text" };
         t.push_str(&format!(
             "{{%- if tools -%}}\
-             {{%- if ns.system -%}}{{%- set ns.system = ns.system + '\\n\\n' -%}}{{%- endif -%}}\
-             {{%- set ns.system = ns.system + 'You can use these tools:' -%}}\
+             {{%- if {before} -%}}{{{{- '\n\n' }}}}{{%- endif -%}}\
+             {{{{- 'You can use these tools:' }}}}\
              {{%- for tool in tools -%}}\
-             {{%- if tool.function is defined -%}}{{%- set t = tool.function -%}}{{%- else -%}}{{%- set t = tool -%}}{{%- endif -%}}\
-             {{%- set ns.system = ns.system + '\\n- ' + t.name + ': ' + ((t.description or '') | trim) + ' Parameters: ' + (t.parameters | tojson) -%}}\
+             {{%- if tool.function is defined -%}}{{%- set tool = tool.function -%}}{{%- endif -%}}\
+             {{{{- '\n- ' + tool.name + ': ' + (tool.description | default('') | trim) + ' Parameters: ' }}}}\
+             {{{{- tool.parameters | tojson }}}}\
              {{%- endfor -%}}\
-             {{%- set ns.system = ns.system + {how} -%}}\
+             {{{{- {how} }}}}\
              {{%- endif -%}}",
             how = s(&format!(
                 "\nTo use one, write {}{{\"name\": \"<tool name>\", \"arguments\": {{...}}}}{}. Its result comes back in the next turn.",
@@ -239,27 +264,32 @@ pub fn chat_template(text: &TextSpec) -> String {
             )),
         ));
     }
-    t.push_str(&format!("{{%- if ns.system -%}}{{{{- {} + ns.system + {} -}}}}{{%- endif -%}}", s(system), s(end)));
+    t.push_str(&format!("{{{{- {} }}}}{{%- endif -%}}", s(end)));
     // Reasoning sent back is shown only since the last request, as the model's own tool loop.
-    t.push_str("{%- for message in rest -%}{%- if message.role == 'user' -%}{%- set ns.last_user = loop.index0 -%}{%- endif -%}{%- endfor -%}");
-    t.push_str(
-        "{%- for message in rest -%}\
-         {%- if message.content is string -%}{%- set ns.content = message.content -%}\
-         {%- else -%}{%- set ns.content = '' -%}\
-         {%- for part in message.content or [] -%}{%- if part.text is defined -%}{%- set ns.content = ns.content + part.text -%}{%- endif -%}{%- endfor -%}\
-         {%- endif -%}",
-    );
+    t.push_str("{%- for message in messages -%}{%- if message.role == 'user' -%}{%- set ns.last_user = loop.index0 -%}{%- endif -%}{%- endfor -%}");
+    t.push_str("{%- for message in messages -%}");
+    t.push_str(&content("message"));
     t.push_str(&format!(
-        "{{%- if message.role == 'assistant' -%}}\
+        "{{%- if message.role == 'user' -%}}{{{{- {user} + ns.content + {end} }}}}\
+         {{%- elif message.role == 'system' -%}}{{%- if not loop.first -%}}{{{{- {system} + ns.content + {end} }}}}{{%- endif -%}}\
+         {{%- elif message.role == 'assistant' -%}}\
          {{%- if {close} in ns.content -%}}{{%- set ns.content = ns.content.split({close})[-1] | trim -%}}{{%- endif -%}}\
-         {{{{- {assistant} -}}}}         {{%- if message.reasoning_content is defined and message.reasoning_content is string and message.reasoning_content and loop.index0 > ns.last_user -%}}         {{{{- {open} + (message.reasoning_content | trim) + {close} -}}}}{{%- endif -%}}         {{{{- ns.content -}}}}\
-         {{%- for call in message.tool_calls or [] -%}}\
-         {{%- if call.function is defined -%}}{{%- set call = call.function -%}}{{%- endif -%}}\
-         {{{{- {open_call} + call.name + '\", \"arguments\": ' -}}}}\
-         {{%- if call.arguments is string -%}}{{{{- call.arguments -}}}}{{%- else -%}}{{{{- call.arguments | tojson -}}}}{{%- endif -%}}\
-         {{{{- '}}' + {close_call} -}}}}\
+         {{{{- {assistant} }}}}\
+         {{%- if message.reasoning_content is string and message.reasoning_content and loop.index0 > ns.last_user -%}}\
+         {{{{- {open} + (message.reasoning_content | trim) + {close} }}}}\
+         {{%- endif -%}}\
+         {{{{- ns.content }}}}\
+         {{%- if message.tool_calls -%}}\
+         {{%- for tool_call in message.tool_calls -%}}\
+         {{%- if tool_call.function is defined -%}}{{%- set tool_call = tool_call.function -%}}{{%- endif -%}}\
+         {{{{- {open_call} + tool_call.name + '\", \"arguments\": ' }}}}\
+         {{%- if tool_call.arguments is string -%}}{{{{- tool_call.arguments }}}}{{%- else -%}}{{{{- tool_call.arguments | tojson }}}}{{%- endif -%}}\
+         {{{{- '}}' + {close_call} }}}}\
          {{%- endfor -%}}\
-         {{{{- {end} -}}}}",
+         {{%- endif -%}}\
+         {{{{- {end} }}}}",
+        user = s(user),
+        system = s(system),
         close = s(think_close),
         open = s(think_open),
         assistant = s(assistant),
@@ -267,35 +297,20 @@ pub fn chat_template(text: &TextSpec) -> String {
         close_call = s(&text.tool_tags.1),
         end = s(end),
     ));
-    if text.tool_tag.is_empty() {
-        t.push_str(&format!(
-            "{{%- elif message.role == 'tool' -%}}{{{{- {user} + 'Tool result: ' + ns.content + {end} -}}}}",
-            user = s(user),
-            end = s(end)
-        ));
-    } else {
-        t.push_str(&format!(
-            "{{%- elif message.role == 'tool' -%}}{{{{- {tool} + ns.content + {end} -}}}}",
-            tool = s(&text.tool_tag),
-            end = s(end)
-        ));
-    }
+    let tool_turn = if with_tools { s(&text.tool_tag) } else { format!("{} + 'Tool result: '", s(user)) };
     t.push_str(&format!(
-        "{{%- elif message.role == 'system' -%}}{{{{- {system} + ns.content + {end} -}}}}\
-         {{%- else -%}}{{{{- {user} + ns.content + {end} -}}}}\
+        "{{%- elif message.role == 'tool' -%}}{{{{- {tool_turn} + ns.content + {end} }}}}\
          {{%- endif -%}}{{%- endfor -%}}",
-        system = s(system),
-        user = s(user),
-        end = s(end),
+        end = s(end)
     ));
-    t.push_str(&format!("{{%- if add_generation_prompt -%}}{{{{- {} -}}}}", s(assistant)));
+    t.push_str(&format!("{{%- if add_generation_prompt -%}}{{{{- {} }}}}", s(assistant)));
     let empty = s(&format!("{think_open}{think_close}"));
     match &text.thinking {
         Some(thinking) if thinking.on_by_default => t.push_str(&format!(
-            "{{%- if enable_thinking is defined and enable_thinking is false -%}}{{{{- {empty} -}}}}{{%- endif -%}}"
+            "{{%- if enable_thinking is defined and enable_thinking is false -%}}{{{{- {empty} }}}}{{%- endif -%}}"
         )),
         Some(_) => t.push_str(&format!(
-            "{{%- if not (enable_thinking is defined and enable_thinking) -%}}{{{{- {empty} -}}}}{{%- endif -%}}"
+            "{{%- if not (enable_thinking is defined and enable_thinking) -%}}{{{{- {empty} }}}}{{%- endif -%}}"
         )),
         None => {}
     }
@@ -581,6 +596,23 @@ pub fn describe(model: &MagicModel, weights: &[u8]) -> Result<Exported> {
     Ok(Exported { arch: layout.arch, parameters })
 }
 
+/// The longest text a model runs at: its Context Scaler's target, or what it
+/// was trained at. Written as the GGUF's context length so llama.cpp allows it.
+fn context_of(a: &Architecture) -> u32 {
+    a.rope_scaling.as_ref().map_or(a.context, |s| s.target.max(a.context))
+}
+
+/// The rotary base a model runs with: raised for NTK scaling.
+fn rope_base(a: &Architecture) -> f64 {
+    match a.rope_scaling.as_ref().filter(|s| s.kind == "ntk" && s.factor > 1.0 && s.static_in_exports) {
+        Some(s) => {
+            let dim = f64::from(a.width / a.heads.max(1));
+            a.rope_theta * s.factor.powf(dim / (dim - 2.0).max(1.0))
+        }
+        None => a.rope_theta,
+    }
+}
+
 /// A GGUF file of a trained text model, in half precision.
 pub fn gguf(model: &MagicModel, weights: &[u8]) -> Result<Vec<u8>> {
     gguf_with(model, weights, Quant::F16)
@@ -621,13 +653,13 @@ pub fn gguf_with(model: &MagicModel, weights: &[u8], quant: Quant) -> Result<Vec
         ("general.file_type".into(), Meta::U32(quant.file_type())),
         ("general.quantization_version".into(), Meta::U32(2)),
         ("general.alignment".into(), Meta::U32(ALIGN as u32)),
-        (key("context_length"), Meta::U32(a.context)),
+        (key("context_length"), Meta::U32(context_of(a))),
         (key("embedding_length"), Meta::U32(a.width)),
         (key("block_count"), Meta::U32(layout.layers as u32)),
         (key("feed_forward_length"), Meta::U32(layout.hidden as u32)),
         (key("attention.head_count"), Meta::U32(a.heads)),
         (key("attention.head_count_kv"), Meta::U32(a.kv_heads)),
-        (key("rope.freq_base"), Meta::F32(a.rope_theta as f32)),
+        (key("rope.freq_base"), Meta::F32(rope_base(a) as f32)),
         (key("attention.layer_norm_rms_epsilon"), Meta::F32(NORM_EPS)),
         (key("vocab_size"), Meta::U32(layout.vocab as u32)),
     ];
@@ -636,6 +668,13 @@ pub fn gguf_with(model: &MagicModel, weights: &[u8], quant: Quant) -> Result<Vec
     } else {
         meta.push((key("attention.key_length"), Meta::U32(dim as u32)));
         meta.push((key("attention.value_length"), Meta::U32(dim as u32)));
+    }
+    if let Some(scaling) = a.rope_scaling.as_ref().filter(|s| s.kind == "yarn" && s.factor > 1.0 && s.static_in_exports)
+    {
+        // llama.cpp and LM Studio read these and stretch positions the same way.
+        meta.push((key("rope.scaling.type"), Meta::Str("yarn".into())));
+        meta.push((key("rope.scaling.factor"), Meta::F32(scaling.factor as f32)));
+        meta.push((key("rope.scaling.original_context_length"), Meta::U32(scaling.original)));
     }
     if arch == "gemma3" {
         // No window: one as long as the context, so every layer sees everything.
@@ -768,7 +807,7 @@ pub fn lmstudio_model_yaml(
         arch = exported.arch,
         size = size_label(exported.parameters),
         memory = gguf_bytes + gguf_bytes / 4 + 64 * 1024 * 1024,
-        context = a.context,
+        context = context_of(a),
         tools = !text.tool_tag.is_empty(),
     ));
     y.push_str(&format!(
@@ -932,9 +971,12 @@ pub fn huggingface(model: &MagicModel, weights: &[u8], folder: &Path) -> Result<
         "num_attention_heads": a.heads,
         "num_key_value_heads": a.kv_heads,
         "head_dim": a.width / a.heads,
-        "max_position_embeddings": a.context,
+        "max_position_embeddings": context_of(a),
         "rms_norm_eps": NORM_EPS,
-        "rope_theta": a.rope_theta,
+        "rope_theta": rope_base(a),
+        "rope_scaling": a.rope_scaling.as_ref().filter(|s| s.kind == "yarn" && s.factor > 1.0 && s.static_in_exports).map(|s| json!({
+            "rope_type": "yarn", "factor": s.factor, "original_max_position_embeddings": s.original,
+        })),
         "vocab_size": layout.vocab,
         "hidden_act": "silu",
         "tie_word_embeddings": layout.tied,
@@ -1134,11 +1176,29 @@ mod tests {
         };
         let template = chat_template(&text);
         assert!(template.contains("'<|user|>' + ns.content + '<|end|>'"));
-        assert!(template.contains("reasoning_effort in ['low', 'medium', 'high']"));
+        assert!(template.contains("{%- for tool in tools -%}"));
+        assert!(template.contains("reasoning_effort in ['none', 'low', 'medium', 'high']"));
         assert!(template.contains("enable_thinking is defined and enable_thinking is false"));
         assert!(template.contains("'<|tool|>' + ns.content"));
         assert!(template.ends_with("{%- endif -%}"));
         assert_eq!(template.matches("{%").count(), template.matches("%}").count());
+        // To render it elsewhere (a Jinja check against the trainer's prompts).
+        if let Ok(dir) = std::env::var("MAGI_TEST_TEMPLATE_DIR") {
+            let dir = std::path::Path::new(&dir);
+            let mut magi = TextSpec {
+                system: "You are Magi.".into(),
+                tools: crate::nodes::studio::example_tools(),
+                thinking: Some(crate::magic::ThinkingSpec::default()),
+                effort: Some(crate::nodes::studio::magi_effort()),
+                ..TextSpec::default()
+            };
+            magi.ensure_specials();
+            let plain = TextSpec { tool_tag: String::new(), ..TextSpec::default() };
+            for (name, spec) in [("magi", &magi), ("tagged", &text), ("plain", &plain)] {
+                std::fs::write(dir.join(format!("{name}.jinja")), chat_template(spec)).unwrap();
+                std::fs::write(dir.join(format!("{name}.json")), serde_json::to_vec(spec).unwrap()).unwrap();
+            }
+        }
     }
 
     #[test]

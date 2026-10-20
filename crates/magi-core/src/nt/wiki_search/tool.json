@@ -1,0 +1,21 @@
+{
+  "name": "wiki_search",
+  "description": "Searches the local wiki – folders of Markdown notes – for pages about something, and gives where to read on.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "what to look for"
+      }
+    },
+    "required": [
+      "query"
+    ]
+  },
+  "run": {
+    "kind": "python",
+    "entry": "run.py",
+    "timeout_ms": 60000
+  }
+}

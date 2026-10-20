@@ -176,6 +176,16 @@ impl NativeNodes {
             interp.outputs.insert(node.id, outputs);
             Ok(Next::out())
         });
+        nodes.flow(ids::AI_LOAD, |interp, node| {
+            let p: magi_core::nodes::ai::AiModelParams = interp.params(node)?;
+            interp.cx.ai_load(&p.model)?;
+            Ok(Next::out())
+        });
+        nodes.flow(ids::AI_UNLOAD, |interp, node| {
+            let p: magi_core::nodes::ai::AiModelParams = interp.params(node)?;
+            interp.cx.ai_unload(&p.model)?;
+            Ok(Next::out())
+        });
         nodes.value(ids::AI_CLASSIFY, |interp, node| {
             let p: AiParams = interp.params(node)?;
             interp.cx.ai_classify(&p)

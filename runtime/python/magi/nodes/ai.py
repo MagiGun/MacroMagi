@@ -34,3 +34,18 @@ def ai_agent(run, node):
     run.waited = True
     run.outputs[node["id"]] = run.host.call("ai_agent", params=node["params"], wired=wired, value=value, node=node["id"])
     return OUT
+
+
+@flow_node("ai.load")
+def ai_load(run, node):
+    """Loads a text model now; the app keeps it loaded."""
+    run.waited = True
+    run.host.call("ai_load", model=node["params"].get("model", ""))
+    return OUT
+
+
+@flow_node("ai.unload")
+def ai_unload(run, node):
+    """Unloads a text model, freeing its memory."""
+    run.host.call("ai_unload", model=node["params"].get("model", ""))
+    return OUT

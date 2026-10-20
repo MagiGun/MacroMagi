@@ -97,7 +97,7 @@ impl Snip {
     /// `Some(None)` if they cancelled, `Some(Some(outcome))` when done.
     pub fn show(&mut self, ctx: &egui::Context) -> Option<Option<SnipOutcome>> {
         let mut builder = egui::ViewportBuilder::default()
-            .with_title("MacroMagi – pick on screen")
+            .with_title("Pick on screen • MacroMagi")
             .with_decorations(false)
             .with_fullscreen(true)
             .with_always_on_top()

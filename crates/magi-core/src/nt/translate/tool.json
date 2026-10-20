@@ -1,0 +1,30 @@
+{
+  "name": "translate",
+  "description": "Translates text from one language to another.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "text": {
+        "type": "string",
+        "description": "what to translate"
+      },
+      "to": {
+        "type": "string",
+        "description": "the language to translate into, such as en or de"
+      },
+      "source": {
+        "type": "string",
+        "description": "its language; empty: English"
+      }
+    },
+    "required": [
+      "text",
+      "to"
+    ]
+  },
+  "run": {
+    "kind": "python",
+    "entry": "run.py",
+    "timeout_ms": 60000
+  }
+}

@@ -80,6 +80,8 @@ pub mod ids {
     pub const AI_WATCH: &str = "ai.watch";
     pub const AI_CLASSIFY: &str = "ai.classify";
     pub const AI_AGENT: &str = "ai.agent";
+    pub const AI_LOAD: &str = "ai.load";
+    pub const AI_UNLOAD: &str = "ai.unload";
 }
 
 /// Ids of ports that engines and the editor refer to by name.

@@ -1,0 +1,21 @@
+{
+  "name": "web_search",
+  "description": "Searches the web and returns the top results: title, address and a short snippet.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "what to search for"
+      }
+    },
+    "required": [
+      "query"
+    ]
+  },
+  "run": {
+    "kind": "python",
+    "entry": "run.py",
+    "timeout_ms": 60000
+  }
+}

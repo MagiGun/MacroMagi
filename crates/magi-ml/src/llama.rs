@@ -63,7 +63,7 @@ impl Drop for Server {
 }
 
 /// Running servers, by model and context window.
-type Servers = HashMap<(PathBuf, usize), Arc<Mutex<Server>>>;
+type Servers = HashMap<(PathBuf, usize, String), Arc<Mutex<Server>>>;
 
 static SERVERS: Mutex<Option<Servers>> = Mutex::new(None);
 
@@ -133,12 +133,18 @@ fn not_installed() -> MlError {
 }
 
 /// The server of a model, started when needed.
-fn server(model: &Path, context: usize) -> Result<Arc<Mutex<Server>>, MlError> {
+fn server(model: &Path, context: usize, options: &crate::AskOptions) -> Result<Arc<Mutex<Server>>, MlError> {
     let config = llama().ok_or_else(not_installed)?;
     if !config.server.is_file() {
         return Err(not_installed());
     }
-    let key = (model.to_path_buf(), context.max(256));
+    let cache = format!(
+        "{}{}{}",
+        options.kv_cache,
+        if options.flash_attention { "+fa" } else { "" },
+        options.scaling.as_ref().map_or(0.0, |s| s.factor)
+    );
+    let key = (model.to_path_buf(), context.max(256), cache);
     if let Some(found) = SERVERS.lock().unwrap_or_else(|p| p.into_inner()).as_ref().and_then(|m| m.get(&key)).cloned() {
         let alive = found.lock().unwrap_or_else(|p| p.into_inner()).child.try_wait().ok().flatten().is_none();
         if alive {
@@ -157,11 +163,29 @@ fn server(model: &Path, context: usize) -> Result<Arc<Mutex<Server>>, MlError> {
         .args(["--ctx-size", &context.max(256).to_string()])
         .args(["--n-gpu-layers", &config.gpu_layers.to_string()])
         .args(["--parallel", "1"])
+        .args(["--flash-attn", if options.flash_attention { "on" } else { "auto" }])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     if !config.devices.is_empty() {
         command.args(["--device", &config.devices.join(",")]);
+    }
+    // Past the trained context, positions are stretched (unless the file does it itself).
+    if let Some(s) = options.scaling.as_ref().filter(|s| !s.static_in_exports && s.factor > 1.0 && s.kind != "none")
+        && context > s.original as usize
+    {
+        let factor = (context as f64 / f64::from(s.original.max(1))).min(s.factor);
+        if s.kind == "yarn" {
+            command.args(["--rope-scaling", "yarn", "--yarn-orig-ctx", &s.original.to_string()]);
+        } else {
+            // NTK has no llama.cpp switch of its own: linear interpolation is the nearest.
+            command.args(["--rope-scaling", "linear"]);
+        }
+        command.args(["--rope-scale", &format!("{factor}")]);
+    }
+    // A quantized cache holds four or eight times the text in the same memory.
+    if ["f32", "f16", "q8_0", "q4_0"].contains(&options.kv_cache.as_str()) {
+        command.args(["--cache-type-k", &options.kv_cache, "--cache-type-v", &options.kv_cache]);
     }
     if let Some(split) = &config.split {
         command.args(["--tensor-split", split]);
@@ -308,8 +332,8 @@ pub fn ask_gguf(
 }
 
 /// Loads a GGUF model now (starts its server), so the first request is quick.
-pub fn load_gguf(model: &Path, spec: &TextSpec, own: bool, context: usize) -> Result<(), MlError> {
-    server(model, gguf_context(spec, own, context)).map(|_| ())
+pub fn load_gguf(model: &Path, spec: &TextSpec, own: bool, options: &crate::AskOptions) -> Result<(), MlError> {
+    server(model, gguf_context(spec, own, options.context), options).map(|_| ())
 }
 
 fn gguf_context(spec: &TextSpec, own: bool, context: usize) -> usize {
@@ -328,35 +352,15 @@ pub fn ask_gguf_with(
     request_text: &str,
     options: &crate::AskOptions,
 ) -> Result<Answer, MlError> {
-    let (max_tokens, temperature, seed) = (options.max_tokens, options.temperature, options.seed);
-    let context = gguf_context(spec, own, options.context);
-    let server = server(model, context)?;
-    let port = server.lock().unwrap_or_else(|p| p.into_inner()).port;
-    let max = if max_tokens == 0 { spec.max_tokens as usize } else { max_tokens };
-    let temperature = if temperature < 0.0 { spec.temperature } else { temperature };
-    let timeout = Duration::from_secs(600);
     let raw = if own {
-        let prompt: Vec<u32> = spec.encode(&spec.prompt_with(request_text, options.thinking, &options.effort));
-        let body = json!({
-            "prompt": prompt, "n_predict": max, "temperature": temperature, "top_k": spec.top_k,
-            "seed": seed as u32, "return_tokens": true, "cache_prompt": true,
-        });
-        let (status, bytes) = request(port, "POST", "/completion", Some(&body), timeout)?;
-        let answer: Value =
-            serde_json::from_slice(&bytes).map_err(|_| MlError::new(format!("llama.cpp answered {status}")))?;
-        if status != 200 {
-            return Err(MlError::new(format!(
-                "llama.cpp: {}",
-                answer.pointer("/error/message").and_then(Value::as_str).unwrap_or("it failed")
-            )));
-        }
-        let end = spec.special_id(&spec.end_tag);
-        let tokens: Vec<u32> = answer["tokens"]
-            .as_array()
-            .map(|t| t.iter().filter_map(Value::as_u64).map(|t| t as u32).take_while(|t| Some(*t) != end).collect())
-            .unwrap_or_default();
-        if tokens.is_empty() { answer["content"].as_str().unwrap_or_default().to_owned() } else { spec.decode(&tokens) }
+        complete_gguf(model, spec, &spec.prompt_with(request_text, options.thinking, &options.effort), options)?
     } else {
+        let context = gguf_context(spec, own, options.context);
+        let server = server(model, context, options)?;
+        let port = server.lock().unwrap_or_else(|p| p.into_inner()).port;
+        let max = if options.max_tokens == 0 { spec.max_tokens as usize } else { options.max_tokens };
+        let temperature = if options.temperature < 0.0 { spec.temperature } else { options.temperature };
+        let (seed, timeout) = (options.seed, Duration::from_secs(600));
         let mut messages = Vec::new();
         let system = system_for(spec);
         if !system.is_empty() {
@@ -383,6 +387,44 @@ pub fn ask_gguf_with(
         }
     };
     Ok(Answer { text: spec.visible(&raw), thinking: spec.thinking(&raw), tools: spec.tool_calls(&raw), raw })
+}
+
+/// What a model trained in MacroMagi writes after a prompt (in its chat
+/// template), as raw text: sent and read back as token ids.
+pub fn complete_gguf(
+    model: &Path,
+    spec: &TextSpec,
+    text: &str,
+    options: &crate::AskOptions,
+) -> Result<String, MlError> {
+    let context = gguf_context(spec, true, options.context);
+    let server = server(model, context, options)?;
+    let port = server.lock().unwrap_or_else(|p| p.into_inner()).port;
+    let max = if options.max_tokens == 0 { spec.max_tokens as usize } else { options.max_tokens };
+    let temperature = if options.temperature < 0.0 { spec.temperature } else { options.temperature };
+    let mut prompt: Vec<u32> = spec.encode(text);
+    if prompt.len() + 1 > context {
+        prompt.drain(..prompt.len() + 1 - context);
+    }
+    let body = json!({
+        "prompt": prompt, "n_predict": max, "temperature": temperature, "top_k": spec.top_k,
+        "seed": options.seed as u32, "return_tokens": true, "cache_prompt": true,
+    });
+    let (status, bytes) = request(port, "POST", "/completion", Some(&body), Duration::from_secs(600))?;
+    let answer: Value =
+        serde_json::from_slice(&bytes).map_err(|_| MlError::new(format!("llama.cpp answered {status}")))?;
+    if status != 200 {
+        return Err(MlError::new(format!(
+            "llama.cpp: {}",
+            answer.pointer("/error/message").and_then(Value::as_str).unwrap_or("it failed")
+        )));
+    }
+    let end = spec.special_id(&spec.end_tag);
+    let tokens: Vec<u32> = answer["tokens"]
+        .as_array()
+        .map(|t| t.iter().filter_map(Value::as_u64).map(|t| t as u32).take_while(|t| Some(*t) != end).collect())
+        .unwrap_or_default();
+    Ok(if tokens.is_empty() { answer["content"].as_str().unwrap_or_default().to_owned() } else { spec.decode(&tokens) })
 }
 
 /// The devices llama.cpp can use, as `(id, description)`: `("CUDA0", "NVIDIA GeForce RTX 5070 (12199 MiB…)")`.

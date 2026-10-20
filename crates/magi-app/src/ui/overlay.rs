@@ -184,7 +184,7 @@ impl TargetOverlay {
             return OverlayOutcome::ShowBlock(node);
         }
         let mut builder = egui::ViewportBuilder::default()
-            .with_title("MacroMagi – screen targets")
+            .with_title("Screen targets • MacroMagi")
             .with_decorations(false)
             .with_fullscreen(true)
             .with_always_on_top()

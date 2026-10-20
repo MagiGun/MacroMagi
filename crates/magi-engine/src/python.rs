@@ -602,6 +602,16 @@ fn perform(cx: &mut RunCx, op: &str, args: &Value) -> OpResult<Value> {
             let value = wired.unwrap_or(false).then(|| args.get("value").cloned().unwrap_or(Value::Null));
             Ok(Value::Object(cx.ai_agent(&arg(args, "params")?, value, arg(args, "node")?)?))
         }
+        "ai_load" => {
+            let model: String = arg(args, "model")?;
+            cx.ai_load(&model)?;
+            Ok(Value::Null)
+        }
+        "ai_unload" => {
+            let model: String = arg(args, "model")?;
+            cx.ai_unload(&model)?;
+            Ok(Value::Null)
+        }
         "ai_watch" => {
             let returning: Option<bool> = arg(args, "returning")?;
             let step = cx.ai_watch(&arg(args, "params")?, arg(args, "node")?, returning.unwrap_or(false))?;

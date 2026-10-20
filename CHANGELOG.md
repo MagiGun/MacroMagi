@@ -4,6 +4,60 @@ Notable changes to MacroMagi. The format follows [Keep a Changelog](https://keep
 
 File-format changes are called out explicitly; see [docs/FILE_FORMAT.md](docs/FILE_FORMAT.md) for the compatibility rules.
 
+## 0.1.7 – Unreleased
+
+### Added
+
+- **A new dataset editor.** Samples show as the chat they teach – the request, the model's reasoning, answer and tool calls (name and arguments), tool results, the system prompt – and are edited right there. *Model's view* shows a sample exactly as training writes it for the model, chat tags highlighted; *Raw* shows the JSON lines. The editor pops out into a window of its own, and shows 25 samples a page.
+- **Reasoning efforts per sample**, as chips: *Default* and each of the model's levels. A sample can have several (`"effort": ["standard", "superior"]`): it is one entry, learned at each level. Tick samples (Shift for a range) to set their efforts, duplicate, copy or remove them together.
+- **Scan for issues** in the dataset editor: samples with problems, repeats, samples longer than the context window, efforts without samples, and words a fine-tuning or reinforcement file uses that the pretraining text never does.
+- **Efforts without samples are covered**: training learns such a level from the nearest level's samples and says so; the Reasoning Effort block shows how many samples each level has and warns about empty ones.
+- **Native Tools** block, apart from **Tools**: Tools are the ones the program running the model carries out (the AI Agent block, or another app); Native Tools are the ones a Magi model runs itself. Canvases from before get a Native Tools block when their Tools block held native tools.
+- Model blocks in macros load **.magic, .szi, .gguf and .onnx** files.
+- **Example data from open datasets**, about 9 MB: simple texts to pretrain on (Cosmopedia), human-written conversations (OpenAssistant), math with step-by-step reasoning at both efforts (GSM8K), Python (MBPP, self-oss-instruct) and tool calls (glaive). `open_data.py` rebuilds them; `SOURCES.md` credits them and gives their licences.
+- **Magi (12M)** in Presets › Commons: the Magi recipe at about 12 million parameters, which learns more from that data.
+- LM Studio shows the **tool use** badge on models with a tool tag: the chat template now lists tools and writes calls and results the way LM Studio recognizes, with the same prompt text as before. The Compile panel shows which badges LM Studio will show.
+
+### Changed
+
+- **Compile Package** (was *Compile .magic Package*) has a switch for each thing it saves: *.magic workspace* (with *With the datasets* and *With the pictures* under it), *Magi Model (.szi)*, *GGUF file*, *Add to LM Studio* (with its own precision, apart from the GGUF file), *Hugging Face folder*, *ONNX file*.
+- **Use in Macro** adds Start → AI Load Model → AI Agent → Log → AI Unload Model.
+- Magi-F1's reasoning efforts are *standard* (the default) and *superior*.
+- The Reasoning Effort block explains with an example how samples are given a level.
+- **Reasoning in datasets is learned only with the Thinking block** chained in and on; without it, it is left out (before, the model thought when its datasets did). The dataset editor marks such reasoning, and *Scan for issues* lists it.
+- Window titles read “*Magi • MacroMagi”: a dot between the document and MacroMagi, and a star for unsaved changes, instead of a dot and a dash.
+
+### Fixed
+
+- LM Studio listed a model added from MacroMagi twice – once as the model, once as the bare GGUF file. The file is now marked as the model's own (LM Studio's list is backed up first).
+- **When a macro stops, every AI model it loaded is unloaded** (llama.cpp's servers stopped), whether or not an AI Unload Model block ran.
+- Some notes had runs of spaces in the middle of a sentence.
+
+## 0.1.6 – Unreleased
+
+### Added
+
+- **The Magi architecture.** Magi models are small and do the hard work through **native tools**: each a folder (`nt/<tool>/` with `tool.json` and `run.py`) that MacroMagi runs on this computer, giving the result back to the model until it answers. MacroMagi comes with calculator, web_search, fetch_page, get_time, get_weather, read_file, list_files, describe_image, transcribe_audio, translate and wiki_search (the vision, audio and translation tools are starting points that need their small models installed). Tick them in the new **Tools** block.
+- **The Magi package (`.szi`)**: a folder with the model's description, weights, ONNX model and native tools. Compile writes one folder per project – the `.magic` workspace (no model inside when packaged), `szi/`, and as chosen `gguf/`, `huggingface/` and `onnx/`. File › Open and Load Base Model take `.szi` files.
+- **The native engine**: models of Transformer Layers trained here run straight from their weights with a key/value cache – each token is one step, and a request that starts like the last one only reads what is new. On the example it is about a thousand times faster than the ONNX path (0.8 ms a token), with the same scores to within 0.00006. Prompt Model and macros use it.
+- **Long contexts.** The **Context Scaler** block trains at 2K–8K tokens and runs at up to 256K with YaRN (or NTK), stretching positions only past the trained context so short texts stay exactly as learned; llama.cpp gets the YaRN flags from MacroMagi when a longer context is asked for, and the exports can carry it always (off by default: it changes short texts). The **Memory & Cache** block keeps a running model's memory in a hot tier, a warm tier (F16 or 8-bit) and a cold tier on disk, can keep the system text's memory on disk under its SHA-256, and can read only the most relevant blocks; llama.cpp gets the cache type (F16, Q8_0, Q4_0) and flash attention. Prompt Model shows the tiers filling.
+- **Magi-F1's recipe**: the example canvas pretrains on its own dataset of plain language and reasoning, fine-tunes on every kind of request, then runs a short reinforcement stage – with Muon, which is now every Optimizer block's default. Reasoning effort is *standard* or *superior*, apart from thinking on or off. New example data: simple facts, reasoning at both efforts.
+- **Macro blocks AI Load Model and AI Unload Model**, and AI Agent settings for thinking, reasoning effort, context window and running native tools.
+- **File › Export as Python** on the Magic tab: a folder with `run.py`, the plan, the datasets, the native tools, the trainer and a README, which trains the same model without MacroMagi and writes its `.szi`.
+- Compiled models go into LM Studio by default when LM Studio is installed, so its Reasoning Effort choice shows (it needs the model.yaml).
+
+### Changed
+
+- **Text & Tools** became two blocks, **Text** and **Tools**. The warning about the system prompt shows only when it differs from the one the model was trained with.
+- Reasoning effort levels start with *none* (the default).
+- The Commons menu scrolls when the window is short; the Magic tab's start buttons are centred.
+- Settings › Runtime shows *Uninstall* on installed parts; Settings › Engine calls MacroMagi's own Python *Embedded Python*, apart from a Python found on the computer.
+- The dataset editor's filter is *With problems (n)* and explains what a problem is; empty requests and answers are problems.
+
+### Fixed
+
+- Installing llama.cpp for CUDA 12 or 13 failed with "the download did not contain llama-server": the CUDA runtime's zip was taken for the program.
+
 ## 0.1.5 – Unreleased
 
 ### Added

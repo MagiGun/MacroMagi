@@ -49,7 +49,22 @@ const TOAST_SECONDS: f32 = 4.0;
 const SETTINGS_SAVE_DELAY: Duration = Duration::from_millis(800);
 const MACRO_FILTER: (&str, &[&str]) = ("MacroMagi macro", &["magi"]);
 const PRESET_FILTER: (&str, &[&str]) = ("MacroMagi preset", &["mp"]);
-const MAGIC_FILTER: (&str, &[&str]) = ("MacroMagi model", &["magic"]);
+const MAGIC_FILTER: (&str, &[&str]) = ("MacroMagi workspace", &["magic"]);
+/// What File › Open takes on the Magic tab: workspaces and Magi models.
+const MAGIC_OPEN_FILTER: (&str, &[&str]) = ("MacroMagi workspace or Magi model", &["magic", "szi"]);
+/// Models a macro block can run.
+const MODEL_FILTER: (&str, &[&str]) = ("AI model", &["magic", "szi", "gguf", "onnx"]);
+
+/// A model file as a macro runs it: a `.magic` workspace or `.szi` Magi
+/// model, a `.gguf` file (run with llama.cpp, where it is) or an ONNX model.
+fn model_from_file(path: &std::path::Path) -> Result<magi_core::magic::MagicFile, String> {
+    let extension = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    match extension.as_str() {
+        "gguf" => crate::magic::import::import_gguf(path).map(|imported| imported.file),
+        "onnx" => crate::magic::import::import(path).map(|imported| imported.file),
+        _ => magi_core::szi::open(path).map_err(|e| e.to_string()),
+    }
+}
 /// Below this width the banner's menus show icons only.
 const COMPACT_BANNER_BELOW: f32 = 720.0;
 /// Below this width the banner's menus are folded into one.
@@ -149,6 +164,9 @@ pub struct StartupOptions {
     pub settings_page: Option<SettingsPage>,
     /// Start training the Magic tab's model (for screenshots).
     pub train: bool,
+    /// Open this dataset file of the Magic tab's model (a new example model when none
+    /// is open) in the dataset editor, with a view after a colon (for screenshots).
+    pub dataset: Option<String>,
     /// Take the screenshot after this many seconds.
     pub wait: Option<f64>,
 }
@@ -332,7 +350,7 @@ impl MagiApp {
             .is_some_and(|path| path.extension().is_some_and(|e| e.eq_ignore_ascii_case(magi_core::magic::EXTENSION)));
         if let Some(path) = options.open.as_ref().filter(|_| magic) {
             // A model: it opens in the Magic tab.
-            match magi_core::magic::MagicFile::load(path) {
+            match magi_core::szi::open(path) {
                 Ok(file) => app.magic_tab.doc = Some(MagicDoc::new(file, Some(path.clone()), Vec::new())),
                 Err(error) => app.toast_error(format!("Could not open {}: {error}", path.display())),
             }
@@ -352,6 +370,24 @@ impl MagiApp {
             && let Some(node) = doc.studio.graph.nodes().find(|n| n.kind == *kind).map(|n| n.id)
         {
             app.magic_tab.view.selection = [node].into();
+        }
+        if let Some(dataset) = &options.dataset {
+            if app.magic_tab.doc.is_none() {
+                app.magic_tab.doc = Some(MagicDoc::new(crate::magic::new_model(true), None, Vec::new()));
+            }
+            let (file, view) = match dataset.split_once(':') {
+                Some((file, view)) => (file, Some(view)),
+                None => (dataset.as_str(), None),
+            };
+            if !file.is_empty() {
+                app.magic_tab.open_dataset(file, view);
+            }
+            if let Some(kind) = &options.select_kind
+                && let Some(doc) = &app.magic_tab.doc
+                && let Some(node) = doc.studio.graph.nodes().find(|n| n.kind == *kind).map(|n| n.id)
+            {
+                app.magic_tab.view.selection = [node].into();
+            }
         }
         if options.show_cards {
             let recordings: Vec<NodeId> =
@@ -665,10 +701,11 @@ impl MagiApp {
                 });
             }
             MagicPending::Open(path) => {
-                let path =
-                    path.or_else(|| rfd::FileDialog::new().add_filter(MAGIC_FILTER.0, MAGIC_FILTER.1).pick_file());
+                let path = path.or_else(|| {
+                    rfd::FileDialog::new().add_filter(MAGIC_OPEN_FILTER.0, MAGIC_OPEN_FILTER.1).pick_file()
+                });
                 let Some(path) = path else { return };
-                match magi_core::magic::MagicFile::load(&path) {
+                match magi_core::szi::open(&path) {
                     Ok(file) => {
                         self.remember_model(&path);
                         self.set_magic_doc(Some(MagicDoc::new(file, Some(path), Vec::new())));
@@ -751,6 +788,10 @@ impl MagiApp {
         if doc.file.model.blocks.is_none() {
             doc.file.model.blocks = Some(crate::magic::starter_blocks(&doc.file.model, "", &self.registry));
         }
+        // A workspace whose model is in a package leaves the model out.
+        let packaged = doc.file.model.package.as_ref().is_some_and(|p| std::path::Path::new(p).is_file());
+        doc.file.model.include.model = !packaged;
+        doc.file.model.include.weights = !packaged;
         match doc.file.save(&path) {
             Ok(()) => {
                 doc.mark_saved(path.clone());
@@ -881,12 +922,22 @@ impl MagiApp {
             }
             UiRequest::EditRate(node) => self.rate_window = Some(node),
             UiRequest::LoadModel(node, key) => {
-                let Some(path) = rfd::FileDialog::new().add_filter(MAGIC_FILTER.0, MAGIC_FILTER.1).pick_file() else {
+                let Some(path) = rfd::FileDialog::new().add_filter(MODEL_FILTER.0, MODEL_FILTER.1).pick_file() else {
                     return;
                 };
-                match magi_core::magic::MagicFile::load(&path)
-                    .and_then(|file| Ok((file.model.name.clone(), file.for_macro()?)))
-                {
+                let kind = self.doc.project.graph.node(node).map(|n| n.kind.clone()).unwrap_or_default();
+                let loaded = model_from_file(&path).and_then(|file| {
+                    let text = file.model.kind == magi_core::magic::ModelKind::Text;
+                    let wants_text = matches!(kind.as_str(), ids::AI_AGENT | ids::AI_LOAD | ids::AI_UNLOAD);
+                    if wants_text && !text {
+                        return Err("this is a vision model; this block runs text models".into());
+                    }
+                    if !wants_text && text {
+                        return Err("this is a text model; run it with an AI Agent block".into());
+                    }
+                    Ok((file.model.name.clone(), file.for_macro().map_err(|e| e.to_string())?))
+                });
+                match loaded {
                     Ok((name, bytes)) => {
                         let id = self.doc.project.assets.add_model(name, bytes);
                         if let Some(node) = self.doc.project.graph.node_mut(node) {
@@ -1291,6 +1342,9 @@ impl MagiApp {
             return;
         }
         self.llama_key = Some(key);
+        // Native tools run with the Python for AI; their files and the native engine's cache go in the data folder.
+        magi_ml::tools::set_python(self.python_for_packages());
+        magi_ml::tools::set_cache_dir(self.paths.data_dir.join("cache"));
         let config = self.components.llama_server(self.settings.llama_build).map(|(_, server)| magi_ml::LlamaConfig {
             server,
             gpu_layers: self.settings.llama_gpu_layers,
@@ -1436,10 +1490,11 @@ impl MagiApp {
         }
         let title = match self.settings.tab {
             Tab::AutoClicker => "MacroMagi".to_owned(),
-            Tab::Macro => format!("{}{} – MacroMagi", self.doc.title(), if self.doc.is_dirty() { " •" } else { "" }),
+            // A star marks unsaved changes; a dot divides the document from the program.
+            Tab::Macro => format!("{}{} • MacroMagi", if self.doc.is_dirty() { "*" } else { "" }, self.doc.title()),
             Tab::Magic => match &self.magic_tab.doc {
-                Some(doc) => format!("{}{} – MacroMagi", doc.title(), if doc.is_dirty() { " •" } else { "" }),
-                None => "Magic – MacroMagi".to_owned(),
+                Some(doc) => format!("{}{} • MacroMagi", if doc.is_dirty() { "*" } else { "" }, doc.title()),
+                None => "Magic • MacroMagi".to_owned(),
             },
         };
         if title != self.applied_title {
@@ -1685,6 +1740,7 @@ impl MagiApp {
     fn magic_file_menu(&mut self, ui: &mut Ui, label: &str) {
         let mut chosen: Option<MagicPending> = None;
         let mut save: Option<bool> = None;
+        let mut export_python = false;
         let mut close = false;
         let recent = self.settings.recent_models.clone();
         let has_doc = self.magic_tab.doc.is_some();
@@ -1746,6 +1802,14 @@ impl MagiApp {
                 save = Some(true);
                 ui.close();
             }
+            if ui
+                .add_enabled(has_doc, egui::Button::new(format!("{}  Export as Python…", icon::FILE_PY)))
+                .on_hover_text("A folder with run.py that trains the model as the canvas does, and a README")
+                .clicked()
+            {
+                export_python = true;
+                ui.close();
+            }
             ui.separator();
             if ui.add_enabled(has_doc, egui::Button::new(format!("{}  Close the model", icon::X))).clicked() {
                 close = true;
@@ -1757,6 +1821,9 @@ impl MagiApp {
         }
         if let Some(choose) = save {
             self.save_magic(choose);
+        }
+        if export_python {
+            self.export_magic_python();
         }
         if close {
             self.magic_guarded(MagicPending::New);
@@ -1780,15 +1847,19 @@ impl MagiApp {
                 ui.menu_button(format!("{}  Commons", icon::STAR), |ui| {
                     ui.set_width(330.0);
                     ui.label(RichText::new("Well-known architectures, at desktop size. They replace the architecture blocks on the canvas.").size(11.0).color(theme::text_faint()));
-                    for (index, item) in magi_core::nodes::studio::commons().iter().enumerate() {
-                        let response = ui.add(egui::Button::new(RichText::new(item.name).strong()).min_size(vec2(310.0, 24.0)));
-                        ui.add(egui::Label::new(RichText::new(item.description).size(11.0).color(theme::text_dim())).wrap());
-                        if response.clicked() {
-                            common = Some(index);
-                            ui.close();
+                    // As tall as the window allows; the rest scrolls.
+                    let tallest = (ui.ctx().content_rect().height() - 140.0).max(160.0);
+                    egui::ScrollArea::vertical().max_height(tallest).auto_shrink([false, true]).show(ui, |ui| {
+                        for (index, item) in magi_core::nodes::studio::commons().iter().enumerate() {
+                            let response = ui.add(egui::Button::new(RichText::new(item.name).strong()).min_size(vec2(310.0, 24.0)));
+                            ui.add(egui::Label::new(RichText::new(item.description).size(11.0).color(theme::text_dim())).wrap());
+                            if response.clicked() {
+                                common = Some(index);
+                                ui.close();
+                            }
+                            ui.add_space(4.0);
                         }
-                        ui.add_space(4.0);
-                    }
+                    });
                 });
             });
             ui.separator();
@@ -2436,6 +2507,25 @@ impl MagiApp {
         self.magic_tab.job = Some(crate::magic::train::TrainJob::start(request, move || repaint.request_repaint()));
     }
 
+    /// File › Export as Python: the workspace as a folder of Python.
+    fn export_magic_python(&mut self) {
+        let Some(doc) = &self.magic_tab.doc else { return };
+        let Some(folder) = rfd::FileDialog::new().set_title("Where the Python folder goes").pick_folder() else {
+            return;
+        };
+        let runtime = match magi_engine::python::runtime_dir(&self.paths.data_dir) {
+            Ok(dir) => dir,
+            Err(error) => return self.toast_error(format!("The trainer could not be unpacked: {error}")),
+        };
+        match crate::magic::export_python::export(doc, &runtime, &folder) {
+            Ok(dir) => {
+                let _ = magi_platform::system::open_folder(&dir);
+                self.toast(format!("Exported to {}", dir.display()));
+            }
+            Err(error) => self.toast_error(error),
+        }
+    }
+
     /// Saves the Magic tab's model as its Compile block says (after training, too).
     fn compile_magic(&mut self) {
         let Some(doc) = &mut self.magic_tab.doc else { return };
@@ -2462,15 +2552,11 @@ impl MagiApp {
         }
     }
 
-    /// Puts the compiled GGUF file of the Magic tab's model into LM Studio.
+    /// Puts the Magic tab's model into LM Studio.
     fn add_to_lmstudio(&mut self) {
         let Some(doc) = &self.magic_tab.doc else { return };
         use crate::magic::train::Level;
-        let result = doc
-            .compiled_gguf()
-            .ok_or_else(|| "Save the package with GGUF first.".to_owned())
-            .and_then(|gguf| doc.add_to_lmstudio(&gguf));
-        match result {
+        match doc.add_to_lmstudio() {
             Ok(written) => {
                 for path in &written {
                     self.magic_tab.console_line(Level::Done, format!("Added {}", path.display()));
@@ -2506,8 +2592,10 @@ impl MagiApp {
         let id = project.assets.add_model(name.clone(), bytes);
         let mut updated = 0;
         for node in project.graph.nodes_mut() {
-            if matches!(node.kind.as_str(), ids::AI_WATCH | ids::AI_CLASSIFY | ids::AI_AGENT)
-                && let Some(current) = node.param::<String>("model")
+            if matches!(
+                node.kind.as_str(),
+                ids::AI_WATCH | ids::AI_CLASSIFY | ids::AI_AGENT | ids::AI_LOAD | ids::AI_UNLOAD
+            ) && let Some(current) = node.param::<String>("model")
                 && previous.contains(&current)
                 && current != id
             {
@@ -2522,14 +2610,26 @@ impl MagiApp {
             }
         }
         let uses = project.graph.nodes().any(|n| {
-            matches!(n.kind.as_str(), ids::AI_WATCH | ids::AI_CLASSIFY | ids::AI_AGENT)
+            matches!(n.kind.as_str(), ids::AI_WATCH | ids::AI_CLASSIFY | ids::AI_AGENT | ids::AI_LOAD | ids::AI_UNLOAD)
                 && n.param::<String>("model").as_deref() == Some(id.as_str())
         });
         if !uses {
-            let mut blocks =
-                model.blocks.clone().unwrap_or_else(|| crate::magic::starter_blocks(&model, &id, &self.registry));
+            // Blocks saved with the model, unless they are the plain set from before AI Load and Unload Model.
+            let plain = |blocks: &magi_core::graph::Fragment| {
+                let mut kinds: Vec<&str> = blocks.nodes.iter().map(|n| n.kind.as_str()).collect();
+                kinds.sort_unstable();
+                kinds == [ids::AI_AGENT, ids::LOG, ids::START, ids::COMMENT]
+            };
+            let mut blocks = model
+                .blocks
+                .clone()
+                .filter(|blocks| !plain(blocks))
+                .unwrap_or_else(|| crate::magic::starter_blocks(&model, &id, &self.registry));
             for node in &mut blocks.nodes {
-                if matches!(node.kind.as_str(), ids::AI_WATCH | ids::AI_CLASSIFY | ids::AI_AGENT) {
+                if matches!(
+                    node.kind.as_str(),
+                    ids::AI_WATCH | ids::AI_CLASSIFY | ids::AI_AGENT | ids::AI_LOAD | ids::AI_UNLOAD
+                ) {
                     node.set_param("model", &id);
                 }
             }
@@ -2751,7 +2851,7 @@ impl MagiApp {
         let name = self.doc.project.assets.get(&asset).map_or_else(|| "Recording".to_owned(), |a| a.name.clone());
         let size = self.settings.recording_window_size.unwrap_or([760.0, 560.0]);
         let builder = egui::ViewportBuilder::default()
-            .with_title(format!("{name} – MacroMagi"))
+            .with_title(format!("{name} • MacroMagi"))
             .with_inner_size(size)
             .with_min_inner_size([420.0, 300.0]);
         let mut edit = None;
@@ -3397,6 +3497,7 @@ mod tests {
             settings_page: None,
             train: false,
             wait: None,
+            dataset: None,
         };
         let mut harness = Harness::builder()
             .with_size(vec2(width, height))

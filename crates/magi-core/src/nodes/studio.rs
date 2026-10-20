@@ -23,8 +23,8 @@ use serde_json::{Map, Value, json};
 use super::{Category, DataType, NodeDef, ParamDef, ParamKind, Registry};
 use crate::graph::{Fragment, Graph, Group, Node, NodeId, PortRef, Wire};
 use crate::magic::{
-    ActionSpec, ArchBlock, Architecture, CaptureSpec, ClassSpec, EffortSpec, InputSpec, MagicModel, ModelKind,
-    ModelSetting, Persona, TextSpec, ThinkingSpec, ToolSpec,
+    ActionSpec, ArchBlock, Architecture, CaptureSpec, ClassSpec, EffortSpec, InputSpec, MagicModel, MemorySpec,
+    ModelKind, ModelSetting, Persona, RopeScaling, TextSpec, ThinkingSpec, ToolSpec,
 };
 
 /// Block types of the Magic tab.
@@ -35,6 +35,8 @@ pub mod kinds {
 
     pub const INFO: &str = "magic.info";
     pub const TEXT: &str = "magic.text";
+    pub const TOOLS: &str = "magic.tools";
+    pub const NATIVE_TOOLS: &str = "magic.native_tools";
     pub const THINKING: &str = "magic.thinking";
     pub const EFFORT: &str = "magic.effort";
     pub const INPUT: &str = "magic.input";
@@ -44,6 +46,8 @@ pub mod kinds {
     pub const PREP: &str = "magic.prep";
 
     pub const SIZE: &str = "magic.size";
+    pub const CONTEXT: &str = "magic.context_scaler";
+    pub const MEMORY: &str = "magic.memory";
     pub const LAYERS: &str = "magic.layers";
     pub const WINDOW: &str = "magic.window";
     pub const MLA: &str = "magic.mla";
@@ -72,15 +76,16 @@ pub mod kinds {
     pub const TEST: &str = "magic.test";
 
     /// Blocks that hold a part of the model's own settings, on the Setup wire.
-    pub const SETUP_BLOCKS: [&str; 9] = [INFO, TEXT, THINKING, EFFORT, INPUT, ANSWERS, ACTION, SETTINGS, PREP];
+    pub const SETUP_BLOCKS: [&str; 12] =
+        [INFO, TEXT, TOOLS, NATIVE_TOOLS, THINKING, EFFORT, MEMORY, INPUT, ANSWERS, ACTION, SETTINGS, PREP];
     /// Setup blocks that switch something on: without one, it is off.
-    pub const SWITCHES: [&str; 2] = [THINKING, EFFORT];
+    pub const SWITCHES: [&str; 3] = [THINKING, EFFORT, MEMORY];
     /// Blocks that start a pipeline.
     pub const STARTS: [&str; 3] = [ZERO, BASE, CONFIG];
     /// Blocks that add layers (and take a feed-forward block).
     pub const LAYER_BLOCKS: [&str; 6] = [LAYERS, WINDOW, MLA, CSA, HCA, SSM];
     /// Architecture blocks on the model wire.
-    pub const ARCHITECTURE: [&str; 11] = [SIZE, LAYERS, WINDOW, MLA, CSA, HCA, SSM, HYPER, MTP, SPLIT, CONV];
+    pub const ARCHITECTURE: [&str; 12] = [SIZE, CONTEXT, LAYERS, WINDOW, MLA, CSA, HCA, SSM, HYPER, MTP, SPLIT, CONV];
     /// Training stages.
     pub const STAGES: [&str; 5] = [PRETRAIN, FINETUNE, RL, COMPACTION, VISION_TRAIN];
 }
@@ -231,6 +236,57 @@ impl LayersParams {
     }
 }
 
+/// The Context Scaler block: train at a short context, run at a long one.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ContextParams {
+    /// The context it trains at; 0: Model Size's.
+    #[serde(deserialize_with = "number_or_text")]
+    pub train: u32,
+    /// The context it runs at.
+    #[serde(deserialize_with = "number_or_text")]
+    pub target: u32,
+    /// `yarn`, `ntk` or `none` (attention that copes by itself: compressed attention).
+    pub method: String,
+    /// Write the scaling into the exports as it is (see [`RopeScaling::static_in_exports`]).
+    pub static_in_exports: bool,
+}
+
+impl Default for ContextParams {
+    fn default() -> Self {
+        Self { train: 0, target: 262_144, method: "yarn".into(), static_in_exports: false }
+    }
+}
+
+impl ContextParams {
+    /// The scaling it gives a model trained at `trained` tokens.
+    pub fn scaling(&self, trained: u32) -> RopeScaling {
+        let original = if self.train > 0 { self.train } else { trained }.max(1);
+        let target = self.target.max(original);
+        RopeScaling {
+            kind: self.method.clone(),
+            factor: if self.method == "none" { 1.0 } else { f64::from(target) / f64::from(original) },
+            original,
+            target,
+            static_in_exports: self.static_in_exports,
+        }
+    }
+}
+
+/// A number from a choice setting (kept as text) or a number setting.
+fn number_or_text<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    match Value::deserialize(d)? {
+        Value::Number(n) => Ok(n.as_u64().unwrap_or(0) as u32),
+        Value::String(s) => s.trim().parse().map_err(serde::de::Error::custom),
+        _ => Ok(0),
+    }
+}
+
+/// A number of tokens as people write it: 256K, 8192.
+pub fn tokens_label(tokens: u32) -> String {
+    if tokens >= 1024 && tokens.is_multiple_of(1024) { format!("{}K", tokens / 1024) } else { tokens.to_string() }
+}
+
 /// The Prompt Model block: how requests are asked.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -247,6 +303,10 @@ pub struct PromptParams {
     pub effort: String,
     /// `auto`, `onnx` (the built-in engine) or `gguf` (llama.cpp).
     pub engine: String,
+    /// Run the model's native tools and give it their results, until it answers.
+    pub native_tools: bool,
+    /// How many native tool calls one request may make.
+    pub max_steps: u32,
     pub note: String,
 }
 
@@ -259,6 +319,8 @@ impl Default for PromptParams {
             thinking: "model".into(),
             effort: String::new(),
             engine: "auto".into(),
+            native_tools: true,
+            max_steps: 6,
             note: String::new(),
         }
     }
@@ -585,7 +647,7 @@ pub struct OptimizerParams {
 impl Default for OptimizerParams {
     fn default() -> Self {
         Self {
-            name: "adamw".into(),
+            name: "muon".into(),
             lr: 0.002,
             muon_lr: 0.02,
             weight_decay: 0.01,
@@ -599,13 +661,24 @@ impl Default for OptimizerParams {
     }
 }
 
+/// The precisions a GGUF file can have.
+fn quant_choice() -> ParamKind {
+    ParamKind::choice(&[
+        ("F16", "F16 – exact, the largest"),
+        ("Q8_0", "Q8_0 – half the size, nearly exact"),
+        ("Q4_0", "Q4_0 – a quarter of the size, loses some quality"),
+    ])
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CompileParams {
     /// Where the package (and its exports) is saved after training.
     pub folder: String,
-    /// The file's name, without `.magic`; empty: the model's name.
+    /// The project's name (its folder and files); empty: the model's name.
     pub file: String,
+    /// The `.magic` workspace: canvas and setup, to open and train again.
+    pub magic: bool,
     pub weights: bool,
     pub datasets: bool,
     pub pictures: bool,
@@ -616,8 +689,14 @@ pub struct CompileParams {
     pub huggingface: bool,
     /// How the GGUF file keeps its matrices: `F16`, `Q8_0` or `Q4_0`.
     pub quant: String,
-    /// Also put the GGUF file into LM Studio, with its `model.yaml`.
+    /// Also put a GGUF file into LM Studio, with its `model.yaml`.
     pub lmstudio: bool,
+    /// The precision of LM Studio's GGUF file, as `quant`.
+    pub lmstudio_quant: String,
+    /// The Magi package (`szi/`): the model, its weights and native tools.
+    pub szi: bool,
+    /// Also an ONNX file (`onnx/`), for ONNX runtimes.
+    pub onnx: bool,
 }
 
 impl Default for CompileParams {
@@ -625,6 +704,7 @@ impl Default for CompileParams {
         Self {
             folder: String::new(),
             file: String::new(),
+            magic: true,
             weights: true,
             datasets: true,
             pictures: true,
@@ -633,6 +713,9 @@ impl Default for CompileParams {
             huggingface: false,
             quant: "F16".into(),
             lmstudio: false,
+            lmstudio_quant: "F16".into(),
+            szi: true,
+            onnx: false,
         }
     }
 }
@@ -710,7 +793,7 @@ pub fn registry() -> Registry {
             "Start from Zero",
             Category::Start,
             "A brand-new model with random weights. The architecture blocks after it decide its shape; the \
-             training stages after those teach it. Plug the setup blocks (Model Info, Text & Tools…) into Setup.",
+             training stages after those teach it. Plug the setup blocks (Model Info, Text, Tools…) into Setup.",
         ))
         .keywords(&["new", "pretrain", "scratch", "zero", "start", "begin"])
         .param(ParamDef::new("kind", "Model", ParamKind::choice(&[("text", "Text / agent"), ("vision", "Vision")])))
@@ -769,10 +852,29 @@ pub fn registry() -> Registry {
     setup_block(
         &mut r,
         TEXT,
-        "Text & Tools",
-        "Text models: what the model is told before every request (the system prompt), the tools it may call, \
-         how freely it writes and how long its answers may be. Chain it into the start's Setup input.",
-        &["tools", "prompt", "system", "chat", "temperature", "tokens", "agent"],
+        "Text",
+        "Text models: what the model is told before every request (the system prompt), how freely it writes, how \
+         long its answers may be, and its chat tags. Chain it into the start's Setup input.",
+        &["prompt", "system", "chat", "temperature", "tokens", "tags"],
+    );
+    setup_block(
+        &mut r,
+        TOOLS,
+        "Tools",
+        "Text models: tools the model may call that the program running it carries out – in a macro the AI \
+         Agent block (press, type, click…), elsewhere the app's own tools. Each has what it does and its \
+         arguments; the model reads them in its system text. Chain it into the start's Setup input.",
+        &["tools", "agent", "functions", "mcp", "calls"],
+    );
+    setup_block(
+        &mut r,
+        NATIVE_TOOLS,
+        "Native Tools",
+        "Text models: tools a Magi model runs itself, on this computer – a calculator, web search, the time, the \
+         weather, files, pictures, sound. The model learns which to call and with what; the tool does the work and \
+         its result comes back to the model. They go into the model's nt folder. Chain it into the start's Setup \
+         input.",
+        &["native tools", "tools", "magi", "nt", "calculator", "search", "agent"],
     );
     setup_block(
         &mut r,
@@ -780,17 +882,30 @@ pub fn registry() -> Registry {
         "Thinking",
         "Text models: the model can be asked to think before answering, or not. Chained in, training teaches \
          both (reasoning in the datasets is learned with and without), the Prompt Model block gets a Thinking \
-         switch and LM Studio an Enable Thinking toggle. Without it, the model thinks when its datasets did.",
+         switch and LM Studio an Enable Thinking toggle. Without it, the model does not think: the datasets' \
+         reasoning is left out.",
         &["thinking", "reasoning", "think", "toggle", "enable_thinking", "chain of thought"],
     );
     setup_block(
         &mut r,
         EFFORT,
         "Reasoning Effort",
-        "Text models: levels of how hard the model thinks, such as low, medium and high. The system text names \
-         the level; datasets mark samples with \"effort\". The Prompt Model block and LM Studio get a Reasoning \
-         Effort choice.",
+        "Text models: levels of how hard the model reasons, such as standard and superior. Every request starts \
+         by naming its level (\"Reasoning effort: superior\"), and the model learns each level from the samples \
+         given it in the dataset editor. The Prompt Model block, AI Agent and LM Studio get a Reasoning Effort \
+         choice.",
         &["effort", "reasoning", "levels", "low", "high", "reasoning_effort"],
+    );
+    setup_block(
+        &mut r,
+        MEMORY,
+        "Memory & Cache",
+        "Text models: where the model keeps the memory of what it has read while it runs. A hot tier (the first \
+         block and the latest ones, at full precision), a warm tier in system memory (f16 or 8-bit), and a cold \
+         tier in files on a disk (an NVMe SSD is best) – so long contexts never run out of memory. The system \
+         text's memory can be kept on disk and found again by its SHA-256, so it is never read twice. llama.cpp \
+         gets the cache precision and flash attention.",
+        &["memory", "cache", "kv", "ssd", "offload", "context", "long", "quantized cache"],
     );
     setup_block(
         &mut r,
@@ -883,6 +998,59 @@ pub fn registry() -> Registry {
                 format!("{} wide · {} heads ({} kv)", p.width, p.heads, p.kv_heads),
                 format!("context window {} tokens", p.context),
             ]
+        }),
+    );
+    r.register(
+        chain(NodeDef::new(
+            CONTEXT,
+            "Context Scaler",
+            Category::Architecture,
+            "Trains at a short context and runs at a long one: training stays fast and fits in a graphics card, \
+             and the finished model reads up to the target. YaRN stretches the slow rotary channels and keeps the \
+             fast ones, and sharpens attention so it stays focused over long texts; NTK raises the rotary base. \
+             The exports carry it (GGUF, Hugging Face), and MacroMagi's native engine runs it. Put it after Model Size.",
+        ))
+        .keywords(&["context", "yarn", "rope", "ntk", "long", "extend", "scaling", "256k", "window"])
+        .param(
+            ParamDef::new(
+                "train",
+                "Train at",
+                ParamKind::choice(&[("0", "Model Size's context"), ("2048", "2048 tokens"), ("4096", "4096 tokens"), ("8192", "8192 tokens")]),
+            )
+            .help("The context training uses. Short is fast and fits in 12 GB."),
+        )
+        .param(
+            ParamDef::new(
+                "target",
+                "Run at",
+                ParamKind::choice(&[("32768", "32K tokens"), ("65536", "64K tokens"), ("131072", "128K tokens"), ("262144", "256K tokens")]),
+            )
+            .help("The longest text the finished model reads."),
+        )
+        .param(ParamDef::new(
+            "method",
+            "Scaling",
+            ParamKind::choice(&[("yarn", "YaRN"), ("ntk", "NTK (raise the rotary base)"), ("none", "None (compressed attention)")]),
+        ).help("MacroMagi stretches positions only when a text is longer than the trained context, so short texts stay exactly as learned."))
+        .param(
+            ParamDef::new("static_in_exports", "Always on in GGUF and Hugging Face", ParamKind::Bool).help(
+                "Off: the exports keep plain positions (MacroMagi passes llama.cpp the scaling when a longer context is asked for). On: other programs always stretch – long texts work anywhere, but short ones answer worse unless the model was fine-tuned with it.",
+            ),
+        )
+        .param(note_param())
+        .defaults(&json!({ "train": "0", "target": "262144", "method": "yarn", "static_in_exports": false, "note": "" }))
+        .summarize(|node, _| {
+            let p: ContextParams = node.params_or_default();
+            let mut lines = vec![format!(
+                "Trains at {}, runs at {}",
+                if p.train == 0 { "Model Size's".to_owned() } else { tokens_label(p.train) },
+                tokens_label(p.target)
+            )];
+            if p.train > 0 && p.method != "none" {
+                let s = p.scaling(p.train);
+                lines.push(format!("×{:.0} {} · attention ×{:.2}", s.factor, p.method.to_uppercase(), s.attention_factor()));
+            }
+            with_note(node, lines)
         }),
     );
     let mult = || {
@@ -1463,47 +1631,67 @@ pub fn registry() -> Registry {
     r.register(
         chain(NodeDef::new(
             COMPILE,
-            "Compile .magic Package",
+            "Compile Package",
             Category::Package,
-            "Saves the finished model after training: a .magic file (the model, its weights, tokens, tools, \
-             architecture and setup) in the folder you choose, and if you like a .gguf file for LM Studio and \
-             llama.cpp and a Hugging Face folder. Training needs a folder here.",
+            "Saves the finished model after training into a folder of its own in the folder you choose: the \
+             .magic workspace (canvas, setup, datasets), the Magi model (.szi: its weights and native tools), \
+             and if you like a .gguf for llama.cpp, a copy in LM Studio, a Hugging Face folder and an ONNX \
+             file. Training needs a folder here.",
         ))
-        .keywords(&["compile", "package", "export", "save", "magic", "gguf", "huggingface", "bundle", "folder"])
+        .keywords(&[
+            "compile",
+            "package",
+            "export",
+            "save",
+            "magic",
+            "szi",
+            "gguf",
+            "huggingface",
+            "lm studio",
+            "folder",
+        ])
         .param(ParamDef::new("folder", "Save into", ParamKind::Path { folder: true }))
         .param(
-            ParamDef::new("file", "File name", ParamKind::Text { multiline: false })
-                .help("Without .magic. Empty: the model's name."),
-        )
-        .param(ParamDef::new("weights", "Weights, to train further", ParamKind::Bool))
-        .param(ParamDef::new("datasets", "Text datasets", ParamKind::Bool))
-        .param(ParamDef::new("pictures", "Pictures", ParamKind::Bool))
-        .param(ParamDef::new("blocks", "Blocks to use it with", ParamKind::Bool))
-        .param(
-            ParamDef::new("gguf", "Also a .gguf (LM Studio, llama.cpp)", ParamKind::Bool)
-                .help("For models of Transformer Layers in the Llama, Qwen3 or Gemma 3 layout."),
+            ParamDef::new("file", "Project name", ParamKind::Text { multiline: false })
+                .help("The project's folder and file names. Empty: the model's name."),
         )
         .param(
-            ParamDef::new(
-                "quant",
-                "GGUF precision",
-                ParamKind::choice(&[
-                    ("F16", "F16 – exact, the largest"),
-                    ("Q8_0", "Q8_0 – half the size, nearly exact"),
-                    ("Q4_0", "Q4_0 – a quarter of the size, loses some quality"),
-                ]),
-            )
-            .help("How the .gguf keeps its weights. LM Studio shows it as the quantization.")
-            .show_if("gguf", true),
+            ParamDef::new("magic", ".magic workspace", ParamKind::Bool)
+                .help("The canvas and setup, to open and train again. It holds the model too when no .szi is saved."),
+        )
+        .param(ParamDef::new("datasets", "With the datasets", ParamKind::Bool).show_if("magic", true))
+        .param(ParamDef::new("pictures", "With the pictures", ParamKind::Bool).show_if("magic", true))
+        .param(ParamDef::new("weights", "Weights, to train further", ParamKind::Bool).hidden())
+        .param(ParamDef::new("blocks", "Blocks to use it with", ParamKind::Bool).hidden())
+        .param(
+            ParamDef::new("szi", "Magi Model (.szi)", ParamKind::Bool)
+                .help("The model itself, with its weights and native tools: what MacroMagi and CodeMagi run."),
         )
         .param(
-            ParamDef::new("lmstudio", "Also add it to LM Studio", ParamKind::Bool)
-                .help("Copies the .gguf into LM Studio's models, with a model.yaml for its controls.")
+            ParamDef::new("gguf", "GGUF file (llama.cpp and others)", ParamKind::Bool)
+                .help("For models of Transformer Layers in the Llama, Qwen3 or Gemma 3 layout. Saved in gguf/."),
+        )
+        .param(
+            ParamDef::new("quant", "GGUF precision", quant_choice())
+                .help("How the .gguf keeps its weights.")
                 .show_if("gguf", true),
         )
+        .param(ParamDef::new("lmstudio", "Add to LM Studio", ParamKind::Bool).help(
+            "Puts a GGUF file of its own into LM Studio, with a model.yaml for its controls (Enable Thinking, \
+                 Reasoning Effort). LM Studio lists it once, as the model.",
+        ))
         .param(
-            ParamDef::new("huggingface", "Also a Hugging Face folder", ParamKind::Bool)
+            ParamDef::new("lmstudio_quant", "LM Studio precision", quant_choice())
+                .help("LM Studio shows it as the quantization.")
+                .show_if("lmstudio", true),
+        )
+        .param(
+            ParamDef::new("huggingface", "Hugging Face folder", ParamKind::Bool)
                 .help("config.json, model.safetensors and the tokenizer (Llama and Qwen3 layouts)."),
+        )
+        .param(
+            ParamDef::new("onnx", "ONNX file", ParamKind::Bool)
+                .help("For ONNX runtimes, and models GGUF has no architecture for (DeepSeek-style, GLM)."),
         )
         .param(note_param())
         .defaults(&{
@@ -1518,16 +1706,27 @@ pub fn registry() -> Registry {
             } else {
                 format!("Into {}", p.folder.rsplit(['/', '\\']).find(|s| !s.is_empty()).unwrap_or_default())
             };
-            let mut formats = vec![".magic"];
-            let gguf = format!(".gguf {}", p.quant);
-            if p.gguf {
-                formats.push(&gguf);
+            let mut formats = Vec::new();
+            if p.magic {
+                formats.push(".magic".to_owned());
             }
-            if p.gguf && p.lmstudio {
-                formats.push("LM Studio");
+            if p.szi {
+                formats.push(".szi".to_owned());
+            }
+            if p.gguf {
+                formats.push(format!(".gguf {}", p.quant));
+            }
+            if p.lmstudio {
+                formats.push("LM Studio".to_owned());
             }
             if p.huggingface {
-                formats.push("Hugging Face");
+                formats.push("Hugging Face".to_owned());
+            }
+            if p.onnx {
+                formats.push("ONNX".to_owned());
+            }
+            if formats.is_empty() {
+                formats.push("Nothing chosen".to_owned());
             }
             with_note(node, vec![place, formats.join(" · ")])
         }),
@@ -1538,7 +1737,7 @@ pub fn registry() -> Registry {
             "Prompt Model",
             Category::Package,
             "Talk to the trained text model: write a request and see its answer, what it thought and the tools it \
-             called. Wire it after Compile .magic Package.",
+             called. Wire it after Compile Package.",
         ))
         .keywords(&["prompt", "try", "test", "chat", "ask", "talk", "context", "load"])
         .param(ParamDef::new("context", "Context window", int(0, 1_048_576, "tokens")).hidden())
@@ -1547,6 +1746,8 @@ pub fn registry() -> Registry {
         .param(ParamDef::new("thinking", "Thinking", ParamKind::Text { multiline: false }).hidden())
         .param(ParamDef::new("effort", "Reasoning effort", ParamKind::Text { multiline: false }).hidden())
         .param(ParamDef::new("engine", "Run with", ParamKind::Text { multiline: false }).hidden())
+        .param(ParamDef::new("native_tools", "Run its native tools", ParamKind::Bool).hidden())
+        .param(ParamDef::new("max_steps", "Tool calls per request", int(0, 64, "")).hidden())
         .param(note_param())
         .defaults(&PromptParams::default())
         .summarize(|node, _| {
@@ -1565,7 +1766,7 @@ pub fn registry() -> Registry {
             "Test Model",
             Category::Package,
             "Try the vision model: let it watch the screen live, or show it a picture, and see its answers. Wire \
-             it after Compile .magic Package.",
+             it after Compile Package.",
         ))
         .keywords(&["test", "try", "live", "watch", "picture"])
         .param(note_param())
@@ -1597,7 +1798,14 @@ pub fn section_of(kind: &str, model: &MagicModel) -> Value {
             source: model.source.clone(),
         }),
         kinds::TEXT => to(&model.text.clone().unwrap_or_default()),
+        kinds::TOOLS | kinds::NATIVE_TOOLS => {
+            let native = kind == kinds::NATIVE_TOOLS;
+            let tools: Vec<&ToolSpec> =
+                model.text.iter().flat_map(|t| &t.tools).filter(|t| t.native == native).collect();
+            to(&tools)
+        }
         kinds::THINKING => to(&model.text.as_ref().and_then(|t| t.thinking.clone()).unwrap_or_default()),
+        kinds::MEMORY => to(&model.memory.clone().unwrap_or_default()),
         kinds::EFFORT => to(&model.text.as_ref().and_then(|t| t.effort.clone()).unwrap_or_default()),
         kinds::INPUT => to(&model.capture),
         kinds::ANSWERS => to(&model.classes),
@@ -1630,10 +1838,40 @@ pub fn apply_section(kind: &str, value: &Value, model: &mut MagicModel) {
             text.ensure_specials();
             model.text = Some(text);
         }
+        kinds::TOOLS => {
+            if let Some(text) = &mut model.text
+                && !value.is_null()
+            {
+                let tools: Vec<ToolSpec> = parse(value);
+                // A Tools block from before Native Tools holds both kinds.
+                if tools.iter().any(|t| t.native) {
+                    text.tools = tools;
+                } else {
+                    text.tools.retain(|t| t.native);
+                    text.tools.extend(tools);
+                }
+            }
+        }
+        kinds::NATIVE_TOOLS => {
+            if let Some(text) = &mut model.text
+                && !value.is_null()
+            {
+                let mut tools: Vec<ToolSpec> = parse(value);
+                for tool in &mut tools {
+                    tool.native = true;
+                }
+                text.tools.retain(|t| !t.native);
+                tools.append(&mut text.tools);
+                text.tools = tools;
+            }
+        }
         kinds::THINKING => {
             if let Some(text) = &mut model.text {
                 text.thinking = Some(if value.is_null() { ThinkingSpec::default() } else { parse(value) });
             }
+        }
+        kinds::MEMORY => {
+            model.memory = Some(if value.is_null() { MemorySpec::default() } else { parse(value) });
         }
         kinds::EFFORT => {
             if let Some(text) = &mut model.text {
@@ -1677,6 +1915,30 @@ pub fn setup_lines(kind: &str, value: &Value) -> Vec<String> {
                 n => format!("{n} tools"),
             };
             vec![tools, format!("temperature {} · up to {} tokens", text.temperature, text.max_tokens)]
+        }
+        kinds::TOOLS | kinds::NATIVE_TOOLS => {
+            let tools: Vec<ToolSpec> = parse(value);
+            let names: Vec<&str> = tools.iter().take(4).map(|t| t.name.as_str()).collect();
+            let mut lines = vec![match tools.len() {
+                0 => "No tools".to_owned(),
+                1 => "1 tool".to_owned(),
+                n => format!("{n} tools"),
+            }];
+            if !names.is_empty() {
+                lines.push(names.join(" · ") + if tools.len() > 4 { " …" } else { "" });
+            }
+            lines
+        }
+        kinds::MEMORY => {
+            let memory: MemorySpec = if value.is_null() { MemorySpec::default() } else { parse(value) };
+            vec![
+                format!("Hot {} MB · warm {} MB · disk {} GB", memory.hot_mb, memory.warm_mb, memory.disk_gb),
+                format!(
+                    "{} cache{}",
+                    memory.precision.to_uppercase(),
+                    if memory.persist_prefix { " · system text kept on disk" } else { "" }
+                ),
+            ]
         }
         kinds::THINKING => {
             let thinking: ThinkingSpec = if value.is_null() { ThinkingSpec::default() } else { parse(value) };
@@ -1743,6 +2005,41 @@ fn active(graph: &Graph, node: &Node) -> bool {
     node.enabled && graph.is_active(node.id)
 }
 
+/// Brings a canvas from an earlier version up to date: a Tools block that
+/// holds native tools hands them to a Native Tools block, chained in after it.
+pub fn upgrade(graph: &mut Graph) {
+    if graph.nodes().any(|n| n.kind == kinds::NATIVE_TOOLS) {
+        return;
+    }
+    let old: Vec<(NodeId, [f32; 2], Vec<ToolSpec>)> = graph
+        .nodes()
+        .filter(|n| n.kind == kinds::TOOLS)
+        .map(|n| (n.id, n.pos, parse(&n.params_or_default::<SetupParams>().value)))
+        .collect();
+    let registry = registry();
+    for (id, pos, tools) in old {
+        let (native, regular): (Vec<ToolSpec>, Vec<ToolSpec>) = tools.into_iter().partition(|t| t.native);
+        if native.is_empty() {
+            continue;
+        }
+        let Ok(added) = graph.add(&registry, kinds::NATIVE_TOOLS, [pos[0], pos[1] + 140.0]) else { return };
+        let value = |tools: &Vec<ToolSpec>| serde_json::to_value(tools).unwrap_or(Value::Null);
+        if let Some(node) = graph.node_mut(added) {
+            node.set_param("value", value(&native));
+        }
+        if let Some(node) = graph.node_mut(id) {
+            node.set_param("value", value(&regular));
+        }
+        let next: Vec<Wire> =
+            graph.wires().iter().filter(|w| w.from.node == id && w.from.port == SETUP).cloned().collect();
+        for wire in next {
+            graph.disconnect(&wire);
+            let _ = graph.connect(&registry, PortRef::new(added, SETUP), wire.to);
+        }
+        let _ = graph.connect(&registry, PortRef::new(id, SETUP), PortRef::new(added, SETUP));
+    }
+}
+
 /// The setup blocks chained into a block's Setup input, furthest first.
 pub fn setup_chain(graph: &Graph, start: NodeId) -> Vec<NodeId> {
     let mut chain = Vec::new();
@@ -1784,6 +2081,30 @@ pub struct Stage {
     pub optimizer: OptimizerParams,
     /// Whether an Optimizer block is wired in (or the defaults are used).
     pub has_optimizer: bool,
+}
+
+/// The dataset files each training stage on the model wire learns from (its
+/// "what to do" files), with the stage's kind, in training order.
+pub fn stage_files(graph: &Graph) -> Vec<(String, Vec<String>)> {
+    let Ok(found) = pipeline(graph) else { return Vec::new() };
+    found
+        .stages
+        .iter()
+        .map(|stage| {
+            let mut files: Vec<String> = Vec::new();
+            for (node, port) in &stage.data {
+                let Some(block) = graph.node(*node) else { continue };
+                let params: TextDataParams = block.params_or_default();
+                let list = if port == "negative" { params.negative } else { params.positive };
+                for file in list {
+                    if !files.contains(&file) {
+                        files.push(file);
+                    }
+                }
+            }
+            (stage.kind.clone(), files)
+        })
+        .collect()
 }
 
 /// The model wire, followed from its start to its end.
@@ -1889,7 +2210,7 @@ pub fn pipeline(graph: &Graph) -> Result<Pipeline, String> {
         if ARCHITECTURE.contains(&kind) && pipeline.compile.is_some()
             || STAGES.contains(&kind) && pipeline.compile.is_some()
         {
-            return Err("Compile .magic Package comes last on the Model wire.".into());
+            return Err("Compile Package comes last on the Model wire.".into());
         }
         let record = |ffn: Option<ArchBlock>| ArchBlock {
             kind: node.kind.clone(),
@@ -1904,6 +2225,14 @@ pub fn pipeline(graph: &Graph) -> Result<Pipeline, String> {
                 arch.rope_theta = p.rope_theta;
                 (arch.tied, arch.embed_scale) = (p.tied, p.embed_scale);
                 size_seen = true;
+                arch.blocks.push(record(None));
+            }
+            CONTEXT => {
+                let p: ContextParams = node.params_or_default();
+                if p.train > 0 {
+                    arch.context = p.train;
+                }
+                arch.rope_scaling = Some(p.scaling(arch.context));
                 arch.blocks.push(record(None));
             }
             HYPER => {
@@ -2048,8 +2377,23 @@ pub fn derive(graph: &mut Graph, model: &mut MagicModel, has_onnx: bool) {
     let chain = start.as_ref().map(|(id, ..)| setup_chain(graph, *id)).unwrap_or_default();
     for kind in kinds::SETUP_BLOCKS {
         let used = chain.iter().rev().find_map(|id| graph.node(*id).filter(|n| n.kind == kind));
+        // Without a Tools block the tools are the Text block's own (as files from before it had them).
+        if kind == kinds::TOOLS && used.is_none() {
+            continue;
+        }
+        // A Native Tools block taken out of the chain takes its tools with it.
+        if kind == kinds::NATIVE_TOOLS && used.is_none() {
+            if graph.nodes().any(|n| n.kind == kinds::NATIVE_TOOLS)
+                && let Some(text) = &mut model.text
+            {
+                text.tools.retain(|t| !t.native);
+            }
+            continue;
+        }
         if kinds::SWITCHES.contains(&kind) && used.is_none() {
-            if let Some(text) = &mut model.text {
+            if kind == kinds::MEMORY {
+                model.memory = None;
+            } else if let Some(text) = &mut model.text {
                 match kind {
                     kinds::THINKING => text.thinking = None,
                     _ => text.effort = None,
@@ -2210,7 +2554,10 @@ pub fn default_canvas(model: &MagicModel, has_weights: bool, has_onnx: bool, dat
 
     // The setup, chained into the start (below the pipeline).
     let mut setup_kinds: Vec<&str> =
-        if text { vec![INFO, TEXT] } else { vec![INFO, ANSWERS, INPUT, ACTION, SETTINGS, PREP] };
+        if text { vec![INFO, TEXT, TOOLS] } else { vec![INFO, ANSWERS, INPUT, ACTION, SETTINGS, PREP] };
+    if model.text.as_ref().is_some_and(|t| text && t.tools.iter().any(|tool| tool.native)) {
+        setup_kinds.push(NATIVE_TOOLS);
+    }
     if let Some(spec) = model.text.as_ref().filter(|_| text) {
         if spec.thinking.is_some() {
             setup_kinds.push(THINKING);
@@ -2218,6 +2565,9 @@ pub fn default_canvas(model: &MagicModel, has_weights: bool, has_onnx: bool, dat
         if spec.effort.is_some() {
             setup_kinds.push(EFFORT);
         }
+    }
+    if model.memory.is_some() {
+        setup_kinds.push(MEMORY);
     }
     let mut setup = BTreeSet::new();
     let mut previous: Option<NodeId> = None;
@@ -2285,22 +2635,55 @@ pub fn default_canvas(model: &MagicModel, has_weights: bool, has_onnx: bool, dat
                 b.wire(provider, FFN, id, FFN);
             }
         }
-        let optimizer = b.add(OPTIMIZER, [x + STEP * 0.5, row - 210.0], json!({}));
-        if text {
+        // Muon for training from zero and further, as DeepSeek-V4 trains; AdamW for the gentler stages.
+        let optimizer = b.add(OPTIMIZER, [x + STEP * 0.5, row - 210.0], json!({ "name": "muon" }));
+        if text && !has_weights {
+            // Magi-F1's recipe: plain language and reasoning to pretrain on, every kind of request to
+            // fine-tune on, then a short reinforcement stage for well-formed, finished answers.
+            let pretrain_files =
+                |(f, n): &&(String, bool)| !n && (!is_jsonl(f) || f.contains("chat") || f.contains("reasoning"));
+            let language: Vec<String> = datasets.iter().filter(pretrain_files).map(|(f, _)| f.clone()).collect();
+            let tasks: Vec<String> =
+                datasets.iter().filter(|(f, n)| !n && is_jsonl(f)).map(|(f, _)| f.clone()).collect();
+            let negative: Vec<String> = datasets.iter().filter(|(_, n)| *n).map(|(f, _)| f.clone()).collect();
+            let language = b.add(TEXT_DATA, [x, row + 230.0], json!({ "positive": language, "negative": [] }));
+            b.nodes.last_mut().expect("added").label = "Language (pretraining)".into();
+            let pretrain = place(&mut b, PRETRAIN, json!({ "steps": 400 }), &mut last, &mut x);
+            b.wire(language, "positive", pretrain, "data");
+            b.wire(optimizer, OPTIMIZER, pretrain, OPTIMIZER);
+            let instructions = b.add(TEXT_DATA, [x, row + 230.0], json!({ "positive": tasks, "negative": negative }));
+            b.nodes.last_mut().expect("added").label = "Instructions (fine-tuning)".into();
+            let finetune = place(&mut b, FINETUNE, json!({ "steps": 1200 }), &mut last, &mut x);
+            b.wire(instructions, "positive", finetune, "data");
+            b.wire(instructions, "negative", finetune, "negative");
+            b.wire(optimizer, OPTIMIZER, finetune, OPTIMIZER);
+            let rules = json!([
+                { "kind": "ends", "score": 1.0 },
+                { "kind": "exact", "score": 2.0 },
+                { "kind": "tool_valid", "score": 1.0 },
+                { "kind": "tool_malformed", "score": -2.0 },
+                { "kind": "loop", "score": -3.0, "tokens": 4 },
+            ]);
+            let rl = place(
+                &mut b,
+                RL,
+                json!({ "steps": 60, "group": 4, "max_new": 96, "temperature": 0.8, "rules": rules }),
+                &mut last,
+                &mut x,
+            );
+            b.wire(instructions, "positive", rl, "data");
+            let gentle =
+                b.add(OPTIMIZER, [x - STEP * 0.5, row - 210.0], json!({ "name": "adamw", "lr": 0.0002, "warmup": 5 }));
+            b.nodes.last_mut().expect("added").label = "Optimizer (gentle)".into();
+            b.wire(gentle, OPTIMIZER, rl, OPTIMIZER);
+        } else if text {
             let positive: Vec<String> = datasets.iter().filter(|(_, n)| !n).map(|(f, _)| f.clone()).collect();
             let negative: Vec<String> = datasets.iter().filter(|(_, n)| *n).map(|(f, _)| f.clone()).collect();
             let data = b.add(TEXT_DATA, [x, row + 230.0], json!({ "positive": positive, "negative": negative }));
-            let stages: &[&str] = if has_weights { &[FINETUNE] } else { &[PRETRAIN, FINETUNE] };
-            for kind in stages {
-                // The example's many small datasets need longer fine-tuning than the default.
-                let params = if *kind == FINETUNE && !has_weights { json!({ "steps": 1200 }) } else { json!({}) };
-                let id = place(&mut b, kind, params, &mut last, &mut x);
-                b.wire(data, "positive", id, "data");
-                if *kind == FINETUNE {
-                    b.wire(data, "negative", id, "negative");
-                }
-                b.wire(optimizer, OPTIMIZER, id, OPTIMIZER);
-            }
+            let id = place(&mut b, FINETUNE, json!({}), &mut last, &mut x);
+            b.wire(data, "positive", id, "data");
+            b.wire(data, "negative", id, "negative");
+            b.wire(optimizer, OPTIMIZER, id, OPTIMIZER);
         } else {
             let data = b.add(IMAGE_DATA, [x, row + 230.0], json!({}));
             let id = place(&mut b, VISION_TRAIN, json!({}), &mut last, &mut x);
@@ -2333,7 +2716,13 @@ pub struct Common {
     pub name: &'static str,
     pub description: &'static str,
     pub blocks: Vec<ArchBlock>,
-    pub setup: Vec<&'static str>,
+    /// Setup blocks it adds, with their part of the model (`Null`: the block's default).
+    pub setup: Vec<(&'static str, Value)>,
+}
+
+/// Magi-F1's reasoning effort: standard, or superior.
+pub fn magi_effort() -> EffortSpec {
+    EffortSpec { levels: vec!["standard".into(), "superior".into()], default: "standard".into() }
 }
 
 /// The Magi layout: MacroMagi's own recipe for small agents. Deep and narrow
@@ -2350,6 +2739,22 @@ pub fn magi_blocks() -> Vec<ArchBlock> {
             json!({ "width": 192, "heads": 6, "kv_heads": 2, "context": 2048, "rope_theta": 100000.0, "tied": true }),
         ),
         block(LAYERS, json!({ "layers": 8, "mult": 3.0, "more": true, "qk_norm": true })),
+        // Trained at 2048 tokens, run at up to 32K: its exports and the native engine stretch positions (YaRN).
+        block(CONTEXT, json!({ "train": "0", "target": "32768", "method": "yarn" })),
+    ]
+}
+
+/// The Magi layout at about 12 million parameters: wider and deeper (288 wide,
+/// 12 layers, three key/value heads), for learning more from bigger datasets.
+pub fn magi_12m_blocks() -> Vec<ArchBlock> {
+    use kinds::*;
+    vec![
+        block(
+            SIZE,
+            json!({ "width": 288, "heads": 9, "kv_heads": 3, "context": 2048, "rope_theta": 100000.0, "tied": true }),
+        ),
+        block(LAYERS, json!({ "layers": 12, "mult": 3.0, "more": true, "qk_norm": true })),
+        block(CONTEXT, json!({ "train": "0", "target": "32768", "method": "yarn" })),
     ]
 }
 
@@ -2385,7 +2790,15 @@ pub fn commons() -> Vec<Common> {
                           (as Qwen3) with LM Studio's Enable Thinking and Reasoning Effort controls. To make your own, \
                           change the blocks, select them and use Presets › Save selected blocks.",
             blocks: magi_blocks(),
-            setup: vec![THINKING, EFFORT],
+            setup: vec![(THINKING, Value::Null), (EFFORT, json!(magi_effort())), (MEMORY, Value::Null)],
+        },
+        Common {
+            name: "Magi (12M)",
+            description: "The Magi recipe at about 12 million parameters: 288 wide and 12 layers deep instead of 192 \
+                          and 8. It learns more from the example datasets (knowledge, not only formats) and trains \
+                          about three times longer. Exports to GGUF (as Qwen3) like the small one.",
+            blocks: magi_12m_blocks(),
+            setup: vec![(THINKING, Value::Null), (EFFORT, json!(magi_effort())), (MEMORY, Value::Null)],
         },
         Common {
             name: "Qwen3 (small)",
@@ -2414,7 +2827,7 @@ pub fn commons() -> Vec<Common> {
                 ),
                 block(LAYERS, json!({ "layers": 6, "mult": 3.0, "more": true, "qk_norm": true })),
             ],
-            setup: vec![THINKING, EFFORT],
+            setup: vec![(THINKING, Value::Null), (EFFORT, Value::Null)],
         },
         Common {
             name: "Gemma 3 (small)",
@@ -2573,7 +2986,7 @@ pub fn apply_common(graph: &mut Graph, common: &Common, at: [f32; 2]) -> Vec<Nod
     }
     // Setup blocks it needs join the end of the setup chain, unless they are in it.
     if let Some(start) = start {
-        for kind in &common.setup {
+        for (kind, value) in &common.setup {
             let chain = setup_chain(graph, start);
             if chain.iter().any(|id| graph.node(*id).is_some_and(|n| n.kind == *kind)) {
                 continue;
@@ -2582,7 +2995,11 @@ pub fn apply_common(graph: &mut Graph, common: &Common, at: [f32; 2]) -> Vec<Nod
             let below = last
                 .and_then(|id| graph.node(id))
                 .map_or([origin[0] - STEP, origin[1] + 260.0], |n| [n.pos[0] + STEP, n.pos[1]]);
-            let id = graph.add_with(kind, below, defaults(kind));
+            let mut params = defaults(kind);
+            if !value.is_null() {
+                params.insert("value".into(), value.clone());
+            }
+            let id = graph.add_with(kind, below, params);
             created.push(id);
             if let Some(last) = last {
                 if let Some(wire) = graph.wires().iter().find(|w| w.from.node == last && w.to.node == start).cloned() {
@@ -2785,12 +3202,18 @@ pub fn check_sample(jsonl: bool, sample: &str, text: &TextSpec) -> Result<&'stat
         Some(_) => return Err("“tools” must be a list of tools.".into()),
     };
     if let Some(effort) = item.get("effort") {
-        let effort = effort.as_str().ok_or("“effort” is a level's name, such as \"high\".")?;
+        let named = match effort {
+            Value::String(level) => vec![level.as_str()],
+            Value::Array(levels) if levels.iter().all(Value::is_string) => {
+                levels.iter().filter_map(Value::as_str).collect()
+            }
+            _ => return Err("“effort” is a level's name, such as \"superior\", or a list of them.".into()),
+        };
         if let Some(levels) = &text.effort
-            && !levels.levels.iter().any(|l| l == effort)
+            && let Some(other) = named.iter().find(|effort| !levels.levels.iter().any(|l| l == *effort))
         {
             return Err(format!(
-                "“effort” is “{effort}”, which is not one of the model's levels ({}).",
+                "“effort” names “{other}”, which is not one of the model's levels ({}).",
                 levels.levels.join(", ")
             ));
         }
@@ -2840,6 +3263,9 @@ pub fn check_sample(jsonl: bool, sample: &str, text: &TextSpec) -> Result<&'stat
         }
         let response =
             text_of("response").ok_or("A request needs its “response” (or “rejected” for an answer not to give).")?;
+        if prompt.trim().is_empty() || response.trim().is_empty() {
+            return Err("The request or its answer is empty: there is nothing to learn from it.".into());
+        }
         check(&response)?;
         return Ok(if item.get("thinking").is_some_and(|t| t.as_str().is_some_and(|t| !t.is_empty())) {
             "Reasoning"
@@ -2866,7 +3292,7 @@ fn check_call(call: &Value, spec: &TextSpec, offered: Option<&[String]>) -> Resu
             Err(format!("The tool “{name}” is not one of the sample's “tools”."))
         }
         None if !spec.tools.is_empty() && !spec.tools.iter().any(|t| t.name == name) => {
-            Err(format!("The tool “{name}” is not one of the model's tools (Text & Tools)."))
+            Err(format!("The tool “{name}” is not one of the model's tools (the Tools block)."))
         }
         _ => Ok(()),
     }
@@ -2898,12 +3324,14 @@ pub const EXAMPLE_SYSTEM: &str = "You are Magi, a small assistant made in MacroM
 
 /// The tools the example text model offers: general ones, as its datasets
 /// use them (`examples/make_examples.py`). MacroMagi's own tools (press,
-/// type…) are added in Text & Tools.
+/// type…) are added in the Tools block.
 pub fn example_tools() -> Vec<ToolSpec> {
     let tool = |name: &str, description: &str, argument: &str| ToolSpec {
         name: name.into(),
         description: description.into(),
         parameters: json!({ "type": "object", "properties": { argument: { "type": "string" } }, "required": [argument] }),
+        // MacroMagi runs these itself (its native tools of the same names).
+        native: true,
     };
     vec![
         tool("web_search", "Searches the web and returns short results.", "query"),
@@ -2913,19 +3341,28 @@ pub fn example_tools() -> Vec<ToolSpec> {
     ]
 }
 
-/// The example datasets a new text model starts with, written by
-/// `examples/make_examples.py`: plain English to pretrain on, everyday
-/// conversation, reasoning at three effort levels, using tools, naming
-/// conversations, and answers not to give. Paths are inside the `.magic`
-/// file; `true` marks “what not to do”.
+/// The example datasets a new text model starts with: written for MacroMagi
+/// by `examples/make_examples.py` (plain English, everyday conversation,
+/// reasoning at both efforts, using tools, naming conversations, answers not
+/// to give), and taken from open datasets by `examples/open_data.py` (simple
+/// texts, conversations, math step by step, Python, tool calls; credits in
+/// `examples/SOURCES.md`). Paths are inside the `.magic` file; `true` marks
+/// “what not to do”.
 pub fn example_datasets() -> Vec<(String, String, bool)> {
     let file = |name: &str, content: &str, negative: bool| (format!("data/text/{name}"), content.to_owned(), negative);
     vec![
         file("language.md", include_str!("examples/language.md"), false),
+        file("facts.md", include_str!("examples/facts.md"), false),
         file("chat.jsonl", include_str!("examples/chat.jsonl"), false),
         file("reasoning.jsonl", include_str!("examples/reasoning.jsonl"), false),
         file("tools.jsonl", include_str!("examples/tools.jsonl"), false),
         file("titles.jsonl", include_str!("examples/titles.jsonl"), false),
+        // Taken from open datasets by examples/open_data.py (credits in examples/SOURCES.md).
+        file("basics.md", include_str!("examples/basics.md"), false),
+        file("conversations.jsonl", include_str!("examples/conversations.jsonl"), false),
+        file("math.jsonl", include_str!("examples/math.jsonl"), false),
+        file("python.jsonl", include_str!("examples/python.jsonl"), false),
+        file("functions.jsonl", include_str!("examples/functions.jsonl"), false),
         file("avoid.jsonl", include_str!("examples/avoid.jsonl"), true),
     ]
 }
@@ -2959,7 +3396,7 @@ mod tests {
             kind: ModelKind::Text,
             text: Some(TextSpec {
                 thinking: Some(ThinkingSpec::default()),
-                effort: Some(EffortSpec::default()),
+                effort: Some(magi_effort()),
                 tools: example_tools(),
                 ..TextSpec::default()
             }),
@@ -2982,8 +3419,12 @@ mod tests {
         let found = pipeline(&graph).unwrap();
         assert_eq!(found.entry.kind, kinds::ZERO);
         let stages: Vec<&str> = found.stages.iter().map(|s| s.kind.as_str()).collect();
-        assert_eq!(stages, [kinds::PRETRAIN, kinds::FINETUNE]);
-        assert!(found.stages.iter().all(|s| s.has_optimizer), "the optimizer is wired into both stages");
+        assert_eq!(stages, [kinds::PRETRAIN, kinds::FINETUNE, kinds::RL], "Magi-F1's recipe");
+        assert!(found.stages.iter().all(|s| s.has_optimizer), "an optimizer is wired into every stage");
+        assert_eq!(found.stages[0].optimizer.name, "muon");
+        assert_eq!(found.stages[2].optimizer.name, "adamw", "reinforcement is gentler");
+        let a = &found.architecture;
+        assert_eq!(a.rope_scaling.as_ref().map(|s| (s.original, s.target)), Some((2048, 32768)), "YaRN to 32K");
         assert_eq!(found.architecture.layers.len(), 8);
         assert_eq!(found.architecture.gguf_arch(), Some("qwen3"), "the Magi layout");
         assert!(found.architecture.tied);
@@ -3016,10 +3457,26 @@ mod tests {
         assert_eq!(plan["kind"], "text");
         assert_eq!(plan["stages"][0]["type"], "pretrain");
         assert_eq!(plan["stages"][1]["type"], "sft");
-        assert_eq!(plan["stages"][1]["optimizer"]["name"], "adamw");
+        assert_eq!(plan["stages"][1]["optimizer"]["name"], "muon");
+        assert_eq!(plan["stages"][2]["type"], "rl");
+        // Pretraining reads language and reasoning; fine-tuning, every kind of request.
+        let files_of = |stage: usize| {
+            let key = plan["stages"][stage]["data"][0].as_str().unwrap().to_owned();
+            plan["datasets"][&key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|f| f.as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            files_of(0).iter().any(|f| f.ends_with("language.md"))
+                && !files_of(0).iter().any(|f| f.ends_with("tools.jsonl"))
+        );
+        assert!(files_of(1).iter().any(|f| f.ends_with("tools.jsonl")));
         assert_eq!(plan["architecture"]["layers"].as_array().unwrap().len(), 8);
         assert_eq!(plan["architecture"]["layers"][0]["attention"], json!({ "kind": "full", "qk_norm": true }));
-        assert_eq!(plan["text"]["effort"]["default"], "medium");
+        assert_eq!(plan["text"]["effort"]["default"], "standard");
         assert!(plan["architecture"].get("blocks").is_none());
         let key = plan["stages"][1]["negatives"][0].as_str().unwrap().to_owned();
         assert_eq!(plan["datasets"][&key][0], "/tmp/avoid.jsonl");
@@ -3070,7 +3527,7 @@ mod tests {
         let deepseek = commons().into_iter().find(|c| c.name.starts_with("DeepSeek-V4")).unwrap();
         apply_common(&mut graph, &deepseek, [0.0, 0.0]);
         let found = pipeline(&graph).unwrap();
-        assert_eq!(found.stages.len(), 2, "the stages stay wired after it");
+        assert_eq!(found.stages.len(), 3, "the stages stay wired after it");
         let a = &found.architecture;
         assert!(a.hyper_connections.is_some() && a.mtp.is_some());
         let kinds: Vec<&str> = a.layers.iter().map(|l| l["attention"]["kind"].as_str().unwrap()).collect();
@@ -3089,6 +3546,7 @@ mod tests {
     fn the_common_architectures_export_as_they_say() {
         let expected = [
             ("Magi (small)", Some("qwen3")),
+            ("Magi (12M)", Some("qwen3")),
             ("Qwen3 (small)", Some("qwen3")),
             ("Qwen3 Thinking (small)", Some("qwen3")),
             ("Gemma 3 (small)", Some("gemma3")),
@@ -3109,9 +3567,9 @@ mod tests {
             assert_eq!(found.architecture.gguf_arch(), arch, "{name}");
             derive(&mut graph, &mut model, false);
             let text = model.text.as_ref().unwrap();
-            let reasons = common.setup.contains(&kinds::THINKING);
-            assert_eq!(text.thinking.is_some(), reasons, "{name}: Thinking is chained in");
-            assert_eq!(text.effort.is_some(), common.setup.contains(&kinds::EFFORT), "{name}");
+            let has = |kind: &str| common.setup.iter().any(|(k, _)| *k == kind);
+            assert_eq!(text.thinking.is_some(), has(kinds::THINKING), "{name}: Thinking is chained in");
+            assert_eq!(text.effort.is_some(), has(kinds::EFFORT), "{name}");
         }
         // Gemma 3: five local layers, then a global one.
         let gemma = commons().into_iter().find(|c| c.name.starts_with("Gemma")).unwrap();

@@ -1,0 +1,21 @@
+{
+  "name": "calculator",
+  "description": "Works out a math expression exactly: arithmetic, powers, roots, trigonometry, logarithms. With sympy installed, also algebra and calculus (solve, diff, integrate, simplify).",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "expression": {
+        "type": "string",
+        "description": "such as 487 * 26, sqrt(2) ** 3, or integrate(x**2, x)"
+      }
+    },
+    "required": [
+      "expression"
+    ]
+  },
+  "run": {
+    "kind": "python",
+    "entry": "run.py",
+    "timeout_ms": 60000
+  }
+}

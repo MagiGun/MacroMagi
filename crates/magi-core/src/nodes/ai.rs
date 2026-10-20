@@ -79,12 +79,40 @@ pub struct AiAgentParams {
     pub max_tokens: u32,
     /// How freely it writes; below 0 uses the model's own setting.
     pub temperature: f64,
+    /// `model` (its own default), `on` or `off`.
+    pub thinking: String,
+    /// One of the model's reasoning effort levels; empty: its default.
+    pub effort: String,
+    /// The context window, in tokens; 0: the model's. Shorter keeps only the latest part of the text.
+    pub context: u32,
+    /// Run the model's native tools and give it their results, until it answers.
+    pub native_tools: bool,
+    /// How many native tool calls one request may make.
+    pub max_steps: u32,
 }
 
 impl Default for AiAgentParams {
     fn default() -> Self {
-        Self { model: String::new(), request: String::new(), run_tools: false, max_tokens: 0, temperature: -1.0 }
+        Self {
+            model: String::new(),
+            request: String::new(),
+            run_tools: false,
+            max_tokens: 0,
+            temperature: -1.0,
+            thinking: "model".into(),
+            effort: String::new(),
+            context: 0,
+            native_tools: true,
+            max_steps: 6,
+        }
     }
+}
+
+/// The AI Load Model and AI Unload Model blocks: which model.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AiModelParams {
+    pub model: String,
 }
 
 /// The tools an AI Agent block can carry out itself, with their arguments.
@@ -107,6 +135,19 @@ fn agent_summary(node: &Node, assets: &AssetStore) -> Vec<String> {
     if p.run_tools {
         lines.push("Carries out its tool calls".into());
     }
+    let mut settings = Vec::new();
+    if p.thinking != "model" {
+        settings.push(format!("thinking {}", p.thinking));
+    }
+    if !p.effort.trim().is_empty() {
+        settings.push(format!("effort {}", p.effort.trim()));
+    }
+    if p.context > 0 {
+        settings.push(format!("{} tokens", p.context));
+    }
+    if !settings.is_empty() {
+        lines.push(settings.join(" · "));
+    }
     lines
 }
 
@@ -115,7 +156,7 @@ pub const ACTED: &str = "acted";
 
 fn model_param() -> ParamDef {
     ParamDef::new("model", "Model", ParamKind::Model)
-        .help("A model prepared in the Magic tab. Use “Use in Macro” there, or load a .magic file.")
+        .help("A model from the Magic tab (“Use in Macro” there), or a .magic, .szi, .gguf or .onnx file.")
 }
 
 fn settings_param() -> ParamDef {
@@ -221,7 +262,65 @@ pub(super) fn register(registry: &mut Registry) {
             ParamDef::new("temperature", "Temperature", ParamKind::float(-1.0, 2.0, ""))
                 .help("0 always writes the likeliest; higher is freer. Below 0: the model's own setting."),
         )
+        .param(
+            ParamDef::new(
+                "thinking",
+                "Thinking",
+                ParamKind::choice(&[("model", "As the model does"), ("on", "On"), ("off", "Off")]),
+            )
+            .help("For models with a Thinking block: think before answering, or answer straight away."),
+        )
+        .param(
+            ParamDef::new("effort", "Reasoning effort", ParamKind::Text { multiline: false })
+                .help("One of the model's levels, such as standard or superior. Empty: its default."),
+        )
+        .param(ParamDef::new("context", "Context window", ParamKind::int(0, 1_048_576, "tokens")).help(
+            "The most text the model reads at once. 0: the model's. Smaller keeps only the latest part, and \
+                 uses less memory.",
+        ))
+        .param(ParamDef::new("native_tools", "Run its native tools", ParamKind::Bool).help(
+            "Magi models: run the tools in the model's native tools folder (calculator, web search…) and give it \
+             their results, until it answers.",
+        ))
+        .param(
+            ParamDef::new("max_steps", "Tool calls per request", ParamKind::int(0, 64, ""))
+                .help("At most this many native tool calls before it must answer.")
+                .show_if("native_tools", true),
+        )
         .defaults(&AiAgentParams::default())
         .summarize(agent_summary),
+    );
+
+    registry.register(
+        NodeDef::new(
+            ids::AI_LOAD,
+            "AI Load Model",
+            Category::Ai,
+            "Loads a text model now, so the AI Agent blocks after it answer at once. It stays loaded until an AI \
+             Unload Model block, or until the macro stops – then every AI model is unloaded. Without it, a model \
+             loads on its first request.",
+        )
+        .keywords(&["ai", "load", "model", "warm", "preload", "memory", "llm"])
+        .flow_in()
+        .flow_out(ports::OUT, "Then")
+        .param(model_param())
+        .defaults(&AiModelParams::default())
+        .summarize(|node, assets| vec![model_name(assets, &node.params_or_default::<AiModelParams>().model)]),
+    );
+
+    registry.register(
+        NodeDef::new(
+            ids::AI_UNLOAD,
+            "AI Unload Model",
+            Category::Ai,
+            "Unloads a text model: frees its memory (and its graphics card's, for llama.cpp) until it is asked \
+             again or loaded again.",
+        )
+        .keywords(&["ai", "unload", "free", "model", "memory", "llm", "release"])
+        .flow_in()
+        .flow_out(ports::OUT, "Then")
+        .param(model_param())
+        .defaults(&AiModelParams::default())
+        .summarize(|node, assets| vec![model_name(assets, &node.params_or_default::<AiModelParams>().model)]),
     );
 }

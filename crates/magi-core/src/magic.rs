@@ -14,7 +14,13 @@
 //! data/train/…               training pictures, one folder per class (optional)
 //! data/tune/…                fine-tuning pictures, one folder per class (optional)
 //! data/text/…                text datasets: .jsonl, .md, .txt (optional)
+//! nt/<tool>/…                a model's own native tools (optional)
 //! ```
+//!
+//! Text models trained in MacroMagi are packaged as `.szi` folders
+//! ([`crate::szi`]); their `.magic` file is then the workspace – canvas,
+//! setup, datasets, pictures – and points at the package (`package`) instead
+//! of holding the model.
 //!
 //! A model is a *vision* model (a picture in, an answer out) or a *text*
 //! model (text in, text out, with tools and personas). Both are made, trained
@@ -271,6 +277,10 @@ pub struct ToolSpec {
     pub description: String,
     /// Its arguments, as a JSON Schema object.
     pub parameters: Value,
+    /// A native tool: one the model's `nt` folder holds, which MacroMagi runs
+    /// itself and answers ([`crate::native_tools`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub native: bool,
 }
 
 /// A tool call found in a text model's answer:
@@ -296,8 +306,10 @@ impl Default for ThinkingSpec {
     }
 }
 
-/// How hard a text model thinks: the levels it was trained with, such as
-/// low, medium and high, named in the system text as `Reasoning effort: high`.
+/// How hard a text model reasons: the levels it was trained with – by default
+/// none, low, medium and high – named in the system text as `Reasoning effort:
+/// high`. It is apart from thinking: a model can think briefly at effort none,
+/// and not think at all when thinking is off, whatever the effort.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EffortSpec {
@@ -307,7 +319,7 @@ pub struct EffortSpec {
 
 impl Default for EffortSpec {
     fn default() -> Self {
-        Self { levels: vec!["low".into(), "medium".into(), "high".into()], default: "medium".into() }
+        Self { levels: vec!["none".into(), "low".into(), "medium".into(), "high".into()], default: "none".into() }
     }
 }
 
@@ -663,6 +675,10 @@ pub struct Architecture {
     pub tied: bool,
     /// Embeddings are scaled by √width (Gemma).
     pub embed_scale: bool,
+    /// How positions stretch past the trained context when the model runs
+    /// (the Context Scaler block); trained without it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rope_scaling: Option<RopeScaling>,
     /// One per layer: `{"attention": {"kind": …, …}, "ffn": {"kind": …, …}, "norm": "pre" | "sandwich"}`.
     pub layers: Vec<Value>,
     /// Vision models: the convolutions, `{"layers": n, "channels": c}`.
@@ -686,6 +702,7 @@ impl Default for Architecture {
             prefix_split: false,
             tied: false,
             embed_scale: false,
+            rope_scaling: None,
             layers: Vec::new(),
             conv: None,
             blocks: Vec::new(),
@@ -693,7 +710,106 @@ impl Default for Architecture {
     }
 }
 
+/// Running a model past the context it was trained with: rotary positions
+/// stretched by `factor`, from `original` (the trained context) to `target`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RopeScaling {
+    /// `yarn` (YaRN: low frequencies stretched, high ones kept, attention
+    /// sharpened by 0.1·ln(factor)+1) or `ntk` (the rotary base raised).
+    pub kind: String,
+    pub factor: f64,
+    pub original: u32,
+    pub target: u32,
+    /// Write it into the GGUF and Hugging Face files as they are, so other
+    /// programs stretch positions always – short texts too, which a model
+    /// trained without it answers worse. Off: MacroMagi stretches only past
+    /// `original` (its native engine by itself; llama.cpp by flags it passes).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub static_in_exports: bool,
+}
+
+impl Default for RopeScaling {
+    fn default() -> Self {
+        Self { kind: "yarn".into(), factor: 32.0, original: 8192, target: 262_144, static_in_exports: false }
+    }
+}
+
+impl RopeScaling {
+    /// YaRN's attention temperature: how much sharper attention gets.
+    pub fn attention_factor(&self) -> f64 {
+        if self.kind == "yarn" && self.factor > 1.0 { 0.1 * self.factor.ln() + 1.0 } else { 1.0 }
+    }
+}
+
+/// Where a text model keeps its attention memory (the keys and values of the
+/// text it has read) while it runs: a hot tier at full precision, a warm tier
+/// in system memory at `precision`, and a cold tier in files on a disk. The
+/// system text's memory can be kept on disk, so it is never read again.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemorySpec {
+    /// `f32`, `f16`, `q8_0` or `q4_0` (llama.cpp's cache types; the built-in
+    /// engine keeps `q4_0` as `q8_0`).
+    pub precision: String,
+    /// The hot tier: the first block (its attention sinks) and the latest blocks, at full precision.
+    pub hot_mb: u32,
+    /// The warm tier, in system memory.
+    pub warm_mb: u32,
+    /// The cold tier's folder; empty: MacroMagi's data folder.
+    pub disk_dir: String,
+    pub disk_gb: u32,
+    /// Keep the system text's memory on disk, found again by its SHA-256.
+    pub persist_prefix: bool,
+    /// Blocks of 256 tokens each new token reads (the first, the latest and
+    /// the most relevant); 0: all of them, exactly.
+    pub read_blocks: u32,
+    /// llama.cpp: flash attention (needed for a quantized cache).
+    pub flash_attention: bool,
+}
+
+impl Default for MemorySpec {
+    fn default() -> Self {
+        Self {
+            precision: "f16".into(),
+            hot_mb: 512,
+            warm_mb: 4096,
+            disk_dir: String::new(),
+            disk_gb: 16,
+            persist_prefix: true,
+            read_blocks: 0,
+            flash_attention: true,
+        }
+    }
+}
+
 impl Architecture {
+    /// Why MacroMagi's native engine (with its cache) cannot run the model,
+    /// or `None` when it can: it runs Transformer Layers with rotary positions.
+    pub fn native_problem(&self) -> Option<&'static str> {
+        if self.conv.is_some() {
+            return Some("it is a vision model");
+        }
+        if self.positions != "rope" {
+            return Some("it has learned positions");
+        }
+        if self.hyper_connections.is_some() || self.prefix_split {
+            return Some("it has hyper-connections or an encoder/decoder split");
+        }
+        if self.layers.is_empty() {
+            return Some("it has no layers");
+        }
+        for layer in &self.layers {
+            if layer.pointer("/attention/kind").and_then(Value::as_str).unwrap_or("full") != "full" {
+                return Some("it has layers other than Transformer Layers");
+            }
+            if layer.pointer("/ffn/kind").and_then(Value::as_str).unwrap_or("dense") != "dense" {
+                return Some("it has experts or persona routing");
+            }
+        }
+        None
+    }
+
     /// Whether GGUF runtimes such as llama.cpp and LM Studio run the model as
     /// it is (see [`Architecture::gguf_arch`]).
     pub fn gguf_compatible(&self) -> bool {
@@ -773,6 +889,9 @@ pub struct TrainingRecord {
     pub loss: f64,
     /// The size of the model, in parameters.
     pub parameters: u64,
+    /// The system prompt it was trained with.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system: Option<String>,
 }
 
 /// What a `.magic` file carries besides its description.
@@ -837,6 +956,13 @@ pub struct MagicModel {
     pub datasets: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trained: Option<TrainingRecord>,
+    /// The `.szi` package that holds the model (its weights and ONNX file):
+    /// set when the model was compiled, and the `.magic` file is a workspace.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub package: Option<String>,
+    /// Where its attention memory is kept while it runs (the Memory & Cache block).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory: Option<MemorySpec>,
     /// A GGUF model file this model runs (with llama.cpp), where it is on disk.
     /// It stays outside the `.magic` file: GGUF models are often gigabytes.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -866,6 +992,8 @@ impl Default for MagicModel {
             studio: None,
             datasets: Vec::new(),
             trained: None,
+            package: None,
+            memory: None,
             gguf: None,
         }
     }
@@ -983,6 +1111,11 @@ impl MagicFile {
             zip.start_file(file.as_str(), text)?;
             zip.write_all(&self.data[file])?;
         }
+        // The model's own native tools.
+        for (path, bytes) in self.data.iter().filter(|(path, _)| path.starts_with("nt/")) {
+            zip.start_file(path.as_str(), text)?;
+            zip.write_all(bytes)?;
+        }
         let keep = |item: &DataItem, on: bool| on && self.data.contains_key(&item.file);
         model.training.retain(|item| keep(item, include.training));
         model.finetune.retain(|item| keep(item, include.finetune));
@@ -1021,6 +1154,16 @@ impl MagicFile {
                 data.insert(file.clone(), bytes);
             }
         }
+        let tools: Vec<String> = zip
+            .file_names()
+            .filter_map(|name| name.ok().map(|n| n.into_owned()))
+            .filter(|n| n.starts_with("nt/") && !n.ends_with('/'))
+            .collect();
+        for name in tools {
+            if let Ok(bytes) = read(&mut zip, &name) {
+                data.insert(name, bytes);
+            }
+        }
         let weights = read(&mut zip, WEIGHTS_FILE).unwrap_or_default();
         Ok(Self { model: manifest.model, onnx, data, weights })
     }
@@ -1039,8 +1182,10 @@ impl MagicFile {
     /// the training data.
     pub fn for_macro(&self) -> Result<Vec<u8>> {
         let mut copy = self.clone();
+        // Text models the native engine runs go with their weights: it runs them from those, fast.
+        let native = self.model.architecture.as_ref().is_some_and(|a| a.native_problem().is_none());
         copy.model.include =
-            Includes { model: true, blocks: true, training: false, finetune: false, weights: false, datasets: false };
+            Includes { model: true, blocks: true, training: false, finetune: false, weights: native, datasets: false };
         // The canvas is for making the model, not for using it.
         copy.model.studio = None;
         copy.to_bytes()
@@ -1074,6 +1219,7 @@ mod tests {
                 name: "web_search".into(),
                 description: "Searches the web.".into(),
                 parameters: serde_json::json!({"type": "object", "properties": {"query": {"type": "string"}}}),
+                native: false,
             }],
             thinking: Some(ThinkingSpec::default()),
             effort: Some(EffortSpec::default()),
@@ -1086,7 +1232,7 @@ mod tests {
              Parameters: {\"properties\": {\"query\": {\"type\": \"string\"}}, \"type\": \"object\"}"
         ));
         assert!(prompt.ends_with("<|user|>hi<|end|><|assistant|><think></think>"));
-        assert!(spec.prompt_with("hi", None, "extreme").contains("Reasoning effort: medium"));
+        assert!(spec.prompt_with("hi", None, "extreme").contains("Reasoning effort: none"));
         assert!(spec.prompt("hi").ends_with("<|assistant|>"));
         let calls =
             spec.tool_calls(r#"<tool_call>{"name": "web_search", "arguments": "{\"query\": \"rust\"}"}</tool_call>"#);

@@ -18,6 +18,8 @@ tract-onnx = { version = "0.23", default-features = false }
 ort = { version = "=2.0.0-rc.14", default-features = false, features = ["std", "load-dynamic", "api-20", "directml", "coreml"] }
 thiserror.workspace = true
 serde_json.workspace = true
+# The native engine spreads big matrix products over the processor cores.
+rayon.workspace = true
 
 # llama.cpp servers close with MacroMagi, even when it is killed (a job object).
 [target.'cfg(windows)'.dependencies]

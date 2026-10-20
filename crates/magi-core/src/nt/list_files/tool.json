@@ -1,0 +1,21 @@
+{
+  "name": "list_files",
+  "description": "Lists the files and folders in a folder.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "folder": {
+        "type": "string",
+        "description": "the folder's path"
+      }
+    },
+    "required": [
+      "folder"
+    ]
+  },
+  "run": {
+    "kind": "python",
+    "entry": "run.py",
+    "timeout_ms": 60000
+  }
+}

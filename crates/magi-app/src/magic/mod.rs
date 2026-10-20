@@ -1,6 +1,7 @@
 //! The Magic tab's side of things that is not drawing: importing models, the
 //! model being edited, and trying it out live.
 
+pub mod export_python;
 pub mod import;
 pub mod train;
 
@@ -61,7 +62,9 @@ impl MagicDoc {
             let datasets: Vec<(String, bool)> = file.model.datasets.iter().map(|f| (f.clone(), false)).collect();
             studio::default_canvas(&file.model, !file.weights.is_empty(), !file.onnx.is_empty(), &datasets)
         });
-        let studio = Project { graph: magi_core::graph::Graph::from(canvas), ..Project::new() };
+        let mut graph = magi_core::graph::Graph::from(canvas);
+        studio::upgrade(&mut graph);
+        let studio = Project { graph, ..Project::new() };
         let history = History::new(&Snapshot {
             graph: studio.graph.clone(),
             training: file.model.training.clone(),
@@ -157,7 +160,10 @@ impl MagicDoc {
         let model = &mut self.file.model;
         model.kind = trained.kind;
         model.architecture = Some(trained.architecture);
-        model.trained = Some(trained.record);
+        let mut record = trained.record;
+        // What it was trained to read first, so a changed system prompt can be pointed out.
+        record.system = model.text.as_ref().map(|t| t.system.clone());
+        model.trained = Some(record);
         if let Some(input) = trained.input {
             model.input = input;
             // The Picture Preparation block follows what the model was trained with.
@@ -196,12 +202,10 @@ impl MagicDoc {
         }
         match &pipeline.compile {
             None => {
-                return Some(
-                    "Put Compile .magic Package at the end of the Model wire: it saves the trained model.".into(),
-                );
+                return Some("Put Compile Package at the end of the Model wire: it saves the trained model.".into());
             }
             Some((_, params)) if params.folder.trim().is_empty() => {
-                return Some("Choose the folder Compile .magic Package saves into (select the block).".into());
+                return Some("Choose the folder Compile Package saves into (select the block).".into());
             }
             _ => {}
         }
@@ -216,95 +220,146 @@ impl MagicDoc {
         studio::plan(&pipeline, &self.studio.graph, &self.file.model, &files).err()
     }
 
-    /// Saves the package as the Compile block says: the `.magic` file in its
-    /// folder, and a `.gguf` and a Hugging Face folder when asked for and
+    /// Saves the package as the Compile block says, into a folder of its own:
+    /// the `.magic` workspace, the Magi model (`szi/`), and a `.gguf`, a copy
+    /// in LM Studio, a Hugging Face folder and an ONNX file when asked for and
     /// possible. Returns what was written, and what was skipped and why.
     pub fn compile(&mut self) -> Result<(Vec<PathBuf>, Vec<String>), String> {
-        let params = self.compile_settings().ok_or("Add a Compile .magic Package block to the canvas.")?;
+        let params = self.compile_settings().ok_or("Add a Compile Package block to the canvas.")?;
         if params.folder.trim().is_empty() {
-            return Err("Choose the folder Compile .magic Package saves into.".into());
+            return Err("Choose the folder Compile Package saves into.".into());
         }
-        let folder = PathBuf::from(params.folder.trim());
-        std::fs::create_dir_all(&folder)
-            .map_err(|e| format!("The folder {} could not be made: {e}", folder.display()))?;
+        if !(params.magic || params.szi || params.gguf || params.lmstudio || params.huggingface || params.onnx) {
+            return Err(
+                "Choose what Compile Package saves: the .magic workspace, the .szi model or another format.".into()
+            );
+        }
         let title = self.title();
         let stem = file_stem(if params.file.trim().is_empty() { &title } else { params.file.trim() });
-        let include = &mut self.file.model.include;
-        include.weights = params.weights;
-        include.datasets = params.datasets;
-        (include.training, include.finetune) = (params.pictures, params.pictures);
-        include.blocks = params.blocks;
+        // One folder for the whole project: the workspace and every format of the model.
+        let project = PathBuf::from(params.folder.trim()).join(&stem);
+        std::fs::create_dir_all(&project)
+            .map_err(|e| format!("The folder {} could not be made: {e}", project.display()))?;
+        let mut written = Vec::new();
+        let mut skipped = Vec::new();
+        let text = self.file.model.kind == ModelKind::Text;
+        let trained = !self.file.weights.is_empty() || !self.file.onnx.is_empty();
         if self.file.model.blocks.is_none() {
             self.file.model.blocks = Some(starter_blocks(&self.file.model, "", &Registry::builtin()));
         }
-        let path = folder.join(format!("{stem}.magic"));
-        self.file.save(&path).map_err(|e| format!("Could not save {}: {e}", path.display()))?;
-        self.mark_saved(path.clone());
-        let mut written = vec![path];
-        let mut skipped = Vec::new();
-        let text = self.file.model.kind == ModelKind::Text;
+
+        // The Magi model: its weights and its native tools.
+        if params.szi && trained {
+            let szi = magi_core::szi::write(&self.file, &project.join("szi"), &stem, !self.file.onnx.is_empty())
+                .map_err(|e| format!("Could not write the Magi model: {e}"))?;
+            self.file.model.package = Some(szi.display().to_string());
+            written.push(szi);
+        }
+        // The workspace: canvas, setup, datasets and pictures – the model only when no .szi holds it.
+        if params.magic {
+            let include = &mut self.file.model.include;
+            let packaged = self.file.model.package.as_ref().is_some_and(|p| std::path::Path::new(p).is_file());
+            (include.model, include.weights) = (!packaged, !packaged && params.weights);
+            include.datasets = params.datasets;
+            (include.training, include.finetune) = (params.pictures, params.pictures);
+            include.blocks = params.blocks;
+            let path = project.join(format!("{stem}.magic"));
+            self.file.save(&path).map_err(|e| format!("Could not save {}: {e}", path.display()))?;
+            self.mark_saved(path.clone());
+            written.insert(0, path);
+        }
+
         let exportable =
             self.file.model.architecture.as_ref().is_some_and(|a| a.gguf_compatible()) && !self.file.weights.is_empty();
-        if (params.gguf || params.huggingface) && text && !exportable {
+        if (params.gguf || params.lmstudio || params.huggingface) && text && !exportable {
             skipped.push(
-                "GGUF and Hugging Face need a model trained in MacroMagi from Transformer Layers only; the .magic \
-                 file was saved."
+                "GGUF, LM Studio and Hugging Face need Transformer Layers in the Llama, Qwen3 or Gemma 3 layout; the \
+                 .szi model (and an ONNX file, if chosen) hold this model."
                     .to_owned(),
             );
         } else if text {
             if params.gguf {
                 let quant = magi_core::export::Quant::parse(&params.quant).unwrap_or_default();
                 // The quantization ends the name, as LM Studio and others expect.
+                let folder = project.join("gguf");
+                std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
                 let gguf = folder.join(format!("{stem}-{}.gguf", quant.name()));
                 let bytes = magi_core::export::gguf_with(&self.file.model, &self.file.weights, quant)
                     .map_err(|e| e.to_string())?;
                 std::fs::write(&gguf, bytes).map_err(|e| format!("Could not save {}: {e}", gguf.display()))?;
-                written.push(gguf.clone());
-                if params.lmstudio {
-                    match self.add_to_lmstudio(&gguf) {
-                        Ok(paths) => written.extend(paths),
-                        Err(error) => skipped.push(error),
-                    }
+                written.push(gguf);
+            }
+            if params.lmstudio {
+                match self.add_to_lmstudio() {
+                    Ok(paths) => written.extend(paths),
+                    Err(error) => skipped.push(error),
                 }
             }
             if params.huggingface {
-                let hf = folder.join(format!("{stem}-huggingface"));
+                let hf = project.join("huggingface");
                 magi_core::export::huggingface(&self.file.model, &self.file.weights, &hf).map_err(|e| e.to_string())?;
                 written.push(hf);
             }
         }
+        if params.onnx && !self.file.onnx.is_empty() {
+            let folder = project.join("onnx");
+            std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+            let onnx = folder.join(format!("{stem}.onnx"));
+            std::fs::write(&onnx, &self.file.onnx).map_err(|e| format!("Could not save {}: {e}", onnx.display()))?;
+            written.push(onnx);
+        }
         Ok((written, skipped))
     }
 
-    /// Puts a GGUF file of this model into LM Studio: the file into its
-    /// models folder (`<owner>/<Name>-GGUF/`), and a `model.yaml` with a
-    /// `manifest.json` into its hub folder, so LM Studio shows the model's
-    /// size, context, Enable Thinking and Reasoning Effort. Returns what was written.
-    pub fn add_to_lmstudio(&self, gguf: &std::path::Path) -> Result<Vec<PathBuf>, String> {
+    /// Puts this model into LM Studio: a GGUF file of its own (at the Compile
+    /// block's LM Studio precision) into its models folder
+    /// (`<owner>/<Name>-GGUF/`), and a `model.yaml` with a `manifest.json` into
+    /// its hub folder, so LM Studio shows the model's size, context, Enable
+    /// Thinking and Reasoning Effort. The file is marked as the hub model's
+    /// own, so My Models lists the model once. Returns what was written.
+    pub fn add_to_lmstudio(&self) -> Result<Vec<PathBuf>, String> {
         let root = lmstudio_root().ok_or(
             "LM Studio was not found (its folder is .lmstudio in your home folder). Install and open it once first.",
         )?;
         let model = &self.file.model;
+        if !model.architecture.as_ref().is_some_and(|a| a.gguf_compatible()) || self.file.weights.is_empty() {
+            return Err(
+                "LM Studio needs a trained model of Transformer Layers (Llama, Qwen3 or Gemma 3 layout).".into()
+            );
+        }
+        let params = self.compile_settings().unwrap_or_default();
+        let quant = magi_core::export::Quant::parse(&params.lmstudio_quant).unwrap_or_default();
         let exported = magi_core::export::describe(model, &self.file.weights).map_err(|e| e.to_string())?;
         let owner = lmstudio_owner(model);
-        let repo = format!("{}-GGUF", file_stem(&self.title()).replace(' ', "-"));
+        let stem = file_stem(&self.title()).replace(' ', "-");
+        let repo = format!("{stem}-GGUF");
         let folder = root.join("models").join(&owner).join(&repo);
         std::fs::create_dir_all(&folder).map_err(|e| format!("Could not make {}: {e}", folder.display()))?;
-        let name = gguf.file_name().ok_or("The GGUF file has no name.")?;
-        let copy = folder.join(name);
-        std::fs::copy(gguf, &copy).map_err(|e| format!("Could not copy the GGUF file into LM Studio: {e}"))?;
-        let bytes = std::fs::metadata(&copy).map(|m| m.len()).unwrap_or_default();
+        let name = format!("{stem}-{}.gguf", quant.name());
+        let copy = folder.join(&name);
+        let bytes = magi_core::export::gguf_with(model, &self.file.weights, quant).map_err(|e| e.to_string())?;
+        std::fs::write(&copy, &bytes).map_err(|e| format!("Could not save the GGUF file into LM Studio: {e}"))?;
+        // Files of other precisions written before would be listed too.
+        if let Ok(entries) = std::fs::read_dir(&folder) {
+            for entry in entries.flatten() {
+                let other = entry.file_name().to_string_lossy().into_owned();
+                if other != name && other.starts_with(&format!("{stem}-")) && other.ends_with(".gguf") {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
         let hub = root
             .join("hub")
             .join("models")
             .join(magi_core::export::lmstudio_key(&owner))
             .join(magi_core::export::lmstudio_key(&model.name));
         std::fs::create_dir_all(&hub).map_err(|e| format!("Could not make {}: {e}", hub.display()))?;
-        let yaml = magi_core::export::lmstudio_model_yaml(model, &exported, &owner, &repo, bytes)
+        let yaml = magi_core::export::lmstudio_model_yaml(model, &exported, &owner, &repo, bytes.len() as u64)
             .map_err(|e| e.to_string())?;
         std::fs::write(hub.join("model.yaml"), yaml).map_err(|e| format!("Could not write model.yaml: {e}"))?;
         std::fs::write(hub.join("manifest.json"), magi_core::export::lmstudio_manifest(model, &owner, &repo))
             .map_err(|e| format!("Could not write manifest.json: {e}"))?;
+        lmstudio_mark_part_of_model(&root, &format!("{owner}/{repo}/{name}"))?;
         Ok(vec![copy, hub.join("model.yaml")])
     }
 
@@ -317,7 +372,8 @@ impl MagicDoc {
         let title = self.title();
         let stem = file_stem(if params.file.trim().is_empty() { &title } else { params.file.trim() });
         let quant = magi_core::export::Quant::parse(&params.quant).unwrap_or_default();
-        Some(PathBuf::from(params.folder.trim()).join(format!("{stem}-{}.gguf", quant.name()))).filter(|p| p.is_file())
+        let name = format!("{stem}-{}.gguf", quant.name());
+        Some(PathBuf::from(params.folder.trim()).join(&stem).join("gguf").join(name)).filter(|p| p.is_file())
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -372,6 +428,38 @@ pub fn lmstudio_root() -> Option<PathBuf> {
     Some(PathBuf::from(home).join(".lmstudio")).filter(|p| p.is_dir())
 }
 
+/// Marks a GGUF file in LM Studio's models folder as part of a hub model
+/// (`"transitive"` in `.internal/model-data.json`), as LM Studio marks the
+/// files it downloads for one. Without it, My Models lists the file a second
+/// time, apart from the model. The list is backed up first, as
+/// `model-data.json.bak`.
+fn lmstudio_mark_part_of_model(root: &std::path::Path, key: &str) -> Result<(), String> {
+    use serde_json::Value;
+    let path = root.join(".internal").join("model-data.json");
+    // LM Studio writes it on its first start; until then there is nothing to mark.
+    let Ok(raw) = std::fs::read(&path) else { return Ok(()) };
+    let mut data: Value = serde_json::from_slice(&raw)
+        .map_err(|e| format!("LM Studio's model list could not be read ({}): {e}", path.display()))?;
+    let entries = data
+        .get_mut("json")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| format!("LM Studio's model list is not as expected: {}", path.display()))?;
+    match entries.iter_mut().find(|entry| entry.get(0).and_then(Value::as_str) == Some(key)) {
+        Some(entry) => match entry.get_mut(1).and_then(Value::as_object_mut) {
+            Some(record) if record.get("transitive") == Some(&Value::Bool(true)) => return Ok(()),
+            Some(record) => {
+                record.insert("transitive".into(), Value::Bool(true));
+            }
+            None => return Ok(()),
+        },
+        None => entries.push(serde_json::json!([key, { "transitive": true }])),
+    }
+    let backup = root.join(".internal").join("model-data.json.bak");
+    std::fs::write(&backup, &raw).map_err(|e| format!("Could not back up {}: {e}", path.display()))?;
+    let text = serde_json::to_vec(&data).map_err(|e| e.to_string())?;
+    std::fs::write(&path, text).map_err(|e| format!("Could not update {}: {e}", path.display()))
+}
+
 /// Whose model LM Studio files it under: its author, or MacroMagi.
 fn lmstudio_owner(model: &MagicModel) -> String {
     let owner: String = model.author.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
@@ -392,7 +480,7 @@ pub fn new_model(text: bool) -> MagicFile {
     let mut model = MagicModel {
         name: if text { "Magi" } else { "My vision model" }.into(),
         description: if text {
-            "A small assistant: it chats, thinks at three effort levels and uses tools such as web search.".into()
+            "A small assistant: it chats, reasons at two effort levels, writes simple Python and uses tools such as web search.".into()
         } else {
             "Tells the screen's states apart.".into()
         },
@@ -402,18 +490,19 @@ pub fn new_model(text: bool) -> MagicFile {
     let mut datasets = Vec::new();
     if text {
         model.kind = ModelKind::Text;
-        // General tools, as the example datasets use them; MacroMagi's own are a button away in Text & Tools.
+        // General tools, as the example datasets use them; MacroMagi's own are a button away in the Tools block.
         let mut spec = magi_core::magic::TextSpec {
             temperature: 0.3,
             max_tokens: 200,
             system: studio::EXAMPLE_SYSTEM.into(),
             tools: studio::example_tools(),
             thinking: Some(magi_core::magic::ThinkingSpec::default()),
-            effort: Some(magi_core::magic::EffortSpec::default()),
+            effort: Some(studio::magi_effort()),
             ..Default::default()
         };
         spec.ensure_specials();
         model.text = Some(spec);
+        model.memory = Some(magi_core::magic::MemorySpec::default());
         for (file, content, negative) in studio::example_datasets() {
             data.insert(file.clone(), content.into_bytes());
             datasets.push((file, negative));
@@ -427,7 +516,14 @@ pub fn new_model(text: bool) -> MagicFile {
             magi_core::magic::ClassSpec { label: "No".into(), threshold: 0.5, ..Default::default() },
         ];
     }
-    model.studio = Some(studio::default_canvas(&model, false, false, &datasets));
+    let mut canvas = studio::default_canvas(&model, false, false, &datasets);
+    // With LM Studio on this computer, compiled models go into it too, with their controls.
+    if text && lmstudio_root().is_some() {
+        for node in canvas.nodes.iter_mut().filter(|n| n.kind == studio::kinds::COMPILE) {
+            node.params.insert("lmstudio".into(), serde_json::Value::Bool(true));
+        }
+    }
+    model.studio = Some(canvas);
     model.datasets = datasets.iter().map(|(f, _)| f.clone()).collect();
     MagicFile { model, data, ..MagicFile::default() }
 }
@@ -449,6 +545,8 @@ pub fn agent_tool(name: &str, about: &str) -> magi_core::magic::ToolSpec {
         name: name.to_owned(),
         description: about.split(" – ").nth(1).unwrap_or(about).to_owned(),
         parameters: serde_json::json!({ "type": "object", "properties": properties }),
+        // The AI Agent block carries these out, not the model's native tools.
+        native: false,
     }
 }
 
@@ -496,33 +594,41 @@ fn text_starter_blocks(model: &MagicModel, asset: &str, registry: &Registry) -> 
     let defaults = |kind: &str| registry.get(kind).map(|def| def.default_params()).unwrap_or_default();
     let mut start = Node::new(1, ids::START, [0.0, 0.0], defaults(ids::START));
     start.set_params(&StartParams::default());
-    let mut agent = Node::new(2, ids::AI_AGENT, [0.0, 130.0], defaults(ids::AI_AGENT));
+    let which = magi_core::nodes::ai::AiModelParams { model: asset.to_owned() };
+    let mut load = Node::new(2, ids::AI_LOAD, [0.0, 130.0], defaults(ids::AI_LOAD));
+    load.set_params(&which);
+    let mut agent = Node::new(3, ids::AI_AGENT, [0.0, 260.0], defaults(ids::AI_AGENT));
     agent.set_params(&magi_core::nodes::ai::AiAgentParams {
         model: asset.to_owned(),
         request: "Say hello".into(),
         ..Default::default()
     });
-    let log = Node::new(3, ids::LOG, [0.0, 330.0], defaults(ids::LOG));
+    let log = Node::new(4, ids::LOG, [0.0, 460.0], defaults(ids::LOG));
+    let mut unload = Node::new(5, ids::AI_UNLOAD, [0.0, 590.0], defaults(ids::AI_UNLOAD));
+    unload.set_params(&which);
     let note = CommentParams {
         text: format!(
-            "“{}” answers the request in the AI Agent block, and the Log block writes its answer. Turn on \
-             “Carry out its tool calls” to let it press, type and click; its other tools come out of “Tool” and \
-             “Arguments” for the blocks after it.",
+            "AI Load Model loads “{}”, the AI Agent block asks it the request, the Log block writes its answer \
+             and AI Unload Model frees its memory (a stopped macro unloads its models anyway). Turn on “Carry out \
+             its tool calls” to let it press, type and click; its other tools come out of “Tool” and “Arguments” \
+             for the blocks after it.",
             model.name
         ),
         width: 280.0,
-        height: 140.0,
+        height: 170.0,
         ..CommentParams::default()
     };
-    let mut comment = Node::new(4, ids::COMMENT, [280.0, 0.0], defaults(ids::COMMENT));
+    let mut comment = Node::new(6, ids::COMMENT, [280.0, 0.0], defaults(ids::COMMENT));
     comment.label = model.name.clone();
     comment.set_params(&note);
     Fragment {
-        nodes: vec![start, agent, log, comment],
+        nodes: vec![start, load, agent, log, unload, comment],
         wires: vec![
             Wire { from: PortRef::new(1, ports::OUT), to: PortRef::new(2, ports::FLOW_IN) },
             Wire { from: PortRef::new(2, ports::OUT), to: PortRef::new(3, ports::FLOW_IN) },
-            Wire { from: PortRef::new(2, "answer"), to: PortRef::new(3, "value") },
+            Wire { from: PortRef::new(3, ports::OUT), to: PortRef::new(4, ports::FLOW_IN) },
+            Wire { from: PortRef::new(3, "answer"), to: PortRef::new(4, "value") },
+            Wire { from: PortRef::new(4, ports::OUT), to: PortRef::new(5, ports::FLOW_IN) },
         ],
         groups: Vec::new(),
     }

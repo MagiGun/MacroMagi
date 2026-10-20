@@ -814,8 +814,11 @@ fn edit_model(ui: &mut Ui, project: &mut Project, node_id: NodeId, key: &str, re
     asset_picker(ui, project, node_id, key, AssetKind::Model, "No model");
     ui.horizontal_wrapped(|ui| {
         if ui
-            .button(format!("{}  Load .magic file…", icon::FOLDER_OPEN))
-            .on_hover_text("A model saved from the Magic tab")
+            .button(format!("{}  Load model file…", icon::FOLDER_OPEN))
+            .on_hover_text(
+                "A .magic workspace or .szi Magi model from the Magic tab, a .gguf file (runs with llama.cpp, \
+                 where it is) or an .onnx model",
+            )
             .clicked()
         {
             requests.push(UiRequest::LoadModel(node_id, key.to_owned()));

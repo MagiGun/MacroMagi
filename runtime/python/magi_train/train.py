@@ -164,9 +164,19 @@ class TextTrainer:
         self.last_loss = float("nan")
         self.stages = []
         self.datasets = {key: [] for key in plan.get("datasets", {})}
+        # A reasoning effort no sample is written at is learned from the nearest level's samples.
+        donors = {}
+        if self.spec.get("effort"):
+            paths = [path for files in plan.get("datasets", {}).values() for path in files]
+            counts = data.effort_counts(paths, self.spec)
+            for level, count in counts:
+                donor = data.donor(counts, level)
+                if donor:
+                    donors[level] = donor
+                    log("No samples are at reasoning effort %s: it learns from the %s samples too." % (level, donor))
         for key, files in plan.get("datasets", {}).items():
             for path in files:
-                self.datasets[key].extend(data.read(path, self.tok))
+                self.datasets[key].extend(data.read(path, self.tok, donors))
 
     @property
     def device(self):

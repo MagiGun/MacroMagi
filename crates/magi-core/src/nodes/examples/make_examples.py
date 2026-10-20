@@ -605,6 +605,41 @@ AVOID = [
 ]
 
 
+# ---- simple facts in sentences, to pretrain on -------------------------------------
+
+NUMBER_WORDS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven",
+                "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty"]
+
+
+def facts():
+    import random
+    rng = random.Random(11)
+    out = []
+    for _ in range(120):
+        a, b = rng.randint(0, 10), rng.randint(0, 10)
+        kind = rng.randrange(4)
+        if kind == 0:
+            out.append("%s plus %s is %s. In numbers, %d + %d = %d." % (NUMBER_WORDS[a].capitalize(), NUMBER_WORDS[b], NUMBER_WORDS[a + b] if a + b <= 20 else a + b, a, b, a + b))
+        elif kind == 1 and a >= b:
+            out.append("%s minus %s is %s, because %d - %d = %d." % (NUMBER_WORDS[a].capitalize(), NUMBER_WORDS[b], NUMBER_WORDS[a - b], a, b, a - b))
+        elif kind == 2:
+            out.append("%d is %s than %d." % (a, "bigger" if a > b else "smaller" if a < b else "the same as", b) if a != b else "%d is equal to %d." % (a, b))
+        else:
+            out.append("%d times %d is %d." % (a, b, a * b))
+    days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    for i, day in enumerate(days):
+        out.append("The day after %s is %s, and the day before it is %s." % (day, days[(i + 1) % 7], days[(i - 1) % 7]))
+    months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October",
+              "November", "December"]
+    for i, month in enumerate(months):
+        out.append("%s is month number %d. The month after it is %s." % (month, i + 1, months[(i + 1) % 12]))
+    pairs = [("hot", "cold"), ("big", "small"), ("fast", "slow"), ("open", "closed"), ("early", "late"),
+             ("light", "dark"), ("up", "down"), ("full", "empty"), ("happy", "sad"), ("easy", "hard")]
+    for a, b in pairs:
+        out.append("The opposite of %s is %s, and the opposite of %s is %s." % (a, b, b, a))
+    return out
+
+
 def write(name, lines):
     with open(os.path.join(HERE, name), "w", encoding="utf-8", newline="\n") as handle:
         for line in lines:
@@ -614,6 +649,8 @@ def write(name, lines):
 
 def main():
     write("language.md", [LANGUAGE.strip()])
+    sentences = facts()
+    write("facts.md", ["\n".join(sentences[i:i + 6]) + "\n" for i in range(0, len(sentences), 6)])
 
     chat = [{"prompt": q, "response": a} for q, a in CHAT]
     # With tools offered too: a question no tool is needed for is still answered straight away.
@@ -621,15 +658,18 @@ def main():
     chat += [{"messages": m} for m in CONVERSATIONS]
     write("chat.jsonl", chat)
 
+    # Magi-F1 has two reasoning efforts: "standard" (a line of thought at most) and
+    # "superior" (careful steps, then a check). Thinking on or off is apart from it.
     reasoning = []
     for question, answer, low, medium, high in REASONING:
-        for effort, thinking in (("low", low), ("medium", medium), ("high", high)):
-            reasoning.append({"effort": effort, "prompt": question, "thinking": thinking, "response": answer})
+        reasoning.append({"effort": "standard", "prompt": question, "thinking": low, "response": answer})
+        reasoning.append({"effort": "superior", "prompt": question, "thinking": high, "response": answer})
         # Thinking it through, not reaching for a tool, when tools are offered.
-        reasoning.append({"effort": "medium", "tools": DEFAULT_TOOLS, "prompt": question, "thinking": medium,
+        reasoning.append({"effort": "superior", "tools": DEFAULT_TOOLS, "prompt": question, "thinking": medium,
                           "response": answer})
     for question, answer, thinking in MORE_REASONING:
-        reasoning.append({"effort": "medium", "prompt": question, "thinking": thinking, "response": answer})
+        reasoning.append({"effort": "superior", "prompt": question, "thinking": thinking, "response": answer})
+        reasoning.append({"effort": "standard", "prompt": question, "response": answer})
     write("reasoning.jsonl", reasoning)
 
     write("tools.jsonl", TOOLS)

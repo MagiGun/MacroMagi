@@ -2550,7 +2550,7 @@ dependencies = [
 
 [[package]]
 name = "magi-app"
-version = "0.1.5"
+version = "0.1.7"
 dependencies = [
  "eframe",
  "egui",
@@ -2577,16 +2577,17 @@ dependencies = [
 
 [[package]]
 name = "magi-audio"
-version = "0.1.5"
+version = "0.1.7"
 dependencies = [
  "symphonia",
 ]
 
 [[package]]
 name = "magi-core"
-version = "0.1.5"
+version = "0.1.7"
 dependencies = [
  "base64 0.22.1",
+ "include_dir",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -2595,7 +2596,7 @@ dependencies = [
 
 [[package]]
 name = "magi-engine"
-version = "0.1.5"
+version = "0.1.7"
 dependencies = [
  "fastrand",
  "include_dir",
@@ -2611,11 +2612,12 @@ dependencies = [
 
 [[package]]
 name = "magi-ml"
-version = "0.1.5"
+version = "0.1.7"
 dependencies = [
  "magi-core",
  "ort",
  "prost",
+ "rayon",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -2625,7 +2627,7 @@ dependencies = [
 
 [[package]]
 name = "magi-platform"
-version = "0.1.5"
+version = "0.1.7"
 dependencies = [
  "arboard",
  "cpal",
@@ -2641,7 +2643,7 @@ dependencies = [
 
 [[package]]
 name = "magi-vision"
-version = "0.1.5"
+version = "0.1.7"
 dependencies = [
  "image",
  "rayon",

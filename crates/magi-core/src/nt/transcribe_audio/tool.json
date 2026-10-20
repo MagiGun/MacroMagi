@@ -1,0 +1,26 @@
+{
+  "name": "transcribe_audio",
+  "description": "Writes down what is said in a sound or video file.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string",
+        "description": "the sound or video file's path"
+      },
+      "language": {
+        "type": "string",
+        "description": "the spoken language, such as en; empty: detect it"
+      }
+    },
+    "required": [
+      "path",
+      "language"
+    ]
+  },
+  "run": {
+    "kind": "python",
+    "entry": "run.py",
+    "timeout_ms": 60000
+  }
+}
