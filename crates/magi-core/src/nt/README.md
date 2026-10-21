@@ -24,7 +24,7 @@ code it needs.
 | `web_search`, `fetch_page` | The web |
 | `list_files`, `read_file`, `search_files`, `write_file`, `edit_file` | Folders and text files (`write_file` and `edit_file` ask first) |
 | `run_command` | Running a command line (asks first) |
-| `open_document`, `edit_document` | Word, Excel, PowerPoint, PDF and CSV files (`edit_document` asks first; needs python-docx, openpyxl, python-pptx and pypdf) |
+| `open_document`, `edit_document` | .docx, .xlsx, .pptx, .pdf and .csv files (`edit_document` asks first; needs python-docx, openpyxl, python-pptx and pypdf) |
 | `view_image` | Pictures: a small vision model's description (`describe.py`, `MAGI_VISION_MODEL`) and the system's text recognition |
 | `calculator`, `get_time`, `get_weather` | Exact math, the time, the weather |
 | `transcribe_audio`, `translate`, `wiki_search` | Starting points that need their own small models or packages |

@@ -10,6 +10,6 @@ instead of guessing it.
 - [Git](git/index.md) – saving work, branches, undoing.
 - [The command line](shell/index.md) – Windows and Linux/macOS.
 - [SQL](sql/index.md) – asking a database.
-- [Documents](documents/index.md) – Word, Excel, CSV.
+- [Documents](documents/index.md) – .docx, .xlsx, .csv.
 - [Algorithms](algorithms/index.md) – the usual ones, as pseudocode and code.
 - [Errors](errors/index.md) – what common error messages mean and what to do.

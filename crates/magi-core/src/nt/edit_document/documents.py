@@ -37,7 +37,7 @@ def parts(path):
     """The document's parts in order: (address, text)."""
     kind = kind_of(path)
     if kind == "docx":
-        docx = need("docx", "Word")
+        docx = need("docx", ".docx")
         document = docx.Document(path)
         found = [("p%d" % i, p.text) for i, p in enumerate(document.paragraphs, 1)]
         for t, table in enumerate(document.tables, 1):
@@ -46,7 +46,7 @@ def parts(path):
                     found.append(("t%d.r%d.c%d" % (t, r, c), cell.text))
         return found
     if kind == "xlsx":
-        openpyxl = need("openpyxl", "Excel")
+        openpyxl = need("openpyxl", ".xlsx")
         book = openpyxl.load_workbook(path, data_only=False)
         found = []
         for sheet in book.worksheets:
@@ -56,7 +56,7 @@ def parts(path):
                         found.append(("%s!%s" % (sheet.title, cell.coordinate), str(cell.value)))
         return found
     if kind == "pptx":
-        pptx = need("pptx", "PowerPoint")
+        pptx = need("pptx", ".pptx")
         deck = pptx.Presentation(path)
         found = []
         for s, slide in enumerate(deck.slides, 1):
@@ -102,13 +102,13 @@ def set_text(paragraph, text):
 
 
 def edit(path, edits):
-    """Changes parts by address; `insert_after` adds a paragraph (Word) or a line (text)."""
+    """Changes parts by address; `insert_after` adds a paragraph (.docx) or a line (text)."""
     kind = kind_of(path)
     if kind == "pdf":
         raise RuntimeError("PDF files cannot be changed here; write a new document instead")
     changed = []
     if kind == "docx":
-        docx = need("docx", "Word")
+        docx = need("docx", ".docx")
         document = docx.Document(path)
         paragraphs = list(document.paragraphs)
         for change in edits:
@@ -133,7 +133,7 @@ def edit(path, edits):
         backup(path)
         document.save(path)
     elif kind == "xlsx":
-        openpyxl = need("openpyxl", "Excel")
+        openpyxl = need("openpyxl", ".xlsx")
         book = openpyxl.load_workbook(path)
         for change in edits:
             at, text = str(change.get("at", "")), change.get("text", "")
@@ -149,7 +149,7 @@ def edit(path, edits):
         backup(path)
         book.save(path)
     elif kind == "pptx":
-        pptx = need("pptx", "PowerPoint")
+        pptx = need("pptx", ".pptx")
         deck = pptx.Presentation(path)
         for change in edits:
             at, text = str(change.get("at", "")), str(change.get("text", ""))

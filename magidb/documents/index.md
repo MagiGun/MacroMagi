@@ -1,6 +1,6 @@
 ---
 title: Documents
-summary: Working with Word, Excel and CSV files: with Magi's document tools, or from code.
+summary: Working with .docx, .xlsx and .csv files: with Magi's document tools, or from code.
 tags: [documents, word, excel, csv]
 ---
 # Documents

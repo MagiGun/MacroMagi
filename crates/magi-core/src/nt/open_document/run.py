@@ -1,4 +1,4 @@
-"""Opens a document as numbered parts of plain text (read-only): Word, Excel, PowerPoint, PDF, CSV or text.
+"""Opens a document as numbered parts of plain text (read-only): .docx, .xlsx, .pptx, .pdf, .csv or text.
 
 MacroMagi native tool: reads its arguments as JSON on standard input and
 prints its result as JSON on standard output.

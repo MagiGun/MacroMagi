@@ -65,7 +65,7 @@ Magi does not keep facts or exact code in its weights: it calls tools, and Macro
 | `list_files(folder)`, `read_file(path, from?, lines?)`, `search_files(text, folder)` | Reading folders and text files (numbered lines, 200 at a time), and finding text in a folder's files. |
 | `write_file(path, text)`, `edit_file(path, find, replace)` | Writing a file whole, or replacing one exact piece of it. **Asks first.** |
 | `run_command(command, folder?)` | Running tests, scripts, git… and reading what they print. **Asks first.** |
-| `open_document(path)`, `edit_document(path, edits)` | Word, Excel, PowerPoint, PDF and CSV files as numbered parts of plain text (`p3`, `Sheet1!B2`, `s1.2.1`, `page4`), and changing parts – the file is saved in its own format, with its styles, and a copy of it as it was is kept beside it. `edit_document` **asks first**; PDFs are read only. |
+| `open_document(path)`, `edit_document(path, edits)` | .docx, .xlsx, .pptx, .pdf and .csv files as numbered parts of plain text (`p3`, `Sheet1!B2`, `s1.2.1`, `page4`), and changing parts – the file is saved in its own format, with its styles, and a copy of it as it was is kept beside it. `edit_document` **asks first**; PDFs are read only. |
 | `view_image(path)` | A picture, for a model that never sees pixels: what it shows (a small vision model, SmolVLM-256M) and the text in it (Windows' text recognition, as the Text Scan block uses). |
 | `calculator(expression)`, `get_time(location)`, `get_weather(location)` | Exact arithmetic – Magi does no sums in its head – the time and the weather. |
 
@@ -316,7 +316,7 @@ The robot button at the top right opens a chat window – a preview of CodeMagi:
 - **Models**: the model open on the Magic tab (kept up to date as it trains), or a `.szi` or `.magic` file (*Load model file…*). *Load* and *Unload*.
 - **Chats**: kept in `data/chats/`, each named by the model after its first answer, renamed or deleted at will.
 - **Settings** per chat: the system prompt, thinking, reasoning effort, temperature, the longest answer, the context window, native tools and how many calls (100 by default), and compaction. Under *Every chat*, **Thinking shown opened** shows what the model thought in full instead of folded under *Thought* (each one can still be folded).
-- **Attachments** (the paperclip): a small text file goes into the message whole; **pictures** and **documents** (Word, Excel, PowerPoint, PDF, CSV) – and big text files – are named by their path (`Attached: D:/shots/error.png (picture)`), and the model looks at them with `view_image`, opens them with `open_document` or reads them with `read_file`, as its datasets teach it.
+- **Attachments** (the paperclip): a small text file goes into the message whole; **pictures** and **documents** (.docx, .xlsx, .pptx, .pdf, .csv) – and big text files – are named by their path (`Attached: D:/shots/error.png (picture)`), and the model looks at them with `view_image`, opens them with `open_document` or reads them with `read_file`, as its datasets teach it.
 - **Tool calls**: each call shows as a row – its name, its arguments in short, and whether it worked, failed or did not run. Click it for the arguments and the result in full; what the model thought before it shows above it. Calls that change files or run programs ask you first.
 - **Compaction**: a model that learned compaction writes the earlier part of a long chat short when it outgrows the context window.
 

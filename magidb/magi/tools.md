@@ -17,7 +17,7 @@ tags: [magi, tools]
 | `write_file(path, text)` | a new file, or all of one (asks the user) |
 | `edit_file(path, find, replace)` | change one exact piece of a file (asks the user) |
 | `run_command(command, folder?)` | run tests, scripts, git… (asks the user) |
-| `open_document(path)` | Word, Excel, PowerPoint, PDF, CSV as numbered parts |
+| `open_document(path)` | .docx, .xlsx, .pptx, .pdf, .csv as numbered parts |
 | `edit_document(path, edits)` | change parts of a document (asks the user) |
 | `view_image(path)` | what a picture shows, and its text |
 | `calculator(expression)` | any arithmetic past the times tables |

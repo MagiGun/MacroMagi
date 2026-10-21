@@ -1,6 +1,6 @@
 {
   "name": "open_document",
-  "description": "Opens a document – Word, Excel, PowerPoint, PDF, CSV or text – as numbered parts of plain text.",
+  "description": "Opens a document – .docx, .xlsx, .pptx, .pdf, .csv or text – as numbered parts of plain text.",
   "parameters": {
     "type": "object",
     "properties": {

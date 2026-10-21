@@ -5,7 +5,7 @@ Every result is real. Each piece of work happens in a temporary folder standing 
 the user's computer: MacroMagi's own native tools (crates/magi-core/src/nt) read, search and
 change its files, look things up in MagiDB (the repository's magidb/ folder), and run its tests and
 scripts with Python – so the model learns from exactly what the tools give back. Only what cannot
-run here is written out: the web, pictures, Word/Excel/PDF files and git.
+run here is written out: the web, pictures, .docx/.xlsx/.pdf files and git.
 
     python make_work_data.py            writes work.jsonl beside it
 
@@ -863,7 +863,7 @@ def raise_prices(rng):
     work.ask(pick(rng, "Raise every price in %s by %d%%." % (path, percent),
                   "Prices go up %d%% next month – can you update %s?" % (percent, path),
                   "Put all the prices in %s up by %d%%, rounded to cents." % (path, percent)))
-    work.step("An Excel file: open_document, not read_file. Then each price times %s, from the calculator, "
+    work.step("An .xlsx file: open_document, not read_file. Then each price times %s, from the calculator, "
               "rounded to cents, and one edit_document with all of them." % (1 + percent / 100),
               "open_document", simulated=document_result(path, "xlsx", parts), path=path)
     edits = []
@@ -916,7 +916,7 @@ def fix_typos(rng):
     work = Work(rng, effort=effort)
     work.ask(pick(rng, "Fix the spelling mistakes in %s." % path, "Can you correct the typos in %s?" % path,
                   "Please proofread %s and fix any misspelled words." % path))
-    work.step("A Word file: open_document gives its paragraphs with their numbers.", "open_document",
+    work.step("A .docx file: open_document gives its paragraphs with their numbers.", "open_document",
               simulated=document_result(path, "docx", paragraphs), path=path)
     edits, fixed = [], []
     for address, text in paragraphs:
