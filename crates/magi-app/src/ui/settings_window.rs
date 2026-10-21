@@ -1025,7 +1025,7 @@ fn runtime(ui: &mut Ui, settings: &mut Settings, env: &SettingsEnv<'_>, events: 
             .on_hover_text("Where MagiDB's pages are read from when they are not on this computer (raw files)");
         ui.add(
             egui::TextEdit::singleline(&mut settings.magidb_url)
-                .hint_text("github.com/MacroMagi/MagiDB")
+                .hint_text("github.com/MagiGun/MagiDB")
                 .desired_width(240.0),
         );
     });

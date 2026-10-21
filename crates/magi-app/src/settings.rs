@@ -121,7 +121,7 @@ pub struct Settings {
     pub tab: Tab,
     /// Where the dataset editor generates samples: an OpenAI-compatible endpoint.
     pub generator: crate::magic::generate::GeneratorSettings,
-    /// MagiDB's online address (raw files); empty: MacroMagi/MagiDB on GitHub.
+    /// MagiDB's online address (raw files); empty: MagiGun/MagiDB on GitHub.
     pub magidb_url: String,
     /// A folder of MagiDB pages to read instead of the downloaded copy (a checkout being written).
     pub magidb_dir: Option<PathBuf>,

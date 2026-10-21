@@ -9,7 +9,7 @@
 //! | ONNX Runtime | faster ONNX models on the CPU | Microsoft's GitHub releases |
 //! | ONNX Runtime for graphics cards | ONNX models on any DirectX 12 graphics card (Windows) | Microsoft's NuGet packages |
 //! | Python | the Python engine, without installing Python (Windows; managed on the Engine page) | python.org |
-//! | Document tools | Magi's open_document and edit_document (Word, Excel, PowerPoint, PDF) | pip, into the AI Python |
+//! | Document tools | Magi's open_document and edit_document (.docx, .xlsx, .pptx, .pdf) | pip, into the AI Python |
 //! | Image descriptions | Magi's view_image: SmolVLM-256M-Instruct describes pictures | pip and Hugging Face |
 //! | MagiDB | Magi's library of how things are done, on this computer (faster, and offline) | its GitHub repository |
 //!
@@ -31,7 +31,7 @@ const DOCUMENT_PACKAGES: [&str; 5] = ["python-docx", "openpyxl", "python-pptx", 
 /// The small vision model view_image describes pictures with (Apache-2.0, about 500 MB).
 pub const VISION_MODEL: &str = "HuggingFaceTB/SmolVLM-256M-Instruct";
 /// MagiDB's repository, as a zip of its main branch.
-pub const MAGIDB_ZIP: &str = "https://github.com/MacroMagi/MagiDB/archive/refs/heads/main.zip";
+pub const MAGIDB_ZIP: &str = "https://github.com/MagiGun/MagiDB/archive/refs/heads/main.zip";
 /// PyTorch's builds for NVIDIA graphics cards: CUDA 12.8 covers cards from the GTX 900s to the RTX 50s.
 const TORCH_CUDA_INDEX: &str = "https://download.pytorch.org/whl/cu128";
 const TORCH_CPU_INDEX: &str = "https://download.pytorch.org/whl/cpu";
@@ -130,7 +130,7 @@ impl Component {
                 "Exports trained models so MacroMagi can run them. Training needs it, whichever PyTorch is installed."
             }
             Component::DocumentTools => {
-                "Lets Magi models open and change Word, Excel and PowerPoint files and read PDFs (python-docx, \
+                "Lets Magi models open and change .docx, .xlsx and .pptx files and read .pdf (python-docx, \
                  openpyxl, python-pptx, pypdf), in the AI Python."
             }
             Component::ImageDescriptions => {

@@ -28,7 +28,7 @@ import unicodedata
 import urllib.parse
 import urllib.request
 
-DEFAULT_URL = "https://raw.githubusercontent.com/MacroMagi/MagiDB/main/"
+DEFAULT_URL = "https://raw.githubusercontent.com/MagiGun/MagiDB/main/"
 INDEX = "search.json"
 SKIP = {".git", ".github", "node_modules", "__pycache__", "tools"}
 WORD = re.compile(r"[a-z0-9_+#.]+")
