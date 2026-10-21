@@ -16,16 +16,26 @@ FAST, SETTLE = (3.4445, -4.7750, 2.0315), (2.0, -1.5, 0.5)
 
 
 def orthogonalize(g, steps=10):
-    """An approximately orthogonal matrix with the same "direction" as `g`."""
-    x = g / (g.norm() + 1e-7)
-    tall = x.shape[0] > x.shape[1]
+    """An approximately orthogonal matrix with the same "direction" as `g` – or, for a
+    stack of matrices [n, rows, columns], one for each, in one go."""
+    # bfloat16 on graphics cards, as Muon is usually run: the iteration does not need more.
+    x = g.bfloat16() if g.is_cuda else g
+    x = x / (x.norm(dim=(-2, -1), keepdim=True) + 1e-7)
+    flat = x.ndim == 2
+    if flat:
+        x = x.unsqueeze(0)
+    tall = x.shape[-2] > x.shape[-1]
     if tall:
-        x = x.T
+        x = x.mT
     for i in range(steps):
         a, b, c = FAST if i < steps - 2 else SETTLE
-        s = x @ x.T
-        x = a * x + (b * s + c * s @ s) @ x
-    return x.T if tall else x
+        s = x @ x.mT
+        # a·x + (b·s + c·s²)·x as two fused products: faster, and the sums stay in float32 (about a third
+        # of the rounding error of separate steps in bfloat16).
+        x = torch.baddbmm(x, torch.baddbmm(s, s, s, beta=b, alpha=c), x, beta=a)
+    if tall:
+        x = x.mT
+    return x[0] if flat else x
 
 
 class Muon(torch.optim.Optimizer):
@@ -37,17 +47,27 @@ class Muon(torch.optim.Optimizer):
     @torch.no_grad()
     def step(self):
         for group in self.param_groups:
-            for p in group["params"]:
-                if p.grad is None:
-                    continue
-                g = p.grad.reshape(p.shape[0], -1)
-                buf = self.state[p].setdefault("momentum", torch.zeros_like(g))
-                buf.mul_(group["momentum"]).add_(g)
-                update = orthogonalize(g + group["momentum"] * buf)
-                update = update * math.sqrt(max(update.shape)) * group["rms"]
-                if group["weight_decay"]:
-                    p.mul_(1 - group["lr"] * group["weight_decay"])
-                p.add_(update.view_as(p), alpha=-group["lr"])
+            # Matrices of the same shape (one per layer) are orthogonalized together: far fewer
+            # small steps on the graphics card than one matrix at a time.
+            # The elementwise parts for every matrix at once (a few kernels, not a few per matrix).
+            params = [p for p in group["params"] if p.grad is not None]
+            if not params:
+                continue
+            grads = [p.grad.reshape(p.shape[0], -1) for p in params]
+            bufs = [self.state[p].setdefault("momentum", torch.zeros_like(g)) for p, g in zip(params, grads)]
+            torch._foreach_mul_(bufs, group["momentum"])
+            torch._foreach_add_(bufs, grads)
+            nesterov = torch._foreach_add(grads, bufs, alpha=group["momentum"])
+            if group["weight_decay"]:
+                torch._foreach_mul_(params, 1 - group["lr"] * group["weight_decay"])
+            shapes = {}
+            for p, g in zip(params, nesterov):
+                shapes.setdefault(tuple(g.shape), []).append((p, g))
+            for shape, items in shapes.items():
+                updates = orthogonalize(torch.stack([g for _, g in items])).unbind(0)
+                scale = math.sqrt(max(shape)) * group["rms"]
+                torch._foreach_add_([p for p, _ in items], [u.view_as(p) for (p, _), u in zip(items, updates)],
+                                    alpha=-group["lr"] * scale)
 
 
 class Combined:
@@ -99,6 +119,11 @@ def is_matrix(name, p):
     return p.ndim == 2 and not any(part in name for part in ("embed", "position", "lm_head", "w_pre", "w_res", "w_post", "gate.weight"))
 
 
+def adamw(params, lr, decay):
+    fused = bool(params) and all(p.is_cuda for p in params)
+    return torch.optim.AdamW(params, lr=lr, betas=(0.9, 0.95), weight_decay=decay, fused=fused)
+
+
 def make(model, settings, steps):
     """The optimizer of a stage, for the parameters that train."""
     name = settings.get("name", "adamw")
@@ -111,12 +136,12 @@ def make(model, settings, steps):
         ids = {id(p) for p in matrices}
         rest = [p for n, p in params if id(p) not in ids]
         return Combined([
-            Muon(matrices, lr=float(settings.get("muon_lr", 0.02)), weight_decay=decay) if matrices else None,
-            torch.optim.AdamW(rest, lr=lr, betas=(0.9, 0.95), weight_decay=decay) if rest else None,
+            Muon(matrices, lr=float(settings.get("muon_lr", 0.004)), weight_decay=decay) if matrices else None,
+            adamw(rest, float(settings.get("embed_lr", lr)), decay) if rest else None,
         ], schedule)
     if name == "sgd":
         return Combined([torch.optim.SGD([p for _, p in params], lr=lr, momentum=0.9, weight_decay=decay)], schedule)
-    return Combined([torch.optim.AdamW([p for _, p in params], lr=lr, betas=(0.9, 0.95), weight_decay=decay)], schedule)
+    return Combined([adamw([p for _, p in params], lr, decay)], schedule)
 
 
 def offload(optimizer, device):

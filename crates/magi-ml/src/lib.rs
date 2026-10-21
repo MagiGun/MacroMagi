@@ -30,10 +30,8 @@ use tract_onnx::tract_hir::internal::DimLike;
 
 pub use prepare::{prepare, resize_rgb, softmax};
 
-pub mod llama;
 pub mod native;
 pub mod tools;
-pub use llama::{LlamaConfig, ask_gguf, set_llama};
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 #[error("{0}")]
@@ -559,50 +557,17 @@ pub struct AskOptions {
     pub max_tokens: usize,
     pub temperature: f32,
     pub seed: u64,
-    /// The context window, in tokens (GGUF models; ONNX models have theirs built in).
+    /// The context window, in tokens: only the latest part of a longer text is read.
     pub context: usize,
     /// Think before answering; `None` follows the model.
     pub thinking: Option<bool>,
     /// The reasoning effort, one of the model's levels; empty follows the model.
     pub effort: String,
-    /// llama.cpp: the key/value cache's type (`f16`, `q8_0`, `q4_0`); empty: its own.
-    pub kv_cache: String,
-    /// llama.cpp: flash attention (a quantized cache needs it).
-    pub flash_attention: bool,
-    /// llama.cpp: the model's context scaling, passed when a longer context than it trained at is asked for.
-    pub scaling: Option<magi_core::magic::RopeScaling>,
 }
 
 impl Default for AskOptions {
     fn default() -> Self {
-        Self {
-            max_tokens: 0,
-            temperature: -1.0,
-            seed: 0,
-            context: 0,
-            thinking: None,
-            effort: String::new(),
-            kv_cache: String::new(),
-            flash_attention: false,
-            scaling: None,
-        }
-    }
-}
-
-impl AskOptions {
-    /// The context scaling of a model trained in MacroMagi.
-    pub fn with_scaling(mut self, architecture: Option<&magi_core::magic::Architecture>) -> Self {
-        self.scaling = architecture.and_then(|a| a.rope_scaling.clone());
-        self
-    }
-
-    /// The cache settings of a model's Memory & Cache block.
-    pub fn with_memory(mut self, memory: Option<&magi_core::magic::MemorySpec>) -> Self {
-        if let Some(memory) = memory {
-            self.kv_cache = if memory.precision == "f32" { "f32".into() } else { memory.precision.clone() };
-            self.flash_attention = memory.flash_attention;
-        }
-        self
+        Self { max_tokens: 0, temperature: -1.0, seed: 0, context: 0, thinking: None, effort: String::new() }
     }
 }
 

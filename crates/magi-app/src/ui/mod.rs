@@ -5,6 +5,7 @@
 //! listening for a hotkey, opening a file dialog – they return a
 //! [`UiRequest`] and the app carries it out.
 
+pub mod agent_chat;
 pub mod autoclicker;
 pub mod clicker_form;
 pub mod dataset_editor;

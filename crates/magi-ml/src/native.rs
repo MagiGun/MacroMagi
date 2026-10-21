@@ -32,8 +32,8 @@ use std::collections::VecDeque;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use magi_core::export::{Tensor, f16_to_f32, f32_to_f16, read_safetensors};
 use magi_core::magic::{Architecture, MemorySpec, RopeScaling};
+use magi_core::safetensors::{Tensor, f16_to_f32, f32_to_f16, read_safetensors};
 use rayon::prelude::*;
 use serde_json::Value;
 
@@ -56,14 +56,135 @@ struct Layer {
     k_norm: Option<Vec<f32>>,
     attn_out_norm: Option<Vec<f32>>,
     ffn_norm: Vec<f32>,
+    ffn: Ffn,
+    mlp_out_norm: Option<Vec<f32>>,
+    window: usize,
+    turned: usize,
+}
+
+/// A gated feed-forward part: SwiGLU, or GeGLU.
+struct Expert {
     gate: Vec<f32>,
     up: Vec<f32>,
     down: Vec<f32>,
-    mlp_out_norm: Option<Vec<f32>>,
     hidden: usize,
-    window: usize,
-    turned: usize,
     geglu: bool,
+}
+
+impl Expert {
+    fn load(take: &mut dyn FnMut(&str) -> Result<Tensor, MlError>, prefix: &str, geglu: bool) -> Result<Self, MlError> {
+        let gate = take(&format!("{prefix}.gate_proj.weight"))?;
+        Ok(Self {
+            hidden: gate.shape[0],
+            gate: gate.data,
+            up: take(&format!("{prefix}.up_proj.weight"))?.data,
+            down: take(&format!("{prefix}.down_proj.weight"))?.data,
+            geglu,
+        })
+    }
+
+    /// The part on `n` rows of `h`.
+    fn run(&self, h: &[f32], n: usize, width: usize) -> Vec<f32> {
+        let gate = linear(h, n, &self.gate, self.hidden, None);
+        let up = linear(h, n, &self.up, self.hidden, None);
+        let mixed: Vec<f32> =
+            gate.iter().zip(&up).map(|(g, u)| if self.geglu { gelu_tanh(*g) * u } else { silu(*g) * u }).collect();
+        linear(&mixed, n, &self.down, width, None)
+    }
+}
+
+/// A layer's feed-forward part: one, or DeepSeek's Mixture of Experts (shared
+/// experts for every token, and `top_k` of the routed ones, chosen per token).
+enum Ffn {
+    Dense(Expert),
+    Experts {
+        shared: Vec<Expert>,
+        routed: Vec<Expert>,
+        router: Vec<f32>,
+        /// Added to the affinities when choosing (bias balancing), not when weighing.
+        bias: Vec<f32>,
+        top_k: usize,
+        gating: String,
+        normalize: bool,
+        scale: f32,
+        /// Experts chosen by a hash of the token, not by the router (DeepSeek-V4's first layers).
+        hash: bool,
+    },
+}
+
+impl Ffn {
+    fn run(&self, h: &[f32], tokens: &[u32], width: usize) -> Vec<f32> {
+        let n = tokens.len();
+        match self {
+            Ffn::Dense(expert) => expert.run(h, n, width),
+            Ffn::Experts { shared, routed, router, bias, top_k, gating, normalize, scale, hash } => {
+                let count = routed.len();
+                let mut out = vec![0.0f32; n * width];
+                for expert in shared {
+                    for (o, v) in out.iter_mut().zip(expert.run(h, n, width)) {
+                        *o += v;
+                    }
+                }
+                let logits = linear(h, n, router, count, None);
+                // Which tokens each routed expert takes, and how much each counts.
+                let mut chosen: Vec<Vec<(usize, f32)>> = vec![Vec::new(); count];
+                for t in 0..n {
+                    let row = &logits[t * count..(t + 1) * count];
+                    let affinity: Vec<f32> = row
+                        .iter()
+                        .map(|&l| match gating.as_str() {
+                            "sigmoid" => 1.0 / (1.0 + (-l).exp()),
+                            "sqrt_softplus" => (if l > 20.0 { l } else { l.exp().ln_1p() }).sqrt(),
+                            _ => l,
+                        })
+                        .collect();
+                    let affinity = if gating == "softmax" || gating.is_empty() {
+                        let top = affinity.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                        let exps: Vec<f32> = affinity.iter().map(|a| (a - top).exp()).collect();
+                        let sum: f32 = exps.iter().sum();
+                        exps.iter().map(|e| e / sum).collect()
+                    } else {
+                        affinity
+                    };
+                    let picks: Vec<usize> = if *hash {
+                        let first = (u64::from(tokens[t]) * 2_654_435_761 % count as u64) as usize;
+                        (0..*top_k).map(|j| (first + j) % count).collect()
+                    } else {
+                        let mut order: Vec<usize> = (0..count).collect();
+                        order.sort_by(|&a, &b| {
+                            (affinity[b] + bias[b]).total_cmp(&(affinity[a] + bias[a])).then(a.cmp(&b))
+                        });
+                        order.truncate(*top_k);
+                        order
+                    };
+                    let total: f32 = picks.iter().map(|&e| affinity[e]).sum();
+                    for &e in &picks {
+                        let mut weight = affinity[e];
+                        if *normalize {
+                            weight /= total.max(1e-9);
+                        }
+                        chosen[e].push((t, weight * scale));
+                    }
+                }
+                for (e, takes) in chosen.iter().enumerate() {
+                    if takes.is_empty() {
+                        continue;
+                    }
+                    let rows: Vec<f32> =
+                        takes.iter().flat_map(|(t, _)| h[t * width..(t + 1) * width].iter().copied()).collect();
+                    let result = routed[e].run(&rows, takes.len(), width);
+                    for (i, (t, weight)) in takes.iter().enumerate() {
+                        for (o, v) in
+                            out[t * width..(t + 1) * width].iter_mut().zip(&result[i * width..(i + 1) * width])
+                        {
+                            *o += weight * v;
+                        }
+                    }
+                }
+                out
+            }
+        }
+    }
 }
 
 /// What the cache holds and has done, for the Memory & Cache block.
@@ -534,7 +655,34 @@ impl NativeModel {
             let flag = |path: &str| spec.pointer(path).and_then(Value::as_bool).unwrap_or(false);
             let rotary = spec.pointer("/attention/rotary").and_then(Value::as_f64).unwrap_or(1.0);
             let turned = ((dim as f64 * rotary) as usize / 2 * 2).clamp(2, dim);
-            let gate = take(&p("mlp.gate_proj.weight"))?;
+            let geglu = spec.pointer("/ffn/activation").and_then(Value::as_str) == Some("geglu");
+            let ffn = if spec.pointer("/ffn/kind").and_then(Value::as_str) == Some("moe") {
+                let f = spec.get("ffn").cloned().unwrap_or_default();
+                let number = |key: &str, default: f64| f.get(key).and_then(Value::as_f64).unwrap_or(default);
+                let count = number("experts", 8.0).max(1.0) as usize;
+                let gating = f.get("gating").and_then(Value::as_str).unwrap_or("softmax").to_owned();
+                let mut shared = Vec::new();
+                for j in 0..number("shared", 1.0) as usize {
+                    shared.push(Expert::load(&mut take, &p(&format!("mlp.shared.{j}")), false)?);
+                }
+                let mut routed = Vec::new();
+                for e in 0..count {
+                    routed.push(Expert::load(&mut take, &p(&format!("mlp.experts.{e}")), false)?);
+                }
+                Ffn::Experts {
+                    shared,
+                    routed,
+                    router: take(&p("mlp.gate.weight"))?.data,
+                    bias: take(&p("mlp.bias")).map(|t| t.data).unwrap_or_else(|_| vec![0.0; count]),
+                    top_k: (number("top_k", 2.0) as usize).clamp(1, count),
+                    normalize: f.get("normalize").and_then(Value::as_bool).unwrap_or(gating != "softmax"),
+                    gating,
+                    scale: number("scale", 1.0) as f32,
+                    hash: f.get("hash").and_then(Value::as_bool).unwrap_or(false),
+                }
+            } else {
+                Ffn::Dense(Expert::load(&mut take, &p("mlp"), geglu)?)
+            };
             let bias = flag("/attention/bias");
             let qk = flag("/attention/qk_norm");
             let sandwich = spec.pointer("/norm").and_then(Value::as_str) == Some("sandwich");
@@ -551,14 +699,10 @@ impl NativeModel {
                 k_norm: if qk { Some(take(&p("self_attn.k_norm.weight"))?.data) } else { None },
                 attn_out_norm: if sandwich { Some(take(&p("attn_out_norm.weight"))?.data) } else { None },
                 ffn_norm: take(&p("post_attention_layernorm.weight"))?.data,
-                hidden: gate.shape[0],
-                gate: gate.data,
-                up: take(&p("mlp.up_proj.weight"))?.data,
-                down: take(&p("mlp.down_proj.weight"))?.data,
+                ffn,
                 mlp_out_norm: if sandwich { Some(take(&p("mlp_out_norm.weight"))?.data) } else { None },
                 window: spec.pointer("/attention/window").and_then(Value::as_u64).unwrap_or(0) as usize,
                 turned,
-                geglu: spec.pointer("/ffn/activation").and_then(Value::as_str) == Some("geglu"),
             });
         }
         let mut rope: Vec<Table> = Vec::new();
@@ -859,11 +1003,7 @@ impl NativeModel {
             for row in h.chunks_mut(width) {
                 rms_norm(row, &layer.ffn_norm);
             }
-            let gate = linear(&h, n, &layer.gate, layer.hidden, None);
-            let up = linear(&h, n, &layer.up, layer.hidden, None);
-            let mixed: Vec<f32> =
-                gate.iter().zip(&up).map(|(g, u)| if layer.geglu { gelu_tanh(*g) * u } else { silu(*g) * u }).collect();
-            let mut down = linear(&mixed, n, &layer.down, width, None);
+            let mut down = layer.ffn.run(&h, tokens, width);
             if let Some(w) = &layer.mlp_out_norm {
                 for row in down.chunks_mut(width) {
                     rms_norm(row, w);
@@ -926,6 +1066,12 @@ struct Attention {
     dim: usize,
     window: usize,
     read_blocks: usize,
+}
+
+/// Whether the token at `key` is outside the local window of the one at `query`: a token sees its own
+/// block of `window` tokens and the whole block before (the trainer's `window_mask`); 0: no window.
+fn outside(window: usize, query: usize, key: usize) -> bool {
+    window > 0 && key < (query / window).saturating_sub(1) * window
 }
 
 /// Attention of the new tokens over the cache and each other: `[n, heads·dim]`.
@@ -1018,7 +1164,7 @@ fn attend(
         for slot in 0..len {
             let j = first + slot;
             for t in 0..n {
-                if window > 0 && start + t - j >= window {
+                if outside(window, start + t, j) {
                     continue;
                 }
                 for head in 0..heads {
@@ -1039,7 +1185,7 @@ fn attend(
     }
     for t in 0..n {
         for u in 0..=t {
-            if window > 0 && t - u >= window {
+            if outside(window, start + t, start + u) {
                 continue;
             }
             for head in 0..heads {
@@ -1062,6 +1208,36 @@ fn attend(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// With MAGI_TEST_PARITY_DIR (written by runtime/python/tools/make_parity.py): a tiny model in
+    /// Magi's shape – block windows, experts, grouped heads – gives PyTorch's scores at the last
+    /// token of prompts that cross many windows.
+    #[test]
+    #[ignore = "needs make_parity.py's folder"]
+    fn native_engine_matches_pytorch() {
+        let dir = PathBuf::from(std::env::var("MAGI_TEST_PARITY_DIR").expect("MAGI_TEST_PARITY_DIR"));
+        let a: Architecture = serde_json::from_slice(&std::fs::read(dir.join("architecture.json")).unwrap()).unwrap();
+        let weights = std::fs::read(dir.join("weights.safetensors")).unwrap();
+        let cases: Vec<Value> = serde_json::from_slice(&std::fs::read(dir.join("cases.json")).unwrap()).unwrap();
+        let memory = MemorySpec { persist_prefix: false, ..MemorySpec::default() };
+        for case in cases {
+            let tokens: Vec<u32> = serde_json::from_value(case["tokens"].clone()).unwrap();
+            let expected: Vec<f32> = serde_json::from_value(case["scores"].clone()).unwrap();
+            let mut native = NativeModel::load(&a, &weights, &memory, &std::env::temp_dir()).unwrap();
+            let ours = native.scores(&tokens, 0).unwrap();
+            let diff = ours.iter().zip(&expected).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max);
+            println!("{} tokens: largest difference {diff}", tokens.len());
+            assert!(diff < 1e-3, "{} tokens: {diff}", tokens.len());
+            // Token by token, from the cache, the same.
+            let mut stepped = NativeModel::load(&a, &weights, &memory, &std::env::temp_dir()).unwrap();
+            let mut last = Vec::new();
+            for n in 1..=tokens.len() {
+                last = stepped.scores(&tokens[..n], 0).unwrap();
+            }
+            let diff = last.iter().zip(&expected).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max);
+            assert!(diff < 1e-3, "{} tokens, one at a time: {diff}", tokens.len());
+        }
+    }
 
     /// With MAGI_TEST_MAGIC_DIR (an unpacked .magic file of a trained text
     /// model): the native engine against the ONNX model, and how fast each is.
@@ -1120,8 +1296,7 @@ mod tests {
 
     #[test]
     fn yarn_keeps_fast_channels_and_stretches_slow_ones() {
-        let scaling =
-            RopeScaling { kind: "yarn".into(), factor: 32.0, original: 2048, target: 65536, static_in_exports: false };
+        let scaling = RopeScaling { kind: "yarn".into(), factor: 32.0, original: 2048, target: 65536 };
         let (plain, one) = frequencies(64, 10000.0, None);
         let (yarn, factor) = frequencies(64, 10000.0, Some(&scaling));
         assert_eq!(one, 1.0);
@@ -1159,5 +1334,30 @@ mod tests {
         assert_eq!(cache.truncate(BLOCK * 4 + 1), BLOCK * 4 + 1);
         cache.clear();
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod experts_check {
+    use super::*;
+
+    /// The native engine's experts against PyTorch's (MAGI_TEST_MOE_DIR: weights.safetensors and
+    /// check.json – the architecture, tokens and PyTorch's scores after them).
+    #[test]
+    #[ignore = "needs a model written by PyTorch"]
+    fn experts_match_pytorch() {
+        let Ok(dir) = std::env::var("MAGI_TEST_MOE_DIR") else { return };
+        let dir = std::path::Path::new(&dir);
+        let check: Value = serde_json::from_slice(&std::fs::read(dir.join("check.json")).unwrap()).unwrap();
+        let a: Architecture = serde_json::from_value(check["architecture"].clone()).unwrap();
+        let weights = std::fs::read(dir.join("weights.safetensors")).unwrap();
+        let memory = MemorySpec { persist_prefix: false, ..MemorySpec::default() };
+        let mut model = NativeModel::load(&a, &weights, &memory, &std::env::temp_dir()).unwrap();
+        let tokens: Vec<u32> = serde_json::from_value(check["tokens"].clone()).unwrap();
+        let want: Vec<f32> = serde_json::from_value(check["scores"].clone()).unwrap();
+        let got = model.scores(&tokens, 0).unwrap();
+        let diff = got.iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        println!("largest difference {diff}");
+        assert!(diff < 1e-3, "{diff}");
     }
 }

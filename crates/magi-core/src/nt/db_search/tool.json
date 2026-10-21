@@ -1,0 +1,21 @@
+{
+  "name": "db_search",
+  "description": "Searches MagiDB, the library of how things are done: the best pages for a query, with summaries.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "what to look for, in a few words"
+      }
+    },
+    "required": [
+      "query"
+    ]
+  },
+  "run": {
+    "kind": "python",
+    "entry": "run.py",
+    "timeout_ms": 60000
+  }
+}

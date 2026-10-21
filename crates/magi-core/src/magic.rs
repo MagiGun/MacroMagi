@@ -330,8 +330,52 @@ impl EffortSpec {
     }
 }
 
+/// How a text model cuts text into tokens.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TokenizerSpec {
+    /// `bytes` (or empty): every byte is a token.
+    /// `learned`: pieces learned from the datasets ([`crate::tokenizer`]) –
+    /// about a third as many tokens, read by MacroMagi only.
+    pub kind: String,
+    /// A learned tokenizer's size: bytes, pieces and tags together.
+    pub size: u32,
+    /// The learned pieces, in order: each joins two tokens into one, whose id
+    /// is 256 + its place. Learned when training starts from zero.
+    pub merges: Vec<(u32, u32)>,
+}
+
+impl TokenizerSpec {
+    /// A learned tokenizer of about `size` tokens (its pieces learned at the first training).
+    pub fn learned_of(size: u32) -> Self {
+        Self { kind: "learned".into(), size, merges: Vec::new() }
+    }
+
+    pub fn learned(&self) -> bool {
+        self.kind == "learned"
+    }
+
+    /// Bytes as tokens: what every model was before learned tokenizers.
+    pub fn is_bytes(&self) -> bool {
+        !self.learned() && self.merges.is_empty()
+    }
+}
+
 /// JSON the way Python's `json.dumps(…, sort_keys=True)` writes it (", " and
 /// ": ", keys in order), so prompts written here and in training agree.
+/// A copy with every object's keys in alphabetical order.
+pub fn sorted_keys(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            Value::Object(keys.into_iter().map(|k| (k.clone(), sorted_keys(&map[k]))).collect())
+        }
+        Value::Array(items) => Value::Array(items.iter().map(sorted_keys).collect()),
+        other => other.clone(),
+    }
+}
+
 pub fn spaced_json(value: &Value) -> String {
     match value {
         Value::Array(items) => format!("[{}]", items.iter().map(spaced_json).collect::<Vec<_>>().join(", ")),
@@ -354,8 +398,11 @@ pub fn spaced_json(value: &Value) -> String {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TextSpec {
-    /// Special tags, each one token (ids from 256 on, in this order).
+    /// Special tags, each one token (ids after the bytes and the learned pieces, in this order).
     pub specials: Vec<String>,
+    /// How text is cut into tokens: bytes, or pieces learned from the datasets.
+    #[serde(skip_serializing_if = "TokenizerSpec::is_bytes")]
+    pub tokenizer: TokenizerSpec,
     /// The longest text, in tokens, the model reads at once.
     pub context: u32,
     pub system_tag: String,
@@ -380,6 +427,10 @@ pub struct TextSpec {
     pub compact_tags: (String, String),
     pub personas: Vec<Persona>,
     pub tools: Vec<ToolSpec>,
+    /// How the system text lists the tools: `short` (a line each: `name(argument, other?): what it
+    /// does`) or, empty, each with its JSON parameters – as models made before 0.1.7.2 read them.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tool_list: String,
     /// What the model is told before every request.
     pub system: String,
     pub temperature: f32,
@@ -391,6 +442,7 @@ impl Default for TextSpec {
     fn default() -> Self {
         let mut spec = Self {
             specials: Vec::new(),
+            tokenizer: TokenizerSpec::default(),
             context: 256,
             system_tag: "<|system|>".into(),
             user_tag: "<|user|>".into(),
@@ -404,6 +456,7 @@ impl Default for TextSpec {
             compact_tags: ("<compact>".into(), "</compact>".into()),
             personas: Vec::new(),
             tools: Vec::new(),
+            tool_list: String::new(),
             system: String::new(),
             temperature: 0.7,
             top_k: 40,
@@ -445,40 +498,61 @@ impl TextSpec {
     }
 
     pub fn vocab_size(&self) -> usize {
-        256 + self.specials.len()
+        256 + self.tokenizer.merges.len() + self.specials.len()
     }
 
-    /// Text as token ids: special tags first (longest match), else UTF-8 bytes.
+    /// Where the special tags' ids start: after the bytes and the learned pieces.
+    fn tags_from(&self) -> u32 {
+        256 + self.tokenizer.merges.len() as u32
+    }
+
+    /// Text as token ids: special tags first (longest match), the rest as
+    /// UTF-8 bytes – joined into learned pieces, with a learned tokenizer.
     pub fn encode(&self, text: &str) -> Vec<u32> {
         let mut order: Vec<(usize, &String)> = self.specials.iter().enumerate().collect();
         order.sort_by_key(|(_, tag)| std::cmp::Reverse(tag.len()));
+        let bpe = (!self.tokenizer.merges.is_empty()).then(|| crate::tokenizer::shared(&self.tokenizer.merges));
+        let tags_from = self.tags_from();
         let bytes = text.as_bytes();
         let mut ids = Vec::with_capacity(bytes.len());
-        let mut i = 0;
+        let plain = |ids: &mut Vec<u32>, part: &[u8]| match &bpe {
+            Some(bpe) => ids.extend(bpe.encode(part)),
+            None => ids.extend(part.iter().map(|b| u32::from(*b))),
+        };
+        let (mut i, mut start) = (0, 0);
         'outer: while i < bytes.len() {
             if bytes[i] == b'<' {
                 for (index, tag) in &order {
                     if !tag.is_empty() && bytes[i..].starts_with(tag.as_bytes()) {
-                        ids.push(256 + *index as u32);
+                        plain(&mut ids, &bytes[start..i]);
+                        ids.push(tags_from + *index as u32);
                         i += tag.len();
+                        start = i;
                         continue 'outer;
                     }
                 }
             }
-            ids.push(u32::from(bytes[i]));
             i += 1;
         }
+        plain(&mut ids, &bytes[start..]);
         ids
     }
 
     /// Token ids as text. Unknown ids are left out.
     pub fn decode(&self, ids: &[u32]) -> String {
-        let mut bytes = Vec::with_capacity(ids.len());
+        let bpe = (!self.tokenizer.merges.is_empty()).then(|| crate::tokenizer::shared(&self.tokenizer.merges));
+        let tags_from = self.tags_from();
+        let mut bytes = Vec::with_capacity(ids.len() * 3);
         for &id in ids {
             match id {
                 0..=255 => bytes.push(id as u8),
+                _ if id < tags_from => {
+                    if let Some(piece) = bpe.as_ref().and_then(|b| b.bytes(id)) {
+                        bytes.extend_from_slice(piece);
+                    }
+                }
                 _ => {
-                    if let Some(tag) = self.specials.get(id as usize - 256) {
+                    if let Some(tag) = self.specials.get((id - tags_from) as usize) {
                         bytes.extend_from_slice(tag.as_bytes());
                     }
                 }
@@ -489,7 +563,26 @@ impl TextSpec {
 
     /// The id of a special tag.
     pub fn special_id(&self, tag: &str) -> Option<u32> {
-        self.specials.iter().position(|s| s == tag).map(|i| 256 + i as u32)
+        self.specials.iter().position(|s| s == tag).map(|i| self.tags_from() + i as u32)
+    }
+
+    /// Learns the pieces of a learned tokenizer from texts – what the model
+    /// will train on – and keeps them. Returns how many it learned.
+    pub fn learn_tokens<'a>(&mut self, texts: impl IntoIterator<Item = &'a str>) -> usize {
+        if !self.tokenizer.learned() {
+            return 0;
+        }
+        self.ensure_specials();
+        // The system text and the tools are in nearly every request: they are learned too.
+        let system = self.system_text("", "", &self.tools);
+        let size = (self.tokenizer.size as usize).clamp(512, 65_536);
+        let count = size.saturating_sub(256 + self.specials.len());
+        let tags = self.specials.clone();
+        let mut all: Vec<&str> = texts.into_iter().collect();
+        all.extend(std::iter::repeat_n(system.as_str(), 50));
+        let merges = crate::tokenizer::learn(all, &tags, count);
+        self.tokenizer.merges = merges;
+        self.tokenizer.merges.len()
     }
 
     /// Tags the model writes as text (thinking, tool calls, personas), which
@@ -504,18 +597,49 @@ impl TextSpec {
     pub fn tools_text(&self, tools: &[ToolSpec]) -> String {
         let mut text = "You can use these tools:".to_owned();
         for tool in tools {
-            text.push_str(&format!(
-                "\n- {}: {} Parameters: {}",
-                tool.name,
-                tool.description.trim(),
-                spaced_json(&tool.parameters)
-            ));
+            if self.tool_list == "short" {
+                text.push_str(&format!(
+                    "\n- {}({}): {}",
+                    tool.name,
+                    Self::signature(&tool.parameters),
+                    tool.description.trim()
+                ));
+            } else {
+                text.push_str(&format!(
+                    "\n- {}: {} Parameters: {}",
+                    tool.name,
+                    tool.description.trim(),
+                    // As models before the short list were trained: keys in alphabetical order.
+                    spaced_json(&sorted_keys(&tool.parameters))
+                ));
+            }
         }
         text.push_str(&format!(
             "\nTo use one, write {}{{\"name\": \"<tool name>\", \"arguments\": {{...}}}}{}. Its result comes back in the next turn.",
             self.tool_tags.0, self.tool_tags.1
         ));
         text
+    }
+
+    /// A tool's arguments, short: their names in order, `?` after an optional one, and the type
+    /// when it is not text – `expression`, `path, language?`, `x: number, y: number`.
+    pub fn signature(parameters: &Value) -> String {
+        let required: Vec<&str> = parameters
+            .get("required")
+            .and_then(Value::as_array)
+            .map(|r| r.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        let Some(properties) = parameters.get("properties").and_then(Value::as_object) else { return String::new() };
+        // In the order the tool declares them, as the trainer writes them (tokens.py, signature).
+        properties
+            .keys()
+            .map(|name| {
+                let kind = properties[name].get("type").and_then(Value::as_str).unwrap_or("string");
+                let optional = if required.contains(&name.as_str()) { "" } else { "?" };
+                if kind == "string" { format!("{name}{optional}") } else { format!("{name}{optional}: {kind}") }
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     /// The system text of a request: `system` (the model's own when empty),
@@ -558,6 +682,50 @@ impl TextSpec {
             text.push_str(&format!("{}{}{}", self.system_tag, system, self.end_tag));
         }
         text.push_str(&format!("{}{}{}{}", self.user_tag, user, self.end_tag, self.assistant_tag));
+        if self.thinking.is_some() && !self.thinks(thinking) {
+            text.push_str(&self.think_tags.0);
+            text.push_str(&self.think_tags.1);
+        }
+        text
+    }
+
+    /// A conversation as the model reads it, ready for its next answer: the
+    /// system text (`system`, the model's own when empty, with the effort and
+    /// the tools), then each turn – `("user" | "assistant" | "tool", text)`,
+    /// an answer as the model wrote it (its tool calls included, its
+    /// reasoning left out, as the chat template does) – and the tag after
+    /// which it answers.
+    pub fn chat_prompt(
+        &self,
+        system: &str,
+        turns: &[(String, String)],
+        thinking: Option<bool>,
+        effort: &str,
+    ) -> String {
+        let mut text = String::new();
+        let head = self.system_text(system, effort, &self.tools);
+        if !head.is_empty() {
+            text.push_str(&format!("{}{head}{}", self.system_tag, self.end_tag));
+        }
+        for (role, content) in turns {
+            match role.as_str() {
+                "assistant" => {
+                    let content = match content.rfind(&self.think_tags.1) {
+                        Some(at) if !self.think_tags.1.is_empty() => {
+                            content[at + self.think_tags.1.len()..].trim_start()
+                        }
+                        _ => content.as_str(),
+                    };
+                    text.push_str(&format!("{}{content}{}", self.assistant_tag, self.end_tag));
+                }
+                "tool" if !self.tool_tag.is_empty() => {
+                    text.push_str(&format!("{}{content}{}", self.tool_tag, self.end_tag))
+                }
+                "tool" => text.push_str(&format!("{}Tool result: {content}{}", self.user_tag, self.end_tag)),
+                _ => text.push_str(&format!("{}{content}{}", self.user_tag, self.end_tag)),
+            }
+        }
+        text.push_str(&self.assistant_tag);
         if self.thinking.is_some() && !self.thinks(thinking) {
             text.push_str(&self.think_tags.0);
             text.push_str(&self.think_tags.1);
@@ -721,17 +889,11 @@ pub struct RopeScaling {
     pub factor: f64,
     pub original: u32,
     pub target: u32,
-    /// Write it into the GGUF and Hugging Face files as they are, so other
-    /// programs stretch positions always – short texts too, which a model
-    /// trained without it answers worse. Off: MacroMagi stretches only past
-    /// `original` (its native engine by itself; llama.cpp by flags it passes).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub static_in_exports: bool,
 }
 
 impl Default for RopeScaling {
     fn default() -> Self {
-        Self { kind: "yarn".into(), factor: 32.0, original: 8192, target: 262_144, static_in_exports: false }
+        Self { kind: "yarn".into(), factor: 32.0, original: 8192, target: 262_144 }
     }
 }
 
@@ -749,8 +911,7 @@ impl RopeScaling {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MemorySpec {
-    /// `f32`, `f16`, `q8_0` or `q4_0` (llama.cpp's cache types; the built-in
-    /// engine keeps `q4_0` as `q8_0`).
+    /// `f32`, `f16` or `q8_0`: how the warm tier keeps the cache.
     pub precision: String,
     /// The hot tier: the first block (its attention sinks) and the latest blocks, at full precision.
     pub hot_mb: u32,
@@ -764,8 +925,6 @@ pub struct MemorySpec {
     /// Blocks of 256 tokens each new token reads (the first, the latest and
     /// the most relevant); 0: all of them, exactly.
     pub read_blocks: u32,
-    /// llama.cpp: flash attention (needed for a quantized cache).
-    pub flash_attention: bool,
 }
 
 impl Default for MemorySpec {
@@ -778,7 +937,6 @@ impl Default for MemorySpec {
             disk_gb: 16,
             persist_prefix: true,
             read_blocks: 0,
-            flash_attention: true,
         }
     }
 }
@@ -803,73 +961,11 @@ impl Architecture {
             if layer.pointer("/attention/kind").and_then(Value::as_str).unwrap_or("full") != "full" {
                 return Some("it has layers other than Transformer Layers");
             }
-            if layer.pointer("/ffn/kind").and_then(Value::as_str).unwrap_or("dense") != "dense" {
-                return Some("it has experts or persona routing");
+            if !matches!(layer.pointer("/ffn/kind").and_then(Value::as_str).unwrap_or("dense"), "dense" | "moe") {
+                return Some("it has persona routing");
             }
         }
         None
-    }
-
-    /// Whether GGUF runtimes such as llama.cpp and LM Studio run the model as
-    /// it is (see [`Architecture::gguf_arch`]).
-    pub fn gguf_compatible(&self) -> bool {
-        self.gguf_arch().is_some()
-    }
-
-    /// The GGUF architecture the model is, if it is one llama.cpp knows. All
-    /// need Transformer Layers only – rotary positions, plain attention, a
-    /// gated feed-forward layer, the same options in every layer:
-    ///
-    /// - `llama`: SwiGLU, norms before each part (Llama, Mistral);
-    /// - `qwen3`: the same with queries and keys normalized;
-    /// - `gemma3`: queries and keys normalized, GeGLU, sandwich norms, scaled
-    ///   and tied embeddings, and no window or a window on five layers of six.
-    pub fn gguf_arch(&self) -> Option<&'static str> {
-        let plain = self.conv.is_none()
-            && !self.layers.is_empty()
-            && self.positions == "rope"
-            && self.hyper_connections.is_none()
-            && !self.prefix_split;
-        if !plain {
-            return None;
-        }
-        let text = |layer: &Value, path: &str, default: &'static str| {
-            layer.pointer(path).and_then(Value::as_str).unwrap_or(default).to_owned()
-        };
-        let flag = |layer: &Value, path: &str| layer.pointer(path).and_then(Value::as_bool).unwrap_or(false);
-        let mut shapes = std::collections::BTreeSet::new();
-        let mut windows = Vec::new();
-        for layer in &self.layers {
-            if text(layer, "/attention/kind", "full") != "full" || text(layer, "/ffn/kind", "dense") != "dense" {
-                return None;
-            }
-            if flag(layer, "/attention/bias")
-                || layer.pointer("/attention/rotary").and_then(Value::as_f64).unwrap_or(1.0) < 1.0
-            {
-                return None;
-            }
-            shapes.insert((
-                flag(layer, "/attention/qk_norm"),
-                text(layer, "/ffn/activation", "swiglu"),
-                text(layer, "/norm", "pre"),
-            ));
-            windows.push(layer.pointer("/attention/window").and_then(Value::as_u64).unwrap_or(0));
-        }
-        if shapes.len() != 1 {
-            return None;
-        }
-        let (qk, activation, norm) = shapes.pop_first()?;
-        if windows.iter().all(|w| *w == 0) && !self.embed_scale && activation == "swiglu" && norm == "pre" {
-            return Some(if qk { "qwen3" } else { "llama" });
-        }
-        let gemma_window = || {
-            let local: Vec<u64> = windows.iter().enumerate().filter(|(i, _)| i % 6 != 5).map(|(_, w)| *w).collect();
-            windows.iter().all(|w| *w == 0)
-                || (local.iter().all(|w| *w == local[0] && *w > 0)
-                    && windows.iter().enumerate().filter(|(i, _)| i % 6 == 5).all(|(_, w)| *w == 0))
-        };
-        (qk && activation == "geglu" && norm == "sandwich" && self.embed_scale && self.tied && gemma_window())
-            .then_some("gemma3")
     }
 
     /// The local window of a model with one (Gemma 3), in tokens.
@@ -892,6 +988,17 @@ pub struct TrainingRecord {
     /// The system prompt it was trained with.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system: Option<String>,
+    /// Whether it learned to write a conversation short (compaction samples).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub compacts: bool,
+}
+
+impl TrainingRecord {
+    /// Whether the model can write a long conversation short: it learned
+    /// compaction samples, with fine-tuning or in a Context Compaction stage.
+    pub fn can_compact(&self) -> bool {
+        self.compacts || self.stages.iter().any(|s| s == "compaction")
+    }
 }
 
 /// What a `.magic` file carries besides its description.
@@ -963,10 +1070,6 @@ pub struct MagicModel {
     /// Where its attention memory is kept while it runs (the Memory & Cache block).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<MemorySpec>,
-    /// A GGUF model file this model runs (with llama.cpp), where it is on disk.
-    /// It stays outside the `.magic` file: GGUF models are often gigabytes.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub gguf: Option<String>,
 }
 
 impl Default for MagicModel {
@@ -994,7 +1097,6 @@ impl Default for MagicModel {
             trained: None,
             package: None,
             memory: None,
-            gguf: None,
         }
     }
 }
@@ -1182,10 +1284,17 @@ impl MagicFile {
     /// the training data.
     pub fn for_macro(&self) -> Result<Vec<u8>> {
         let mut copy = self.clone();
-        // Text models the native engine runs go with their weights: it runs them from those, fast.
+        // Text models the native engine runs go with their weights alone: it runs them from those, fast.
         let native = self.model.architecture.as_ref().is_some_and(|a| a.native_problem().is_none());
-        copy.model.include =
-            Includes { model: true, blocks: true, training: false, finetune: false, weights: native, datasets: false };
+        let weights_alone = native && !self.weights.is_empty();
+        copy.model.include = Includes {
+            model: !weights_alone,
+            blocks: true,
+            training: false,
+            finetune: false,
+            weights: native,
+            datasets: false,
+        };
         // The canvas is for making the model, not for using it.
         copy.model.studio = None;
         copy.to_bytes()
@@ -1210,6 +1319,66 @@ fn read<R: Read + Seek>(zip: &mut ZipArchive<R>, name: &str) -> Result<Vec<u8>> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tools_are_listed_short_when_the_model_reads_them_so() {
+        let spec = TextSpec {
+            tool_list: "short".into(),
+            tools: vec![
+                ToolSpec {
+                    name: "web_search".into(),
+                    description: "Searches the web.".into(),
+                    parameters: serde_json::json!({"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}),
+                    native: true,
+                },
+                ToolSpec {
+                    name: "click".into(),
+                    description: "Clicks.".into(),
+                    parameters: serde_json::json!({"type": "object", "properties": {"x": {"type": "number"}, "y": {"type": "number"}, "button": {"type": "string"}}, "required": ["x", "y"]}),
+                    native: false,
+                },
+            ],
+            ..TextSpec::default()
+        };
+        let text = spec.tools_text(&spec.tools);
+        assert!(
+            text.starts_with(
+                "You can use these tools:
+- web_search(query): Searches the web.
+- click(x: number, y: number, button?): Clicks.
+To use one"
+            ),
+            "{text}"
+        );
+        if let Some(out) = std::env::var_os("MAGI_TEST_TOOLS_OUT") {
+            std::fs::write(out, serde_json::to_vec(&serde_json::json!({ "spec": spec, "text": text })).unwrap())
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn a_chat_reads_as_its_requests_do() {
+        let mut spec = TextSpec {
+            thinking: Some(ThinkingSpec { on_by_default: false }),
+            effort: Some(EffortSpec::default()),
+            ..TextSpec::default()
+        };
+        spec.ensure_specials();
+        let one = spec.chat_prompt("", &[("user".into(), "Hi".into())], None, "high");
+        assert_eq!(one, spec.prompt_with("Hi", None, "high"), "one request reads as a request does");
+        let turns = [
+            ("user".into(), "Hi".into()),
+            ("assistant".into(), "<think>A greeting.</think>Hello!".into()),
+            ("user".into(), "Bye".into()),
+        ];
+        let chat = spec.chat_prompt("Be brief.", &turns, Some(true), "");
+        assert!(chat.starts_with("<|system|>Be brief.\n\nReasoning effort: none<|end|>"), "{chat}");
+        assert!(
+            chat.contains("<|assistant|>Hello!<|end|><|user|>Bye<|end|><|assistant|>"),
+            "earlier reasoning is left out"
+        );
+        assert!(chat.ends_with("<|assistant|>"), "thinking on: no empty thinking span");
+    }
 
     #[test]
     fn requests_list_tools_effort_and_thinking() {
@@ -1266,6 +1435,28 @@ mod tests {
         assert_eq!(spec.decode(&ids), text);
         assert_eq!(spec.vocab_size(), 256 + spec.specials.len());
         assert!(spec.encode("<notatag>").iter().all(|id| *id < 256));
+    }
+
+    #[test]
+    fn learned_tokens_are_fewer_and_come_back_the_same() {
+        let mut spec = TextSpec { tokenizer: TokenizerSpec::learned_of(600), ..TextSpec::default() };
+        let corpus = "The weather is nice today. The weather was cold yesterday. What is the weather like? ".repeat(30);
+        let learned = spec.learn_tokens([corpus.as_str()]);
+        assert!(learned > 20, "{learned}");
+        assert_eq!(spec.vocab_size(), 256 + learned + spec.specials.len());
+        let text = "<|user|>What is the weather like today?<|end|><|assistant|>Nice and héllo.<|end|>";
+        let ids = spec.encode(text);
+        assert_eq!(spec.decode(&ids), text);
+        assert!(ids.len() * 2 < text.len(), "{} tokens for {} bytes", ids.len(), text.len());
+        // Tags come after the pieces, and are still one token each.
+        assert_eq!(ids[0], spec.special_id("<|user|>").unwrap());
+        assert!(spec.special_id("<|end|>").unwrap() >= 256 + learned as u32);
+        // Text the pieces never saw still reads byte by byte.
+        assert_eq!(spec.decode(&spec.encode("zqx<think>ok</think>")), "zqx<think>ok</think>");
+        // Its JSON keeps the pieces; a byte model's has no tokenizer at all.
+        let json = serde_json::to_value(&spec).unwrap();
+        assert_eq!(json["tokenizer"]["merges"].as_array().unwrap().len(), learned);
+        assert!(serde_json::to_value(TextSpec::default()).unwrap().get("tokenizer").is_none());
     }
 
     #[test]

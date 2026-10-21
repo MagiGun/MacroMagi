@@ -1,0 +1,21 @@
+{
+  "name": "view_image",
+  "description": "Looks at a picture: what is in it, and the text written in it.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string",
+        "description": "the picture's path"
+      }
+    },
+    "required": [
+      "path"
+    ]
+  },
+  "run": {
+    "kind": "host",
+    "entry": "view_image",
+    "timeout_ms": 180000
+  }
+}

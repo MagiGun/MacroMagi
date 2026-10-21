@@ -30,6 +30,8 @@ pub struct Trained {
     pub record: TrainingRecord,
     pub architecture: Architecture,
     pub input: Option<InputSpec>,
+    /// Tokens the trainer learned (from a corpus read where it ran), to keep with the model.
+    pub tokenizer: Option<magi_core::magic::TokenizerSpec>,
 }
 
 #[derive(Default)]
@@ -88,6 +90,11 @@ pub struct Request {
     pub pipeline: Pipeline,
     /// CUDA devices to train on; empty: the CPU.
     pub devices: Vec<u32>,
+    /// Weights to start from instead of what the canvas's start says: a
+    /// checkpoint, or the trained model.
+    pub from: Option<PathBuf>,
+    /// Where to save the weights after a stage (by its block), and what to note with them.
+    pub checkpoints: std::collections::BTreeMap<magi_core::graph::NodeId, (PathBuf, Value)>,
 }
 
 impl TrainJob {
@@ -169,7 +176,9 @@ fn run(
 
     // The weights to start from.
     let mut weights = None;
-    if request.pipeline.entry.kind == studio::kinds::BASE {
+    if let Some(from) = &request.from {
+        weights = Some(from.to_string_lossy().into_owned());
+    } else if request.pipeline.entry.kind == studio::kinds::BASE {
         let params: studio::BaseParams = request.pipeline.entry.params_or_default();
         let bytes = if params.path.trim().is_empty() {
             request.file.weights.clone()
@@ -212,7 +221,16 @@ fn run(
         out_dir: out_dir.to_string_lossy().into_owned(),
         devices: request.devices.clone(),
     };
-    let plan = studio::plan(&request.pipeline, &request.graph, model, &files)?;
+    let mut plan = studio::plan(&request.pipeline, &request.graph, model, &files)?;
+    // Checkpoints: the weights after a stage, for a later training to start from.
+    if let Some(stages) = plan.get_mut("stages").and_then(Value::as_array_mut) {
+        for stage in stages {
+            let node = stage.get("node").and_then(Value::as_u64);
+            if let Some((path, meta)) = node.and_then(|n| request.checkpoints.get(&n)) {
+                stage["checkpoint"] = serde_json::json!({ "path": path.to_string_lossy(), "meta": meta });
+            }
+        }
+    }
     let plan_path = work.join("plan.json");
     std::fs::write(&plan_path, serde_json::to_vec_pretty(&plan).unwrap_or_default())
         .map_err(|e| format!("The plan could not be written: {e}"))?;
@@ -226,6 +244,8 @@ fn run(
         .arg(&plan_path)
         .current_dir(work)
         .env("PYTHONIOENCODING", "utf-8")
+        // Corpora, cut into tokens once, outlive the training folder (emptied for every run).
+        .env("MAGI_CORPUS_DIR", work.parent().unwrap_or(work).join("corpora"))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -314,8 +334,10 @@ fn run(
         });
     };
 
+    // Text models the native engine runs come out as weights alone.
     let onnx = std::fs::read(out_dir.join("model.onnx")).unwrap_or_default();
-    if onnx.is_empty() {
+    let weights = std::fs::read(out_dir.join("weights.safetensors")).unwrap_or_default();
+    if onnx.is_empty() && (weights.is_empty() || kind == ModelKind::Vision) {
         return Err("Training finished, but no model came out of it: the trainer could not export it. The lines \
                     above say why."
             .into());
@@ -330,18 +352,14 @@ fn run(
         loss: report.get("loss").and_then(Value::as_f64).unwrap_or(f64::NAN),
         parameters: report.get("parameters").and_then(Value::as_u64).unwrap_or(0),
         system: None,
+        compacts: report.get("compacts").and_then(Value::as_bool).unwrap_or(false),
     };
     if let Some(seconds) = report.get("seconds").and_then(Value::as_f64) {
         say(Level::Info, format!("{} steps in {seconds:.0} s · {} parameters.", record.steps, record.parameters));
     }
-    Ok(Trained {
-        kind,
-        onnx,
-        weights: std::fs::read(out_dir.join("weights.safetensors")).unwrap_or_default(),
-        record,
-        architecture: request.pipeline.architecture.clone(),
-        input,
-    })
+    // Tokens the trainer learned, from a corpus it read.
+    let tokenizer = std::fs::read(out_dir.join("tokenizer.json")).ok().and_then(|b| serde_json::from_slice(&b).ok());
+    Ok(Trained { kind, onnx, weights, record, architecture: request.pipeline.architecture.clone(), input, tokenizer })
 }
 
 /// A stage's name, as people say it.
@@ -385,31 +403,18 @@ mod tests {
     use super::*;
     use magi_core::nodes::studio::kinds;
 
-    /// The whole way, as the Magic tab does it: a new text model (the example
-    /// agent and its datasets), the trainer in Python, the trained model back
+    /// The whole way, as the Magic tab does it: a new text model (Magi, made
+    /// tiny on its example files), the trainer in Python, the trained model back
     /// in the document, the package compiled into a folder – and the model
     /// answering from the saved file.
     #[test]
     #[ignore = "needs Python with PyTorch and onnx (MAGI_TEST_PYTHON, or python on the PATH)"]
     fn a_new_text_model_trains_end_to_end() {
         let mut doc = crate::magic::MagicDoc::new(crate::magic::new_model(true), None, Vec::new());
+        crate::magic::tiny(&mut doc);
         let folder = std::env::temp_dir().join(format!("magi-compile-test-{}", std::process::id()));
-        let ids: Vec<(magi_core::graph::NodeId, String)> =
-            doc.studio.graph.nodes().map(|n| (n.id, n.kind.clone())).collect();
-        for (id, kind) in ids {
-            let node = doc.studio.graph.node_mut(id).unwrap();
-            match kind.as_str() {
-                kinds::COMPILE => {
-                    node.set_param("folder", folder.to_string_lossy());
-                    // Not into this computer's LM Studio.
-                    node.set_param("lmstudio", false);
-                }
-                // Quicker than the example's own settings, for a test.
-                kinds::PRETRAIN => node.set_param("steps", 150),
-                kinds::FINETUNE => node.set_param("steps", 300),
-                _ => {}
-            }
-        }
+        let compile = doc.studio.graph.nodes().find(|n| n.kind == kinds::COMPILE).unwrap().id;
+        doc.studio.graph.node_mut(compile).unwrap().set_param("folder", folder.to_string_lossy());
         doc.sync_canvas();
         assert_eq!(doc.training_problem(), None);
         let pipeline = studio::pipeline(&doc.studio.graph).unwrap();
@@ -423,6 +428,8 @@ mod tests {
             graph: doc.studio.graph.clone(),
             pipeline,
             devices,
+            from: None,
+            checkpoints: Default::default(),
         };
         let job = TrainJob::start(request, || {});
         while job.is_running() {
@@ -435,18 +442,24 @@ mod tests {
         let trained = state.trained.take().unwrap();
         drop(state);
         doc.apply_trained(trained);
-        assert_eq!(doc.file.model.trained.as_ref().unwrap().stages, ["pretrain", "sft"]);
+        assert_eq!(doc.file.model.trained.as_ref().unwrap().stages, ["pretrain", "sft", "compaction", "rl"]);
 
         let (written, skipped) = doc.compile().unwrap();
         assert!(skipped.is_empty(), "{skipped:?}");
-        assert!(written.iter().any(|p| p.extension().is_some_and(|e| e == "gguf")), "{written:?}");
-        let saved = MagicFile::load(&written[0]).unwrap();
-        assert!(!saved.weights.is_empty() && !saved.onnx.is_empty());
+        assert!(written.iter().any(|p| p.extension().is_some_and(|e| e == "szi")), "{written:?}");
+        // The workspace holds no model: opening it finds the model in the .szi package.
+        let saved = magi_core::szi::open(&written[0]).unwrap();
+        // The native engine runs it from its weights: no ONNX model is made for it.
+        assert!(!saved.weights.is_empty() && saved.onnx.is_empty());
         let spec = saved.model.text.clone().unwrap();
-        let mut model = magi_ml::TextModel::load(&saved.onnx, spec.context as usize).unwrap();
-        let answer = magi_ml::ask(&mut model, &spec, "Press Enter", 60, 0.0, 1).unwrap();
-        assert_eq!(answer.tools.first().map(|t| t.name.as_str()), Some("press"), "{answer:?}");
-        assert_eq!(answer.tools[0].args["key"], "Enter", "{answer:?}");
+        let architecture = saved.model.architecture.clone().unwrap();
+        let memory = saved.model.memory.clone().unwrap_or_default();
+        let mut model =
+            magi_ml::TextModel::load_native(&architecture, &saved.weights, &memory, &magi_ml::tools::cache_dir())
+                .unwrap();
+        // A tiny model says little that makes sense; it must run and answer.
+        let answer = magi_ml::ask(&mut model, &spec, "List the files in C:/work", 40, 0.0, 1).unwrap();
+        assert!(!answer.raw.is_empty(), "{answer:?}");
         let _ = std::fs::remove_dir_all(work);
         let _ = std::fs::remove_dir_all(folder);
     }

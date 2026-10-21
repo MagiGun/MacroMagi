@@ -30,3 +30,6 @@ desktop.ini
 
 # Release packaging
 /dist/
+
+# Base models made locally (large; share them as .szi files, e.g. on Hugging Face)
+/bases/

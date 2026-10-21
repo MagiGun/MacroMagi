@@ -144,12 +144,13 @@ pub fn as_trained(spec: &TextSpec, item: &Map<String, Value>, effort: &str) -> O
     if messages.first().is_some_and(|m| m.get("role").and_then(Value::as_str) == Some("system")) {
         system = string(messages.remove(0).get("content"));
     }
+    // Without "tools", the model's own (as when it runs); "tools": [] lists none.
     let tools: Vec<ToolSpec> = match item.get("tools") {
         Some(Value::Array(list)) => list
             .iter()
             .filter_map(|tool| serde_json::from_value(tool.get("function").unwrap_or(tool).clone()).ok())
             .collect(),
-        _ => Vec::new(),
+        _ => spec.tools.clone(),
     };
     let mut out = String::new();
     let head = spec.system_text(&system, effort, &tools);

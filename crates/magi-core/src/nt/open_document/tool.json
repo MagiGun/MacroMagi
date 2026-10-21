@@ -1,0 +1,25 @@
+{
+  "name": "open_document",
+  "description": "Opens a document – Word, Excel, PowerPoint, PDF, CSV or text – as numbered parts of plain text.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string",
+        "description": "the document's path"
+      },
+      "from": {
+        "type": "string",
+        "description": "start at this part (for long documents)"
+      }
+    },
+    "required": [
+      "path"
+    ]
+  },
+  "run": {
+    "kind": "python",
+    "entry": "run.py",
+    "timeout_ms": 60000
+  }
+}

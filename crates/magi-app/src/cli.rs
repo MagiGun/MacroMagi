@@ -67,6 +67,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         train: false,
         wait: None,
         dataset: None,
+        agent: false,
     };
     let mut positional: Vec<&str> = Vec::new();
     let mut engine = None;
@@ -110,6 +111,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             }
             "--targets" => options.show_targets = true,
             "--dataset" => options.dataset = Some(value("--dataset")?.to_owned()),
+            "--agent" => options.agent = true,
             "--select" => options.select_kind = Some(value("--select")?.to_owned()),
             "--settings" => {
                 let page = value("--settings")?.to_lowercase();

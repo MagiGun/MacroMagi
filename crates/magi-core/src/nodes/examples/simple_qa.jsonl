@@ -1,0 +1,668 @@
+{"effort": "standard", "prompt": "What is the capital of France?", "response": "Paris."}
+{"effort": "superior", "prompt": "What is the capital of France?", "thinking": "The capital of France is Paris.", "response": "Paris."}
+{"effort": "standard", "prompt": "What is the capital of Germany?", "response": "Berlin."}
+{"effort": "superior", "prompt": "What is the capital of Germany?", "thinking": "The capital of Germany is Berlin.", "response": "Berlin."}
+{"effort": "standard", "prompt": "What is the capital of Italy?", "response": "Rome."}
+{"effort": "superior", "prompt": "What is the capital of Italy?", "thinking": "The capital of Italy is Rome.", "response": "Rome."}
+{"effort": "standard", "prompt": "What is the capital of Spain?", "response": "Madrid."}
+{"effort": "superior", "prompt": "What is the capital of Spain?", "thinking": "The capital of Spain is Madrid.", "response": "Madrid."}
+{"effort": "standard", "prompt": "What is the capital of Portugal?", "response": "Lisbon."}
+{"effort": "superior", "prompt": "What is the capital of Portugal?", "thinking": "The capital of Portugal is Lisbon.", "response": "Lisbon."}
+{"effort": "standard", "prompt": "What is the capital of the United Kingdom?", "response": "London."}
+{"effort": "superior", "prompt": "What is the capital of the United Kingdom?", "thinking": "The capital of the United Kingdom is London.", "response": "London."}
+{"effort": "standard", "prompt": "What is the capital of Ireland?", "response": "Dublin."}
+{"effort": "superior", "prompt": "What is the capital of Ireland?", "thinking": "The capital of Ireland is Dublin.", "response": "Dublin."}
+{"effort": "standard", "prompt": "What is the capital of Norway?", "response": "Oslo."}
+{"effort": "superior", "prompt": "What is the capital of Norway?", "thinking": "The capital of Norway is Oslo.", "response": "Oslo."}
+{"effort": "standard", "prompt": "What is the capital of Sweden?", "response": "Stockholm."}
+{"effort": "superior", "prompt": "What is the capital of Sweden?", "thinking": "The capital of Sweden is Stockholm.", "response": "Stockholm."}
+{"effort": "standard", "prompt": "What is the capital of Finland?", "response": "Helsinki."}
+{"effort": "superior", "prompt": "What is the capital of Finland?", "thinking": "The capital of Finland is Helsinki.", "response": "Helsinki."}
+{"effort": "standard", "prompt": "What is the capital of Denmark?", "response": "Copenhagen."}
+{"effort": "superior", "prompt": "What is the capital of Denmark?", "thinking": "The capital of Denmark is Copenhagen.", "response": "Copenhagen."}
+{"effort": "standard", "prompt": "What is the capital of Poland?", "response": "Warsaw."}
+{"effort": "superior", "prompt": "What is the capital of Poland?", "thinking": "The capital of Poland is Warsaw.", "response": "Warsaw."}
+{"effort": "standard", "prompt": "What is the capital of Greece?", "response": "Athens."}
+{"effort": "superior", "prompt": "What is the capital of Greece?", "thinking": "The capital of Greece is Athens.", "response": "Athens."}
+{"effort": "standard", "prompt": "What is the capital of Austria?", "response": "Vienna."}
+{"effort": "superior", "prompt": "What is the capital of Austria?", "thinking": "The capital of Austria is Vienna.", "response": "Vienna."}
+{"effort": "standard", "prompt": "What is the capital of the Netherlands?", "response": "Amsterdam."}
+{"effort": "superior", "prompt": "What is the capital of the Netherlands?", "thinking": "The capital of the Netherlands is Amsterdam.", "response": "Amsterdam."}
+{"effort": "standard", "prompt": "What is the capital of Belgium?", "response": "Brussels."}
+{"effort": "superior", "prompt": "What is the capital of Belgium?", "thinking": "The capital of Belgium is Brussels.", "response": "Brussels."}
+{"effort": "standard", "prompt": "What is the capital of Switzerland?", "response": "Bern."}
+{"effort": "superior", "prompt": "What is the capital of Switzerland?", "thinking": "The capital of Switzerland is Bern.", "response": "Bern."}
+{"effort": "standard", "prompt": "What is the capital of Russia?", "response": "Moscow."}
+{"effort": "superior", "prompt": "What is the capital of Russia?", "thinking": "The capital of Russia is Moscow.", "response": "Moscow."}
+{"effort": "standard", "prompt": "What is the capital of Ukraine?", "response": "Kyiv."}
+{"effort": "superior", "prompt": "What is the capital of Ukraine?", "thinking": "The capital of Ukraine is Kyiv.", "response": "Kyiv."}
+{"effort": "standard", "prompt": "What is the capital of Turkey?", "response": "Ankara."}
+{"effort": "superior", "prompt": "What is the capital of Turkey?", "thinking": "The capital of Turkey is Ankara.", "response": "Ankara."}
+{"effort": "standard", "prompt": "What is the capital of Egypt?", "response": "Cairo."}
+{"effort": "superior", "prompt": "What is the capital of Egypt?", "thinking": "The capital of Egypt is Cairo.", "response": "Cairo."}
+{"effort": "standard", "prompt": "What is the capital of Kenya?", "response": "Nairobi."}
+{"effort": "superior", "prompt": "What is the capital of Kenya?", "thinking": "The capital of Kenya is Nairobi.", "response": "Nairobi."}
+{"effort": "standard", "prompt": "What is the capital of Nigeria?", "response": "Abuja."}
+{"effort": "superior", "prompt": "What is the capital of Nigeria?", "thinking": "The capital of Nigeria is Abuja.", "response": "Abuja."}
+{"effort": "standard", "prompt": "What is the capital of South Africa?", "response": "Pretoria."}
+{"effort": "superior", "prompt": "What is the capital of South Africa?", "thinking": "The capital of South Africa is Pretoria.", "response": "Pretoria."}
+{"effort": "standard", "prompt": "What is the capital of Morocco?", "response": "Rabat."}
+{"effort": "superior", "prompt": "What is the capital of Morocco?", "thinking": "The capital of Morocco is Rabat.", "response": "Rabat."}
+{"effort": "standard", "prompt": "What is the capital of Japan?", "response": "Tokyo."}
+{"effort": "superior", "prompt": "What is the capital of Japan?", "thinking": "The capital of Japan is Tokyo.", "response": "Tokyo."}
+{"effort": "standard", "prompt": "What is the capital of China?", "response": "Beijing."}
+{"effort": "superior", "prompt": "What is the capital of China?", "thinking": "The capital of China is Beijing.", "response": "Beijing."}
+{"effort": "standard", "prompt": "What is the capital of South Korea?", "response": "Seoul."}
+{"effort": "superior", "prompt": "What is the capital of South Korea?", "thinking": "The capital of South Korea is Seoul.", "response": "Seoul."}
+{"effort": "standard", "prompt": "What is the capital of India?", "response": "New Delhi."}
+{"effort": "superior", "prompt": "What is the capital of India?", "thinking": "The capital of India is New Delhi.", "response": "New Delhi."}
+{"effort": "standard", "prompt": "What is the capital of Thailand?", "response": "Bangkok."}
+{"effort": "superior", "prompt": "What is the capital of Thailand?", "thinking": "The capital of Thailand is Bangkok.", "response": "Bangkok."}
+{"effort": "standard", "prompt": "What is the capital of Vietnam?", "response": "Hanoi."}
+{"effort": "superior", "prompt": "What is the capital of Vietnam?", "thinking": "The capital of Vietnam is Hanoi.", "response": "Hanoi."}
+{"effort": "standard", "prompt": "What is the capital of Indonesia?", "response": "Jakarta."}
+{"effort": "superior", "prompt": "What is the capital of Indonesia?", "thinking": "The capital of Indonesia is Jakarta.", "response": "Jakarta."}
+{"effort": "standard", "prompt": "What is the capital of Australia?", "response": "Canberra."}
+{"effort": "superior", "prompt": "What is the capital of Australia?", "thinking": "The capital of Australia is Canberra.", "response": "Canberra."}
+{"effort": "standard", "prompt": "What is the capital of New Zealand?", "response": "Wellington."}
+{"effort": "superior", "prompt": "What is the capital of New Zealand?", "thinking": "The capital of New Zealand is Wellington.", "response": "Wellington."}
+{"effort": "standard", "prompt": "What is the capital of Canada?", "response": "Ottawa."}
+{"effort": "superior", "prompt": "What is the capital of Canada?", "thinking": "The capital of Canada is Ottawa.", "response": "Ottawa."}
+{"effort": "standard", "prompt": "What is the capital of the United States?", "response": "Washington, D.C.."}
+{"effort": "superior", "prompt": "What is the capital of the United States?", "thinking": "The capital of the United States is Washington, D.C..", "response": "Washington, D.C.."}
+{"effort": "standard", "prompt": "What is the capital of Mexico?", "response": "Mexico City."}
+{"effort": "superior", "prompt": "What is the capital of Mexico?", "thinking": "The capital of Mexico is Mexico City.", "response": "Mexico City."}
+{"effort": "standard", "prompt": "What is the capital of Brazil?", "response": "Brasília."}
+{"effort": "superior", "prompt": "What is the capital of Brazil?", "thinking": "The capital of Brazil is Brasília.", "response": "Brasília."}
+{"effort": "standard", "prompt": "What is the capital of Argentina?", "response": "Buenos Aires."}
+{"effort": "superior", "prompt": "What is the capital of Argentina?", "thinking": "The capital of Argentina is Buenos Aires.", "response": "Buenos Aires."}
+{"effort": "standard", "prompt": "What is the capital of Chile?", "response": "Santiago."}
+{"effort": "superior", "prompt": "What is the capital of Chile?", "thinking": "The capital of Chile is Santiago.", "response": "Santiago."}
+{"effort": "standard", "prompt": "What is the capital of Peru?", "response": "Lima."}
+{"effort": "superior", "prompt": "What is the capital of Peru?", "thinking": "The capital of Peru is Lima.", "response": "Lima."}
+{"effort": "standard", "prompt": "What is the capital of Colombia?", "response": "Bogotá."}
+{"effort": "superior", "prompt": "What is the capital of Colombia?", "thinking": "The capital of Colombia is Bogotá.", "response": "Bogotá."}
+{"effort": "standard", "prompt": "How many days are in a week?", "response": "Seven."}
+{"effort": "standard", "prompt": "How many months are in a year?", "response": "Twelve."}
+{"effort": "standard", "prompt": "How many hours are in a day?", "response": "Twenty-four."}
+{"effort": "standard", "prompt": "How many minutes are in an hour?", "response": "Sixty."}
+{"effort": "standard", "prompt": "How many seconds are in a minute?", "response": "Sixty."}
+{"effort": "standard", "prompt": "How many days are in a year?", "response": "365, or 366 in a leap year."}
+{"effort": "standard", "prompt": "How many legs does a spider have?", "response": "Eight."}
+{"effort": "standard", "prompt": "How many legs does a dog have?", "response": "Four."}
+{"effort": "standard", "prompt": "How many legs does a bird have?", "response": "Two."}
+{"effort": "standard", "prompt": "How many wheels does a bicycle have?", "response": "Two."}
+{"effort": "standard", "prompt": "What colour is the sky on a clear day?", "response": "Blue."}
+{"effort": "standard", "prompt": "What colour is grass?", "response": "Green."}
+{"effort": "standard", "prompt": "What colour is snow?", "response": "White."}
+{"effort": "standard", "prompt": "What colour are bananas when they are ripe?", "response": "Yellow."}
+{"effort": "standard", "prompt": "What do you get if you mix blue and yellow?", "response": "Green."}
+{"effort": "standard", "prompt": "What do you get if you mix red and white?", "response": "Pink."}
+{"effort": "standard", "prompt": "What is the largest planet in the solar system?", "response": "Jupiter."}
+{"effort": "standard", "prompt": "Which planet is closest to the Sun?", "response": "Mercury."}
+{"effort": "standard", "prompt": "Which planet do we live on?", "response": "Earth."}
+{"effort": "standard", "prompt": "What is the closest star to Earth?", "response": "The Sun."}
+{"effort": "standard", "prompt": "At what temperature does water boil at sea level?", "response": "100 °C (212 °F)."}
+{"effort": "standard", "prompt": "At what temperature does water freeze?", "response": "0 °C (32 °F)."}
+{"effort": "standard", "prompt": "What is frozen water called?", "response": "Ice."}
+{"effort": "standard", "prompt": "What gas do people breathe in to live?", "response": "Oxygen."}
+{"effort": "standard", "prompt": "What gas do plants take in?", "response": "Carbon dioxide."}
+{"effort": "standard", "prompt": "What is the biggest ocean?", "response": "The Pacific Ocean."}
+{"effort": "standard", "prompt": "What is the tallest mountain in the world?", "response": "Mount Everest."}
+{"effort": "standard", "prompt": "What is the longest river in the world?", "response": "The Nile is usually named the longest, with the Amazon close behind."}
+{"effort": "standard", "prompt": "How many continents are there?", "response": "Seven."}
+{"effort": "standard", "prompt": "What animal says moo?", "response": "A cow."}
+{"effort": "standard", "prompt": "What animal says meow?", "response": "A cat."}
+{"effort": "standard", "prompt": "What animal barks?", "response": "A dog."}
+{"effort": "standard", "prompt": "What do bees make?", "response": "Honey."}
+{"effort": "standard", "prompt": "What is the baby of a cat called?", "response": "A kitten."}
+{"effort": "standard", "prompt": "What is the baby of a dog called?", "response": "A puppy."}
+{"effort": "standard", "prompt": "What is the opposite of up?", "response": "Down."}
+{"effort": "standard", "prompt": "What is the opposite of happy?", "response": "Sad."}
+{"effort": "standard", "prompt": "What is the opposite of big?", "response": "Small."}
+{"effort": "standard", "prompt": "What is the opposite of fast?", "response": "Slow."}
+{"effort": "standard", "prompt": "What is the opposite of open?", "response": "Closed."}
+{"effort": "standard", "prompt": "What is the plural of mouse?", "response": "Mice."}
+{"effort": "standard", "prompt": "What is the plural of child?", "response": "Children."}
+{"effort": "standard", "prompt": "What is the plural of tooth?", "response": "Teeth."}
+{"effort": "standard", "prompt": "What is the past tense of go?", "response": "Went."}
+{"effort": "standard", "prompt": "What is the past tense of eat?", "response": "Ate."}
+{"effort": "standard", "prompt": "Which day comes after Friday?", "response": "Saturday."}
+{"effort": "standard", "prompt": "Which day comes before Monday?", "response": "Sunday."}
+{"effort": "standard", "prompt": "Which month comes after March?", "response": "April."}
+{"effort": "standard", "prompt": "Which month comes after December?", "response": "January."}
+{"effort": "standard", "prompt": "What is the first letter of the alphabet?", "response": "A."}
+{"effort": "standard", "prompt": "What is the last letter of the alphabet?", "response": "Z."}
+{"effort": "standard", "prompt": "How many letters are in the English alphabet?", "response": "26."}
+{"effort": "standard", "prompt": "What shape has three sides?", "response": "A triangle."}
+{"effort": "standard", "prompt": "What shape has four equal sides?", "response": "A square."}
+{"effort": "standard", "prompt": "How many sides does a hexagon have?", "response": "Six."}
+{"effort": "standard", "prompt": "What do you call a word that means the same as another word?", "response": "A synonym."}
+{"effort": "standard", "prompt": "What is H2O?", "response": "Water."}
+{"effort": "standard", "prompt": "What language is mostly spoken in Brazil?", "response": "Portuguese."}
+{"effort": "standard", "prompt": "What language is spoken in Japan?", "response": "Japanese."}
+{"effort": "standard", "prompt": "What is a programming language often used for data and AI?", "response": "Python."}
+{"effort": "standard", "prompt": "In Python, how do you print hello?", "response": "print(\"hello\")"}
+{"effort": "standard", "prompt": "In Python, how do you make a list of 1, 2 and 3?", "response": "[1, 2, 3]"}
+{"effort": "standard", "prompt": "What does CPU stand for?", "response": "Central processing unit."}
+{"effort": "standard", "prompt": "What does AI stand for?", "response": "Artificial intelligence."}
+{"effort": "standard", "prompt": "What is 9 × 4?", "response": "36."}
+{"effort": "superior", "prompt": "What is 9 × 4?", "thinking": "9 × 4 = 36.", "response": "36."}
+{"effort": "standard", "prompt": "What is 5 × 12?", "response": "60."}
+{"effort": "superior", "prompt": "What is 5 × 12?", "thinking": "5 × 12 = 60.", "response": "60."}
+{"effort": "standard", "prompt": "How much is 11 times 10?", "response": "110."}
+{"effort": "superior", "prompt": "How much is 11 times 10?", "thinking": "11 × 10 = 110.", "response": "110."}
+{"effort": "standard", "prompt": "What is 0 + 7?", "response": "7."}
+{"effort": "superior", "prompt": "What is 0 + 7?", "thinking": "0 + 7 = 7.", "response": "7."}
+{"effort": "standard", "prompt": "What is 10 + 0?", "response": "10."}
+{"effort": "superior", "prompt": "What is 10 + 0?", "thinking": "10 + 0 = 10.", "response": "10."}
+{"effort": "standard", "prompt": "What is 1 times 5?", "response": "5."}
+{"effort": "superior", "prompt": "What is 1 times 5?", "thinking": "1 × 5 = 5.", "response": "5."}
+{"effort": "standard", "prompt": "How much is 3 times 6?", "response": "18."}
+{"effort": "superior", "prompt": "How much is 3 times 6?", "thinking": "3 × 6 = 18.", "response": "18."}
+{"effort": "standard", "prompt": "What is 1 + 9?", "response": "10."}
+{"effort": "superior", "prompt": "What is 1 + 9?", "thinking": "1 + 9 = 10.", "response": "10."}
+{"effort": "standard", "prompt": "What is 0 + 11?", "response": "11."}
+{"effort": "superior", "prompt": "What is 0 + 11?", "thinking": "0 + 11 = 11.", "response": "11."}
+{"effort": "standard", "prompt": "What is 6 + 4?", "response": "10."}
+{"effort": "superior", "prompt": "What is 6 + 4?", "thinking": "6 + 4 = 10.", "response": "10."}
+{"effort": "standard", "prompt": "What is 12 + 6?", "response": "18."}
+{"effort": "superior", "prompt": "What is 12 + 6?", "thinking": "12 + 6 = 18.", "response": "18."}
+{"effort": "standard", "prompt": "What is 12 plus 12?", "response": "24."}
+{"effort": "superior", "prompt": "What is 12 plus 12?", "thinking": "12 + 12 = 24.", "response": "24."}
+{"effort": "standard", "prompt": "How much is 2 times 9?", "response": "18."}
+{"effort": "superior", "prompt": "How much is 2 times 9?", "thinking": "2 × 9 = 18.", "response": "18."}
+{"effort": "standard", "prompt": "What is 7 + 2?", "response": "9."}
+{"effort": "superior", "prompt": "What is 7 + 2?", "thinking": "7 + 2 = 9.", "response": "9."}
+{"effort": "standard", "prompt": "What is 0 + 0?", "response": "0."}
+{"effort": "superior", "prompt": "What is 0 + 0?", "thinking": "0 + 0 = 0.", "response": "0."}
+{"effort": "standard", "prompt": "What is 12 + 3?", "response": "15."}
+{"effort": "superior", "prompt": "What is 12 + 3?", "thinking": "12 + 3 = 15.", "response": "15."}
+{"effort": "standard", "prompt": "What is 4 minus 2?", "response": "2."}
+{"effort": "superior", "prompt": "What is 4 minus 2?", "thinking": "4 - 2 = 2.", "response": "2."}
+{"effort": "standard", "prompt": "What is 3 × 8?", "response": "24."}
+{"effort": "superior", "prompt": "What is 3 × 8?", "thinking": "3 × 8 = 24.", "response": "24."}
+{"effort": "standard", "prompt": "What is 10 + 3?", "response": "13."}
+{"effort": "superior", "prompt": "What is 10 + 3?", "thinking": "10 + 3 = 13.", "response": "13."}
+{"effort": "standard", "prompt": "What is 11 times 3?", "response": "33."}
+{"effort": "superior", "prompt": "What is 11 times 3?", "thinking": "11 × 3 = 33.", "response": "33."}
+{"effort": "standard", "prompt": "What is 4 minus 0?", "response": "4."}
+{"effort": "superior", "prompt": "What is 4 minus 0?", "thinking": "4 - 0 = 4.", "response": "4."}
+{"effort": "standard", "prompt": "What is 6 + 2?", "response": "8."}
+{"effort": "superior", "prompt": "What is 6 + 2?", "thinking": "6 + 2 = 8.", "response": "8."}
+{"effort": "standard", "prompt": "What is 4 minus 1?", "response": "3."}
+{"effort": "superior", "prompt": "What is 4 minus 1?", "thinking": "4 - 1 = 3.", "response": "3."}
+{"effort": "standard", "prompt": "How much is 4 times 9?", "response": "36."}
+{"effort": "superior", "prompt": "How much is 4 times 9?", "thinking": "4 × 9 = 36.", "response": "36."}
+{"effort": "standard", "prompt": "What is 0 × 9?", "response": "0."}
+{"effort": "superior", "prompt": "What is 0 × 9?", "thinking": "0 × 9 = 0.", "response": "0."}
+{"effort": "standard", "prompt": "What is 11 plus 5?", "response": "16."}
+{"effort": "superior", "prompt": "What is 11 plus 5?", "thinking": "11 + 5 = 16.", "response": "16."}
+{"effort": "standard", "prompt": "What is 5 minus 4?", "response": "1."}
+{"effort": "superior", "prompt": "What is 5 minus 4?", "thinking": "5 - 4 = 1.", "response": "1."}
+{"effort": "standard", "prompt": "What is 11 minus 7?", "response": "4."}
+{"effort": "superior", "prompt": "What is 11 minus 7?", "thinking": "11 - 7 = 4.", "response": "4."}
+{"effort": "standard", "prompt": "What is 2 times 7?", "response": "14."}
+{"effort": "superior", "prompt": "What is 2 times 7?", "thinking": "2 × 7 = 14.", "response": "14."}
+{"effort": "standard", "prompt": "What is 11 plus 2?", "response": "13."}
+{"effort": "superior", "prompt": "What is 11 plus 2?", "thinking": "11 + 2 = 13.", "response": "13."}
+{"effort": "standard", "prompt": "What is 4 × 0?", "response": "0."}
+{"effort": "superior", "prompt": "What is 4 × 0?", "thinking": "4 × 0 = 0.", "response": "0."}
+{"effort": "standard", "prompt": "What is 5 plus 6?", "response": "11."}
+{"effort": "superior", "prompt": "What is 5 plus 6?", "thinking": "5 + 6 = 11.", "response": "11."}
+{"effort": "standard", "prompt": "What is 8 times 12?", "response": "96."}
+{"effort": "superior", "prompt": "What is 8 times 12?", "thinking": "8 × 12 = 96.", "response": "96."}
+{"effort": "standard", "prompt": "How much is 5 times 6?", "response": "30."}
+{"effort": "superior", "prompt": "How much is 5 times 6?", "thinking": "5 × 6 = 30.", "response": "30."}
+{"effort": "standard", "prompt": "What is 0 plus 7?", "response": "7."}
+{"effort": "superior", "prompt": "What is 0 plus 7?", "thinking": "0 + 7 = 7.", "response": "7."}
+{"effort": "standard", "prompt": "How much is 11 times 2?", "response": "22."}
+{"effort": "superior", "prompt": "How much is 11 times 2?", "thinking": "11 × 2 = 22.", "response": "22."}
+{"effort": "standard", "prompt": "What is 3 + 1?", "response": "4."}
+{"effort": "superior", "prompt": "What is 3 + 1?", "thinking": "3 + 1 = 4.", "response": "4."}
+{"effort": "standard", "prompt": "How much is 7 times 5?", "response": "35."}
+{"effort": "superior", "prompt": "How much is 7 times 5?", "thinking": "7 × 5 = 35.", "response": "35."}
+{"effort": "standard", "prompt": "What is 8 minus 5?", "response": "3."}
+{"effort": "superior", "prompt": "What is 8 minus 5?", "thinking": "8 - 5 = 3.", "response": "3."}
+{"effort": "standard", "prompt": "What is 12 plus 7?", "response": "19."}
+{"effort": "superior", "prompt": "What is 12 plus 7?", "thinking": "12 + 7 = 19.", "response": "19."}
+{"effort": "standard", "prompt": "What is 11 minus 9?", "response": "2."}
+{"effort": "superior", "prompt": "What is 11 minus 9?", "thinking": "11 - 9 = 2.", "response": "2."}
+{"effort": "standard", "prompt": "What is 4 times 0?", "response": "0."}
+{"effort": "superior", "prompt": "What is 4 times 0?", "thinking": "4 × 0 = 0.", "response": "0."}
+{"effort": "standard", "prompt": "What is 3 minus 1?", "response": "2."}
+{"effort": "superior", "prompt": "What is 3 minus 1?", "thinking": "3 - 1 = 2.", "response": "2."}
+{"effort": "standard", "prompt": "What is 9 minus 8?", "response": "1."}
+{"effort": "superior", "prompt": "What is 9 minus 8?", "thinking": "9 - 8 = 1.", "response": "1."}
+{"effort": "standard", "prompt": "What is 5 minus 2?", "response": "3."}
+{"effort": "superior", "prompt": "What is 5 minus 2?", "thinking": "5 - 2 = 3.", "response": "3."}
+{"effort": "standard", "prompt": "What is 11 plus 8?", "response": "19."}
+{"effort": "superior", "prompt": "What is 11 plus 8?", "thinking": "11 + 8 = 19.", "response": "19."}
+{"effort": "standard", "prompt": "What is 10 minus 4?", "response": "6."}
+{"effort": "superior", "prompt": "What is 10 minus 4?", "thinking": "10 - 4 = 6.", "response": "6."}
+{"effort": "standard", "prompt": "What is 4 plus 2?", "response": "6."}
+{"effort": "superior", "prompt": "What is 4 plus 2?", "thinking": "4 + 2 = 6.", "response": "6."}
+{"effort": "standard", "prompt": "What is 10 × 2?", "response": "20."}
+{"effort": "superior", "prompt": "What is 10 × 2?", "thinking": "10 × 2 = 20.", "response": "20."}
+{"effort": "standard", "prompt": "What is 11 times 4?", "response": "44."}
+{"effort": "superior", "prompt": "What is 11 times 4?", "thinking": "11 × 4 = 44.", "response": "44."}
+{"effort": "standard", "prompt": "What is 2 plus 11?", "response": "13."}
+{"effort": "superior", "prompt": "What is 2 plus 11?", "thinking": "2 + 11 = 13.", "response": "13."}
+{"effort": "standard", "prompt": "How much is 1 times 9?", "response": "9."}
+{"effort": "superior", "prompt": "How much is 1 times 9?", "thinking": "1 × 9 = 9.", "response": "9."}
+{"effort": "standard", "prompt": "What is 6 + 0?", "response": "6."}
+{"effort": "superior", "prompt": "What is 6 + 0?", "thinking": "6 + 0 = 6.", "response": "6."}
+{"effort": "standard", "prompt": "What is 4 × 7?", "response": "28."}
+{"effort": "superior", "prompt": "What is 4 × 7?", "thinking": "4 × 7 = 28.", "response": "28."}
+{"effort": "standard", "prompt": "What is 6 plus 2?", "response": "8."}
+{"effort": "superior", "prompt": "What is 6 plus 2?", "thinking": "6 + 2 = 8.", "response": "8."}
+{"effort": "standard", "prompt": "What is 10 times 0?", "response": "0."}
+{"effort": "superior", "prompt": "What is 10 times 0?", "thinking": "10 × 0 = 0.", "response": "0."}
+{"effort": "standard", "prompt": "What is 5 + 3?", "response": "8."}
+{"effort": "superior", "prompt": "What is 5 + 3?", "thinking": "5 + 3 = 8.", "response": "8."}
+{"effort": "standard", "prompt": "What is 11 + 9?", "response": "20."}
+{"effort": "superior", "prompt": "What is 11 + 9?", "thinking": "11 + 9 = 20.", "response": "20."}
+{"effort": "standard", "prompt": "What is 10 times 12?", "response": "120."}
+{"effort": "superior", "prompt": "What is 10 times 12?", "thinking": "10 × 12 = 120.", "response": "120."}
+{"effort": "standard", "prompt": "What is 1 times 2?", "response": "2."}
+{"effort": "superior", "prompt": "What is 1 times 2?", "thinking": "1 × 2 = 2.", "response": "2."}
+{"effort": "standard", "prompt": "What is 5 plus 2?", "response": "7."}
+{"effort": "superior", "prompt": "What is 5 plus 2?", "thinking": "5 + 2 = 7.", "response": "7."}
+{"effort": "standard", "prompt": "What is 7 + 9?", "response": "16."}
+{"effort": "superior", "prompt": "What is 7 + 9?", "thinking": "7 + 9 = 16.", "response": "16."}
+{"effort": "standard", "prompt": "What is 8 times 7?", "response": "56."}
+{"effort": "superior", "prompt": "What is 8 times 7?", "thinking": "8 × 7 = 56.", "response": "56."}
+{"effort": "standard", "prompt": "What is 11 minus 11?", "response": "0."}
+{"effort": "superior", "prompt": "What is 11 minus 11?", "thinking": "11 - 11 = 0.", "response": "0."}
+{"effort": "standard", "prompt": "What is 7 minus 4?", "response": "3."}
+{"effort": "superior", "prompt": "What is 7 minus 4?", "thinking": "7 - 4 = 3.", "response": "3."}
+{"effort": "standard", "prompt": "What is 7 + 6?", "response": "13."}
+{"effort": "superior", "prompt": "What is 7 + 6?", "thinking": "7 + 6 = 13.", "response": "13."}
+{"effort": "standard", "prompt": "How much is 1 times 6?", "response": "6."}
+{"effort": "superior", "prompt": "How much is 1 times 6?", "thinking": "1 × 6 = 6.", "response": "6."}
+{"effort": "standard", "prompt": "What is 2 times 10?", "response": "20."}
+{"effort": "superior", "prompt": "What is 2 times 10?", "thinking": "2 × 10 = 20.", "response": "20."}
+{"effort": "standard", "prompt": "How much is 7 times 4?", "response": "28."}
+{"effort": "superior", "prompt": "How much is 7 times 4?", "thinking": "7 × 4 = 28.", "response": "28."}
+{"effort": "standard", "prompt": "How much is 12 times 8?", "response": "96."}
+{"effort": "superior", "prompt": "How much is 12 times 8?", "thinking": "12 × 8 = 96.", "response": "96."}
+{"effort": "standard", "prompt": "What is 5 minus 1?", "response": "4."}
+{"effort": "superior", "prompt": "What is 5 minus 1?", "thinking": "5 - 1 = 4.", "response": "4."}
+{"effort": "standard", "prompt": "What is 11 × 9?", "response": "99."}
+{"effort": "superior", "prompt": "What is 11 × 9?", "thinking": "11 × 9 = 99.", "response": "99."}
+{"effort": "standard", "prompt": "What is 12 minus 0?", "response": "12."}
+{"effort": "superior", "prompt": "What is 12 minus 0?", "thinking": "12 - 0 = 12.", "response": "12."}
+{"effort": "standard", "prompt": "What is 5 × 8?", "response": "40."}
+{"effort": "superior", "prompt": "What is 5 × 8?", "thinking": "5 × 8 = 40.", "response": "40."}
+{"effort": "standard", "prompt": "What is 10 times 4?", "response": "40."}
+{"effort": "superior", "prompt": "What is 10 times 4?", "thinking": "10 × 4 = 40.", "response": "40."}
+{"effort": "standard", "prompt": "What is 4 × 12?", "response": "48."}
+{"effort": "superior", "prompt": "What is 4 × 12?", "thinking": "4 × 12 = 48.", "response": "48."}
+{"effort": "standard", "prompt": "What is 11 minus 4?", "response": "7."}
+{"effort": "superior", "prompt": "What is 11 minus 4?", "thinking": "11 - 4 = 7.", "response": "7."}
+{"effort": "standard", "prompt": "How much is 10 times 2?", "response": "20."}
+{"effort": "superior", "prompt": "How much is 10 times 2?", "thinking": "10 × 2 = 20.", "response": "20."}
+{"effort": "standard", "prompt": "How much is 0 times 7?", "response": "0."}
+{"effort": "superior", "prompt": "How much is 0 times 7?", "thinking": "0 × 7 = 0.", "response": "0."}
+{"effort": "standard", "prompt": "What is 12 minus 4?", "response": "8."}
+{"effort": "superior", "prompt": "What is 12 minus 4?", "thinking": "12 - 4 = 8.", "response": "8."}
+{"effort": "standard", "prompt": "What is 4 × 8?", "response": "32."}
+{"effort": "superior", "prompt": "What is 4 × 8?", "thinking": "4 × 8 = 32.", "response": "32."}
+{"effort": "standard", "prompt": "What is 12 minus 10?", "response": "2."}
+{"effort": "superior", "prompt": "What is 12 minus 10?", "thinking": "12 - 10 = 2.", "response": "2."}
+{"effort": "standard", "prompt": "What is 5 × 4?", "response": "20."}
+{"effort": "superior", "prompt": "What is 5 × 4?", "thinking": "5 × 4 = 20.", "response": "20."}
+{"effort": "standard", "prompt": "What is 5 times 11?", "response": "55."}
+{"effort": "superior", "prompt": "What is 5 times 11?", "thinking": "5 × 11 = 55.", "response": "55."}
+{"effort": "standard", "prompt": "What is 5 × 2?", "response": "10."}
+{"effort": "superior", "prompt": "What is 5 × 2?", "thinking": "5 × 2 = 10.", "response": "10."}
+{"effort": "standard", "prompt": "What is 7 minus 5?", "response": "2."}
+{"effort": "superior", "prompt": "What is 7 minus 5?", "thinking": "7 - 5 = 2.", "response": "2."}
+{"effort": "standard", "prompt": "How much is 8 times 2?", "response": "16."}
+{"effort": "superior", "prompt": "How much is 8 times 2?", "thinking": "8 × 2 = 16.", "response": "16."}
+{"effort": "standard", "prompt": "What is 3 minus 2?", "response": "1."}
+{"effort": "superior", "prompt": "What is 3 minus 2?", "thinking": "3 - 2 = 1.", "response": "1."}
+{"effort": "standard", "prompt": "What is 7 × 4?", "response": "28."}
+{"effort": "superior", "prompt": "What is 7 × 4?", "thinking": "7 × 4 = 28.", "response": "28."}
+{"effort": "standard", "prompt": "What is 1 × 11?", "response": "11."}
+{"effort": "superior", "prompt": "What is 1 × 11?", "thinking": "1 × 11 = 11.", "response": "11."}
+{"effort": "standard", "prompt": "What is 11 + 6?", "response": "17."}
+{"effort": "superior", "prompt": "What is 11 + 6?", "thinking": "11 + 6 = 17.", "response": "17."}
+{"effort": "standard", "prompt": "How much is 9 times 12?", "response": "108."}
+{"effort": "superior", "prompt": "How much is 9 times 12?", "thinking": "9 × 12 = 108.", "response": "108."}
+{"effort": "standard", "prompt": "What is 8 times 10?", "response": "80."}
+{"effort": "superior", "prompt": "What is 8 times 10?", "thinking": "8 × 10 = 80.", "response": "80."}
+{"effort": "standard", "prompt": "What is 11 + 0?", "response": "11."}
+{"effort": "superior", "prompt": "What is 11 + 0?", "thinking": "11 + 0 = 11.", "response": "11."}
+{"effort": "standard", "prompt": "What is 2 times 9?", "response": "18."}
+{"effort": "superior", "prompt": "What is 2 times 9?", "thinking": "2 × 9 = 18.", "response": "18."}
+{"effort": "standard", "prompt": "What is 9 + 10?", "response": "19."}
+{"effort": "superior", "prompt": "What is 9 + 10?", "thinking": "9 + 10 = 19.", "response": "19."}
+{"effort": "standard", "prompt": "What is 3 × 12?", "response": "36."}
+{"effort": "superior", "prompt": "What is 3 × 12?", "thinking": "3 × 12 = 36.", "response": "36."}
+{"effort": "standard", "prompt": "What is 2 × 10?", "response": "20."}
+{"effort": "superior", "prompt": "What is 2 × 10?", "thinking": "2 × 10 = 20.", "response": "20."}
+{"effort": "standard", "prompt": "What is 2 + 0?", "response": "2."}
+{"effort": "superior", "prompt": "What is 2 + 0?", "thinking": "2 + 0 = 2.", "response": "2."}
+{"effort": "standard", "prompt": "What is 1 + 5?", "response": "6."}
+{"effort": "superior", "prompt": "What is 1 + 5?", "thinking": "1 + 5 = 6.", "response": "6."}
+{"effort": "standard", "prompt": "How much is 7 times 3?", "response": "21."}
+{"effort": "superior", "prompt": "How much is 7 times 3?", "thinking": "7 × 3 = 21.", "response": "21."}
+{"effort": "standard", "prompt": "What is 0 times 6?", "response": "0."}
+{"effort": "superior", "prompt": "What is 0 times 6?", "thinking": "0 × 6 = 0.", "response": "0."}
+{"effort": "standard", "prompt": "What is 5 × 6?", "response": "30."}
+{"effort": "superior", "prompt": "What is 5 × 6?", "thinking": "5 × 6 = 30.", "response": "30."}
+{"effort": "standard", "prompt": "How much is 9 times 1?", "response": "9."}
+{"effort": "superior", "prompt": "How much is 9 times 1?", "thinking": "9 × 1 = 9.", "response": "9."}
+{"effort": "standard", "prompt": "What is 3 × 3?", "response": "9."}
+{"effort": "superior", "prompt": "What is 3 × 3?", "thinking": "3 × 3 = 9.", "response": "9."}
+{"effort": "standard", "prompt": "What is 5 minus 0?", "response": "5."}
+{"effort": "superior", "prompt": "What is 5 minus 0?", "thinking": "5 - 0 = 5.", "response": "5."}
+{"effort": "standard", "prompt": "What is 6 times 4?", "response": "24."}
+{"effort": "superior", "prompt": "What is 6 times 4?", "thinking": "6 × 4 = 24.", "response": "24."}
+{"effort": "standard", "prompt": "How much is 1 times 11?", "response": "11."}
+{"effort": "superior", "prompt": "How much is 1 times 11?", "thinking": "1 × 11 = 11.", "response": "11."}
+{"effort": "standard", "prompt": "How much is 5 times 0?", "response": "0."}
+{"effort": "superior", "prompt": "How much is 5 times 0?", "thinking": "5 × 0 = 0.", "response": "0."}
+{"effort": "standard", "prompt": "What is 9 plus 4?", "response": "13."}
+{"effort": "superior", "prompt": "What is 9 plus 4?", "thinking": "9 + 4 = 13.", "response": "13."}
+{"effort": "standard", "prompt": "How much is 4 times 8?", "response": "32."}
+{"effort": "superior", "prompt": "How much is 4 times 8?", "thinking": "4 × 8 = 32.", "response": "32."}
+{"effort": "standard", "prompt": "What is 9 minus 5?", "response": "4."}
+{"effort": "superior", "prompt": "What is 9 minus 5?", "thinking": "9 - 5 = 4.", "response": "4."}
+{"effort": "standard", "prompt": "What is 5 times 2?", "response": "10."}
+{"effort": "superior", "prompt": "What is 5 times 2?", "thinking": "5 × 2 = 10.", "response": "10."}
+{"effort": "standard", "prompt": "What is 6 × 9?", "response": "54."}
+{"effort": "superior", "prompt": "What is 6 × 9?", "thinking": "6 × 9 = 54.", "response": "54."}
+{"effort": "standard", "prompt": "What is 8 times 5?", "response": "40."}
+{"effort": "superior", "prompt": "What is 8 times 5?", "thinking": "8 × 5 = 40.", "response": "40."}
+{"effort": "standard", "prompt": "How much is 2 times 2?", "response": "4."}
+{"effort": "superior", "prompt": "How much is 2 times 2?", "thinking": "2 × 2 = 4.", "response": "4."}
+{"effort": "standard", "prompt": "What is 6 times 9?", "response": "54."}
+{"effort": "superior", "prompt": "What is 6 times 9?", "thinking": "6 × 9 = 54.", "response": "54."}
+{"effort": "standard", "prompt": "How much is 3 times 2?", "response": "6."}
+{"effort": "superior", "prompt": "How much is 3 times 2?", "thinking": "3 × 2 = 6.", "response": "6."}
+{"effort": "standard", "prompt": "What is 1 × 5?", "response": "5."}
+{"effort": "superior", "prompt": "What is 1 × 5?", "thinking": "1 × 5 = 5.", "response": "5."}
+{"effort": "standard", "prompt": "What is 0 plus 6?", "response": "6."}
+{"effort": "superior", "prompt": "What is 0 plus 6?", "thinking": "0 + 6 = 6.", "response": "6."}
+{"effort": "standard", "prompt": "How much is 5 times 9?", "response": "45."}
+{"effort": "superior", "prompt": "How much is 5 times 9?", "thinking": "5 × 9 = 45.", "response": "45."}
+{"effort": "standard", "prompt": "What is 8 minus 2?", "response": "6."}
+{"effort": "superior", "prompt": "What is 8 minus 2?", "thinking": "8 - 2 = 6.", "response": "6."}
+{"effort": "standard", "prompt": "What is 10 times 9?", "response": "90."}
+{"effort": "superior", "prompt": "What is 10 times 9?", "thinking": "10 × 9 = 90.", "response": "90."}
+{"effort": "standard", "prompt": "What is 6 + 6?", "response": "12."}
+{"effort": "superior", "prompt": "What is 6 + 6?", "thinking": "6 + 6 = 12.", "response": "12."}
+{"effort": "standard", "prompt": "What is 7 times 4?", "response": "28."}
+{"effort": "superior", "prompt": "What is 7 times 4?", "thinking": "7 × 4 = 28.", "response": "28."}
+{"effort": "standard", "prompt": "What is 11 times 6?", "response": "66."}
+{"effort": "superior", "prompt": "What is 11 times 6?", "thinking": "11 × 6 = 66.", "response": "66."}
+{"effort": "standard", "prompt": "What is 7 + 4?", "response": "11."}
+{"effort": "superior", "prompt": "What is 7 + 4?", "thinking": "7 + 4 = 11.", "response": "11."}
+{"effort": "standard", "prompt": "What is 7 plus 0?", "response": "7."}
+{"effort": "superior", "prompt": "What is 7 plus 0?", "thinking": "7 + 0 = 7.", "response": "7."}
+{"effort": "standard", "prompt": "What is 3 plus 4?", "response": "7."}
+{"effort": "superior", "prompt": "What is 3 plus 4?", "thinking": "3 + 4 = 7.", "response": "7."}
+{"effort": "standard", "prompt": "What is 12 times 2?", "response": "24."}
+{"effort": "superior", "prompt": "What is 12 times 2?", "thinking": "12 × 2 = 24.", "response": "24."}
+{"effort": "standard", "prompt": "What is 8 + 4?", "response": "12."}
+{"effort": "superior", "prompt": "What is 8 + 4?", "thinking": "8 + 4 = 12.", "response": "12."}
+{"effort": "standard", "prompt": "What is 7 plus 12?", "response": "19."}
+{"effort": "superior", "prompt": "What is 7 plus 12?", "thinking": "7 + 12 = 19.", "response": "19."}
+{"effort": "standard", "prompt": "What is 7 minus 3?", "response": "4."}
+{"effort": "superior", "prompt": "What is 7 minus 3?", "thinking": "7 - 3 = 4.", "response": "4."}
+{"effort": "standard", "prompt": "What is 11 minus 2?", "response": "9."}
+{"effort": "superior", "prompt": "What is 11 minus 2?", "thinking": "11 - 2 = 9.", "response": "9."}
+{"effort": "standard", "prompt": "How much is 4 times 7?", "response": "28."}
+{"effort": "superior", "prompt": "How much is 4 times 7?", "thinking": "4 × 7 = 28.", "response": "28."}
+{"effort": "standard", "prompt": "What is 7 × 8?", "response": "56."}
+{"effort": "superior", "prompt": "What is 7 × 8?", "thinking": "7 × 8 = 56.", "response": "56."}
+{"effort": "standard", "prompt": "What is 9 plus 11?", "response": "20."}
+{"effort": "superior", "prompt": "What is 9 plus 11?", "thinking": "9 + 11 = 20.", "response": "20."}
+{"effort": "standard", "prompt": "What is 0 + 12?", "response": "12."}
+{"effort": "superior", "prompt": "What is 0 + 12?", "thinking": "0 + 12 = 12.", "response": "12."}
+{"effort": "standard", "prompt": "How much is 4 times 4?", "response": "16."}
+{"effort": "superior", "prompt": "How much is 4 times 4?", "thinking": "4 × 4 = 16.", "response": "16."}
+{"effort": "standard", "prompt": "How much is 11 times 5?", "response": "55."}
+{"effort": "superior", "prompt": "How much is 11 times 5?", "thinking": "11 × 5 = 55.", "response": "55."}
+{"effort": "standard", "prompt": "How much is 4 times 11?", "response": "44."}
+{"effort": "superior", "prompt": "How much is 4 times 11?", "thinking": "4 × 11 = 44.", "response": "44."}
+{"effort": "standard", "prompt": "What is 7 minus 0?", "response": "7."}
+{"effort": "superior", "prompt": "What is 7 minus 0?", "thinking": "7 - 0 = 7.", "response": "7."}
+{"effort": "standard", "prompt": "What is 5 × 10?", "response": "50."}
+{"effort": "superior", "prompt": "What is 5 × 10?", "thinking": "5 × 10 = 50.", "response": "50."}
+{"effort": "standard", "prompt": "What is 9 plus 2?", "response": "11."}
+{"effort": "superior", "prompt": "What is 9 plus 2?", "thinking": "9 + 2 = 11.", "response": "11."}
+{"effort": "standard", "prompt": "How much is 0 times 4?", "response": "0."}
+{"effort": "superior", "prompt": "How much is 0 times 4?", "thinking": "0 × 4 = 0.", "response": "0."}
+{"effort": "standard", "prompt": "What is 7 plus 10?", "response": "17."}
+{"effort": "superior", "prompt": "What is 7 plus 10?", "thinking": "7 + 10 = 17.", "response": "17."}
+{"effort": "standard", "prompt": "What is 10 + 8?", "response": "18."}
+{"effort": "superior", "prompt": "What is 10 + 8?", "thinking": "10 + 8 = 18.", "response": "18."}
+{"effort": "standard", "prompt": "What is 9 × 9?", "response": "81."}
+{"effort": "superior", "prompt": "What is 9 × 9?", "thinking": "9 × 9 = 81.", "response": "81."}
+{"effort": "standard", "prompt": "What is 11 × 10?", "response": "110."}
+{"effort": "superior", "prompt": "What is 11 × 10?", "thinking": "11 × 10 = 110.", "response": "110."}
+{"effort": "standard", "prompt": "What is 7 times 6?", "response": "42."}
+{"effort": "superior", "prompt": "What is 7 times 6?", "thinking": "7 × 6 = 42.", "response": "42."}
+{"effort": "standard", "prompt": "What is 6 × 10?", "response": "60."}
+{"effort": "superior", "prompt": "What is 6 × 10?", "thinking": "6 × 10 = 60.", "response": "60."}
+{"effort": "standard", "prompt": "What is 3 times 4?", "response": "12."}
+{"effort": "superior", "prompt": "What is 3 times 4?", "thinking": "3 × 4 = 12.", "response": "12."}
+{"effort": "standard", "prompt": "What is 12 minus 1?", "response": "11."}
+{"effort": "superior", "prompt": "What is 12 minus 1?", "thinking": "12 - 1 = 11.", "response": "11."}
+{"effort": "standard", "prompt": "What is 0 times 11?", "response": "0."}
+{"effort": "superior", "prompt": "What is 0 times 11?", "thinking": "0 × 11 = 0.", "response": "0."}
+{"effort": "standard", "prompt": "What is 12 minus 7?", "response": "5."}
+{"effort": "superior", "prompt": "What is 12 minus 7?", "thinking": "12 - 7 = 5.", "response": "5."}
+{"effort": "standard", "prompt": "What is 2 times 2?", "response": "4."}
+{"effort": "superior", "prompt": "What is 2 times 2?", "thinking": "2 × 2 = 4.", "response": "4."}
+{"effort": "standard", "prompt": "What is 11 times 8?", "response": "88."}
+{"effort": "superior", "prompt": "What is 11 times 8?", "thinking": "11 × 8 = 88.", "response": "88."}
+{"effort": "standard", "prompt": "What is 5 + 8?", "response": "13."}
+{"effort": "superior", "prompt": "What is 5 + 8?", "thinking": "5 + 8 = 13.", "response": "13."}
+{"effort": "standard", "prompt": "How much is 6 times 9?", "response": "54."}
+{"effort": "superior", "prompt": "How much is 6 times 9?", "thinking": "6 × 9 = 54.", "response": "54."}
+{"effort": "standard", "prompt": "What is 12 plus 0?", "response": "12."}
+{"effort": "superior", "prompt": "What is 12 plus 0?", "thinking": "12 + 0 = 12.", "response": "12."}
+{"effort": "standard", "prompt": "What is 11 minus 3?", "response": "8."}
+{"effort": "superior", "prompt": "What is 11 minus 3?", "thinking": "11 - 3 = 8.", "response": "8."}
+{"effort": "standard", "prompt": "What is 1 plus 12?", "response": "13."}
+{"effort": "superior", "prompt": "What is 1 plus 12?", "thinking": "1 + 12 = 13.", "response": "13."}
+{"effort": "standard", "prompt": "What is 10 minus 0?", "response": "10."}
+{"effort": "superior", "prompt": "What is 10 minus 0?", "thinking": "10 - 0 = 10.", "response": "10."}
+{"effort": "standard", "prompt": "What is 11 plus 6?", "response": "17."}
+{"effort": "superior", "prompt": "What is 11 plus 6?", "thinking": "11 + 6 = 17.", "response": "17."}
+{"effort": "standard", "prompt": "What is 6 times 11?", "response": "66."}
+{"effort": "superior", "prompt": "What is 6 times 11?", "thinking": "6 × 11 = 66.", "response": "66."}
+{"effort": "standard", "prompt": "What is 0 plus 1?", "response": "1."}
+{"effort": "superior", "prompt": "What is 0 plus 1?", "thinking": "0 + 1 = 1.", "response": "1."}
+{"effort": "standard", "prompt": "What is 3 × 9?", "response": "27."}
+{"effort": "superior", "prompt": "What is 3 × 9?", "thinking": "3 × 9 = 27.", "response": "27."}
+{"effort": "standard", "prompt": "What is 1 + 11?", "response": "12."}
+{"effort": "superior", "prompt": "What is 1 + 11?", "thinking": "1 + 11 = 12.", "response": "12."}
+{"effort": "standard", "prompt": "What is 4 times 11?", "response": "44."}
+{"effort": "superior", "prompt": "What is 4 times 11?", "thinking": "4 × 11 = 44.", "response": "44."}
+{"effort": "standard", "prompt": "What is 2 + 6?", "response": "8."}
+{"effort": "superior", "prompt": "What is 2 + 6?", "thinking": "2 + 6 = 8.", "response": "8."}
+{"effort": "standard", "prompt": "What is 0 plus 8?", "response": "8."}
+{"effort": "superior", "prompt": "What is 0 plus 8?", "thinking": "0 + 8 = 8.", "response": "8."}
+{"effort": "standard", "prompt": "What is 10 × 6?", "response": "60."}
+{"effort": "superior", "prompt": "What is 10 × 6?", "thinking": "10 × 6 = 60.", "response": "60."}
+{"effort": "standard", "prompt": "What is 1 plus 4?", "response": "5."}
+{"effort": "superior", "prompt": "What is 1 plus 4?", "thinking": "1 + 4 = 5.", "response": "5."}
+{"effort": "standard", "prompt": "What is 9 plus 9?", "response": "18."}
+{"effort": "superior", "prompt": "What is 9 plus 9?", "thinking": "9 + 9 = 18.", "response": "18."}
+{"effort": "standard", "prompt": "How much is 11 times 6?", "response": "66."}
+{"effort": "superior", "prompt": "How much is 11 times 6?", "thinking": "11 × 6 = 66.", "response": "66."}
+{"effort": "standard", "prompt": "What is 2 times 0?", "response": "0."}
+{"effort": "superior", "prompt": "What is 2 times 0?", "thinking": "2 × 0 = 0.", "response": "0."}
+{"effort": "standard", "prompt": "What is 9 times 7?", "response": "63."}
+{"effort": "superior", "prompt": "What is 9 times 7?", "thinking": "9 × 7 = 63.", "response": "63."}
+{"effort": "standard", "prompt": "What is 10 minus 5?", "response": "5."}
+{"effort": "superior", "prompt": "What is 10 minus 5?", "thinking": "10 - 5 = 5.", "response": "5."}
+{"effort": "standard", "prompt": "What is 0 × 2?", "response": "0."}
+{"effort": "superior", "prompt": "What is 0 × 2?", "thinking": "0 × 2 = 0.", "response": "0."}
+{"effort": "standard", "prompt": "How much is 4 times 2?", "response": "8."}
+{"effort": "superior", "prompt": "How much is 4 times 2?", "thinking": "4 × 2 = 8.", "response": "8."}
+{"effort": "standard", "prompt": "How much is 10 times 10?", "response": "100."}
+{"effort": "superior", "prompt": "How much is 10 times 10?", "thinking": "10 × 10 = 100.", "response": "100."}
+{"effort": "standard", "prompt": "What is 9 minus 3?", "response": "6."}
+{"effort": "superior", "prompt": "What is 9 minus 3?", "thinking": "9 - 3 = 6.", "response": "6."}
+{"effort": "standard", "prompt": "What is 1 + 8?", "response": "9."}
+{"effort": "superior", "prompt": "What is 1 + 8?", "thinking": "1 + 8 = 9.", "response": "9."}
+{"effort": "standard", "prompt": "What is 8 + 2?", "response": "10."}
+{"effort": "superior", "prompt": "What is 8 + 2?", "thinking": "8 + 2 = 10.", "response": "10."}
+{"effort": "standard", "prompt": "What is 5 × 7?", "response": "35."}
+{"effort": "superior", "prompt": "What is 5 × 7?", "thinking": "5 × 7 = 35.", "response": "35."}
+{"effort": "standard", "prompt": "What is 11 × 0?", "response": "0."}
+{"effort": "superior", "prompt": "What is 11 × 0?", "thinking": "11 × 0 = 0.", "response": "0."}
+{"effort": "standard", "prompt": "How much is 5 times 1?", "response": "5."}
+{"effort": "superior", "prompt": "How much is 5 times 1?", "thinking": "5 × 1 = 5.", "response": "5."}
+{"effort": "standard", "prompt": "What is 10 plus 0?", "response": "10."}
+{"effort": "superior", "prompt": "What is 10 plus 0?", "thinking": "10 + 0 = 10.", "response": "10."}
+{"effort": "standard", "prompt": "How much is 1 times 8?", "response": "8."}
+{"effort": "superior", "prompt": "How much is 1 times 8?", "thinking": "1 × 8 = 8.", "response": "8."}
+{"effort": "standard", "prompt": "What is 7 times 3?", "response": "21."}
+{"effort": "superior", "prompt": "What is 7 times 3?", "thinking": "7 × 3 = 21.", "response": "21."}
+{"effort": "standard", "prompt": "What is 7 minus 7?", "response": "0."}
+{"effort": "superior", "prompt": "What is 7 minus 7?", "thinking": "7 - 7 = 0.", "response": "0."}
+{"effort": "standard", "prompt": "How much is 1 times 12?", "response": "12."}
+{"effort": "superior", "prompt": "How much is 1 times 12?", "thinking": "1 × 12 = 12.", "response": "12."}
+{"effort": "standard", "prompt": "What is 0 × 8?", "response": "0."}
+{"effort": "superior", "prompt": "What is 0 × 8?", "thinking": "0 × 8 = 0.", "response": "0."}
+{"effort": "standard", "prompt": "What is 6 + 10?", "response": "16."}
+{"effort": "superior", "prompt": "What is 6 + 10?", "thinking": "6 + 10 = 16.", "response": "16."}
+{"effort": "standard", "prompt": "What is 11 plus 1?", "response": "12."}
+{"effort": "superior", "prompt": "What is 11 plus 1?", "thinking": "11 + 1 = 12.", "response": "12."}
+{"effort": "standard", "prompt": "What is 10 + 7?", "response": "17."}
+{"effort": "superior", "prompt": "What is 10 + 7?", "thinking": "10 + 7 = 17.", "response": "17."}
+{"effort": "standard", "prompt": "How much is 2 times 11?", "response": "22."}
+{"effort": "superior", "prompt": "How much is 2 times 11?", "thinking": "2 × 11 = 22.", "response": "22."}
+{"effort": "standard", "prompt": "What is 6 + 5?", "response": "11."}
+{"effort": "superior", "prompt": "What is 6 + 5?", "thinking": "6 + 5 = 11.", "response": "11."}
+{"effort": "standard", "prompt": "How much is 4 times 5?", "response": "20."}
+{"effort": "superior", "prompt": "How much is 4 times 5?", "thinking": "4 × 5 = 20.", "response": "20."}
+{"effort": "standard", "prompt": "What is 11 times 5?", "response": "55."}
+{"effort": "superior", "prompt": "What is 11 times 5?", "thinking": "11 × 5 = 55.", "response": "55."}
+{"effort": "standard", "prompt": "What is 6 × 2?", "response": "12."}
+{"effort": "superior", "prompt": "What is 6 × 2?", "thinking": "6 × 2 = 12.", "response": "12."}
+{"effort": "standard", "prompt": "What is 12 times 10?", "response": "120."}
+{"effort": "superior", "prompt": "What is 12 times 10?", "thinking": "12 × 10 = 120.", "response": "120."}
+{"effort": "standard", "prompt": "What is 5 plus 8?", "response": "13."}
+{"effort": "superior", "prompt": "What is 5 plus 8?", "thinking": "5 + 8 = 13.", "response": "13."}
+{"effort": "standard", "prompt": "What is 9 + 9?", "response": "18."}
+{"effort": "superior", "prompt": "What is 9 + 9?", "thinking": "9 + 9 = 18.", "response": "18."}
+{"effort": "standard", "prompt": "What is 11 times 2?", "response": "22."}
+{"effort": "superior", "prompt": "What is 11 times 2?", "thinking": "11 × 2 = 22.", "response": "22."}
+{"effort": "standard", "prompt": "What is 1 plus 1?", "response": "2."}
+{"effort": "superior", "prompt": "What is 1 plus 1?", "thinking": "1 + 1 = 2.", "response": "2."}
+{"effort": "standard", "prompt": "What is 0 + 2?", "response": "2."}
+{"effort": "superior", "prompt": "What is 0 + 2?", "thinking": "0 + 2 = 2.", "response": "2."}
+{"effort": "standard", "prompt": "What is 3 times 0?", "response": "0."}
+{"effort": "superior", "prompt": "What is 3 times 0?", "thinking": "3 × 0 = 0.", "response": "0."}
+{"effort": "standard", "prompt": "What is 10 minus 7?", "response": "3."}
+{"effort": "superior", "prompt": "What is 10 minus 7?", "thinking": "10 - 7 = 3.", "response": "3."}
+{"effort": "standard", "prompt": "What is 4 times 9?", "response": "36."}
+{"effort": "superior", "prompt": "What is 4 times 9?", "thinking": "4 × 9 = 36.", "response": "36."}
+{"effort": "standard", "prompt": "What is 5 times 7?", "response": "35."}
+{"effort": "superior", "prompt": "What is 5 times 7?", "thinking": "5 × 7 = 35.", "response": "35."}
+{"effort": "standard", "prompt": "What is 1 + 3?", "response": "4."}
+{"effort": "superior", "prompt": "What is 1 + 3?", "thinking": "1 + 3 = 4.", "response": "4."}
+{"effort": "standard", "prompt": "What is 10 plus 2?", "response": "12."}
+{"effort": "superior", "prompt": "What is 10 plus 2?", "thinking": "10 + 2 = 12.", "response": "12."}
+{"effort": "standard", "prompt": "What is 5 times 6?", "response": "30."}
+{"effort": "superior", "prompt": "What is 5 times 6?", "thinking": "5 × 6 = 30.", "response": "30."}
+{"effort": "standard", "prompt": "What is 1 + 4?", "response": "5."}
+{"effort": "superior", "prompt": "What is 1 + 4?", "thinking": "1 + 4 = 5.", "response": "5."}
+{"effort": "standard", "prompt": "What is 12 × 4?", "response": "48."}
+{"effort": "superior", "prompt": "What is 12 × 4?", "thinking": "12 × 4 = 48.", "response": "48."}
+{"effort": "standard", "prompt": "What is 5 × 0?", "response": "0."}
+{"effort": "superior", "prompt": "What is 5 × 0?", "thinking": "5 × 0 = 0.", "response": "0."}
+{"effort": "standard", "prompt": "What is 0 times 10?", "response": "0."}
+{"effort": "superior", "prompt": "What is 0 times 10?", "thinking": "0 × 10 = 0.", "response": "0."}
+{"effort": "standard", "prompt": "What is 7 plus 2?", "response": "9."}
+{"effort": "superior", "prompt": "What is 7 plus 2?", "thinking": "7 + 2 = 9.", "response": "9."}
+{"effort": "standard", "prompt": "What is 3 + 11?", "response": "14."}
+{"effort": "superior", "prompt": "What is 3 + 11?", "thinking": "3 + 11 = 14.", "response": "14."}
+{"effort": "standard", "prompt": "What is 0 × 3?", "response": "0."}
+{"effort": "superior", "prompt": "What is 0 × 3?", "thinking": "0 × 3 = 0.", "response": "0."}
+{"effort": "standard", "prompt": "What is 0 + 9?", "response": "9."}
+{"effort": "superior", "prompt": "What is 0 + 9?", "thinking": "0 + 9 = 9.", "response": "9."}
+{"effort": "standard", "prompt": "How much is 10 times 1?", "response": "10."}
+{"effort": "superior", "prompt": "How much is 10 times 1?", "thinking": "10 × 1 = 10.", "response": "10."}
+{"effort": "standard", "prompt": "What is 11 minus 6?", "response": "5."}
+{"effort": "superior", "prompt": "What is 11 minus 6?", "thinking": "11 - 6 = 5.", "response": "5."}
+{"effort": "standard", "prompt": "What is 10 + 4?", "response": "14."}
+{"effort": "superior", "prompt": "What is 10 + 4?", "thinking": "10 + 4 = 14.", "response": "14."}
+{"effort": "standard", "prompt": "What is 2 + 10?", "response": "12."}
+{"effort": "superior", "prompt": "What is 2 + 10?", "thinking": "2 + 10 = 12.", "response": "12."}
+{"effort": "standard", "prompt": "How much is 0 times 10?", "response": "0."}
+{"effort": "superior", "prompt": "How much is 0 times 10?", "thinking": "0 × 10 = 0.", "response": "0."}
+{"effort": "standard", "prompt": "What is 7 × 12?", "response": "84."}
+{"effort": "superior", "prompt": "What is 7 × 12?", "thinking": "7 × 12 = 84.", "response": "84."}
+{"effort": "standard", "prompt": "How much is 0 times 8?", "response": "0."}
+{"effort": "superior", "prompt": "How much is 0 times 8?", "thinking": "0 × 8 = 0.", "response": "0."}
+{"effort": "standard", "prompt": "What is 9 plus 5?", "response": "14."}
+{"effort": "superior", "prompt": "What is 9 plus 5?", "thinking": "9 + 5 = 14.", "response": "14."}
+{"effort": "standard", "prompt": "What is 11 + 1?", "response": "12."}
+{"effort": "superior", "prompt": "What is 11 + 1?", "thinking": "11 + 1 = 12.", "response": "12."}
+{"effort": "standard", "prompt": "What is 7 × 0?", "response": "0."}
+{"effort": "superior", "prompt": "What is 7 × 0?", "thinking": "7 × 0 = 0.", "response": "0."}
+{"effort": "standard", "prompt": "What is 3 plus 10?", "response": "13."}
+{"effort": "superior", "prompt": "What is 3 plus 10?", "thinking": "3 + 10 = 13.", "response": "13."}
+{"effort": "standard", "prompt": "What is 7 plus 6?", "response": "13."}
+{"effort": "superior", "prompt": "What is 7 plus 6?", "thinking": "7 + 6 = 13.", "response": "13."}
+{"effort": "standard", "prompt": "What is 0 times 4?", "response": "0."}
+{"effort": "superior", "prompt": "What is 0 times 4?", "thinking": "0 × 4 = 0.", "response": "0."}
+{"effort": "standard", "prompt": "What is 10 + 6?", "response": "16."}
+{"effort": "superior", "prompt": "What is 10 + 6?", "thinking": "10 + 6 = 16.", "response": "16."}
+{"effort": "standard", "prompt": "What is 8 plus 3?", "response": "11."}
+{"effort": "superior", "prompt": "What is 8 plus 3?", "thinking": "8 + 3 = 11.", "response": "11."}
+{"effort": "standard", "prompt": "What is 5 plus 12?", "response": "17."}
+{"effort": "superior", "prompt": "What is 5 plus 12?", "thinking": "5 + 12 = 17.", "response": "17."}
+{"effort": "standard", "prompt": "What is 9 × 1?", "response": "9."}
+{"effort": "superior", "prompt": "What is 9 × 1?", "thinking": "9 × 1 = 9.", "response": "9."}
+{"effort": "standard", "prompt": "What is 3 plus 9?", "response": "12."}
+{"effort": "superior", "prompt": "What is 3 plus 9?", "thinking": "3 + 9 = 12.", "response": "12."}
+{"effort": "standard", "prompt": "What is 8 minus 7?", "response": "1."}
+{"effort": "superior", "prompt": "What is 8 minus 7?", "thinking": "8 - 7 = 1.", "response": "1."}
+{"effort": "standard", "prompt": "How much is 7 times 6?", "response": "42."}
+{"effort": "superior", "prompt": "How much is 7 times 6?", "thinking": "7 × 6 = 42.", "response": "42."}
+{"effort": "standard", "prompt": "How much is 12 times 6?", "response": "72."}
+{"effort": "superior", "prompt": "How much is 12 times 6?", "thinking": "12 × 6 = 72.", "response": "72."}
+{"effort": "standard", "prompt": "What is 11 + 7?", "response": "18."}
+{"effort": "superior", "prompt": "What is 11 + 7?", "thinking": "11 + 7 = 18.", "response": "18."}
+{"effort": "standard", "prompt": "What is 8 + 1?", "response": "9."}
+{"effort": "superior", "prompt": "What is 8 + 1?", "thinking": "8 + 1 = 9.", "response": "9."}
+{"effort": "standard", "prompt": "What is 4 plus 7?", "response": "11."}
+{"effort": "superior", "prompt": "What is 4 plus 7?", "thinking": "4 + 7 = 11.", "response": "11."}
+{"effort": "standard", "prompt": "What is 12 minus 12?", "response": "0."}
+{"effort": "superior", "prompt": "What is 12 minus 12?", "thinking": "12 - 12 = 0.", "response": "0."}
+{"effort": "standard", "prompt": "What is 2 plus 8?", "response": "10."}
+{"effort": "superior", "prompt": "What is 2 plus 8?", "thinking": "2 + 8 = 10.", "response": "10."}
+{"effort": "standard", "prompt": "What is 7 × 3?", "response": "21."}
+{"effort": "superior", "prompt": "What is 7 × 3?", "thinking": "7 × 3 = 21.", "response": "21."}
+{"effort": "standard", "prompt": "What is 1 times 12?", "response": "12."}
+{"effort": "superior", "prompt": "What is 1 times 12?", "thinking": "1 × 12 = 12.", "response": "12."}
+{"effort": "standard", "prompt": "What is 11 plus 3?", "response": "14."}
+{"effort": "superior", "prompt": "What is 11 plus 3?", "thinking": "11 + 3 = 14.", "response": "14."}
+{"effort": "standard", "prompt": "What is 5 plus 1?", "response": "6."}
+{"effort": "superior", "prompt": "What is 5 plus 1?", "thinking": "5 + 1 = 6.", "response": "6."}
+{"effort": "standard", "prompt": "What is 12 minus 6?", "response": "6."}
+{"effort": "superior", "prompt": "What is 12 minus 6?", "thinking": "12 - 6 = 6.", "response": "6."}
+{"effort": "standard", "prompt": "How much is 6 times 12?", "response": "72."}
+{"effort": "superior", "prompt": "How much is 6 times 12?", "thinking": "6 × 12 = 72.", "response": "72."}
+{"effort": "standard", "prompt": "What is 0 × 4?", "response": "0."}
+{"effort": "superior", "prompt": "What is 0 × 4?", "thinking": "0 × 4 = 0.", "response": "0."}
+{"effort": "standard", "prompt": "How much is 12 times 2?", "response": "24."}
+{"effort": "superior", "prompt": "How much is 12 times 2?", "thinking": "12 × 2 = 24.", "response": "24."}
+{"effort": "standard", "prompt": "What is 11 plus 10?", "response": "21."}
+{"effort": "superior", "prompt": "What is 11 plus 10?", "thinking": "11 + 10 = 21.", "response": "21."}
+{"effort": "standard", "prompt": "What is 6 plus 4?", "response": "10."}
+{"effort": "superior", "prompt": "What is 6 plus 4?", "thinking": "6 + 4 = 10.", "response": "10."}
+{"effort": "standard", "prompt": "What is 12 times 12?", "response": "144."}
+{"effort": "superior", "prompt": "What is 12 times 12?", "thinking": "12 × 12 = 144.", "response": "144."}
+{"effort": "standard", "prompt": "What is 2 times 4?", "response": "8."}
+{"effort": "superior", "prompt": "What is 2 times 4?", "thinking": "2 × 4 = 8.", "response": "8."}

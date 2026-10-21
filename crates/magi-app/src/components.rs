@@ -8,8 +8,10 @@
 //! | onnx | exporting trained models so MacroMagi runs them | pip, into the AI Python |
 //! | ONNX Runtime | faster ONNX models on the CPU | Microsoft's GitHub releases |
 //! | ONNX Runtime for graphics cards | ONNX models on any DirectX 12 graphics card (Windows) | Microsoft's NuGet packages |
-//! | llama.cpp (CPU, CUDA 12, CUDA 13, Vulkan) | running GGUF models | llama.cpp's GitHub releases |
 //! | Python | the Python engine, without installing Python (Windows; managed on the Engine page) | python.org |
+//! | Document tools | Magi's open_document and edit_document (Word, Excel, PowerPoint, PDF) | pip, into the AI Python |
+//! | Image descriptions | Magi's view_image: SmolVLM-256M-Instruct describes pictures | pip and Hugging Face |
+//! | MagiDB | Magi's library of how things are done, on this computer (faster, and offline) | its GitHub repository |
 //!
 //! Each downloaded part lives in its own folder under `data/components`. A
 //! part in use cannot be deleted on Windows (its files are locked); it is then
@@ -24,10 +26,15 @@ const ORT_VERSION: &str = "1.31.0";
 const ORT_DIRECTML_VERSION: &str = "1.24.4";
 const DIRECTML_VERSION: &str = "1.15.4";
 const PYTHON_VERSION: &str = "3.13.14";
+/// The packages Magi's document tools read and write files with.
+const DOCUMENT_PACKAGES: [&str; 5] = ["python-docx", "openpyxl", "python-pptx", "pypdf", "pillow"];
+/// The small vision model view_image describes pictures with (Apache-2.0, about 500 MB).
+pub const VISION_MODEL: &str = "HuggingFaceTB/SmolVLM-256M-Instruct";
+/// MagiDB's repository, as a zip of its main branch.
+pub const MAGIDB_ZIP: &str = "https://github.com/MacroMagi/MagiDB/archive/refs/heads/main.zip";
 /// PyTorch's builds for NVIDIA graphics cards: CUDA 12.8 covers cards from the GTX 900s to the RTX 50s.
 const TORCH_CUDA_INDEX: &str = "https://download.pytorch.org/whl/cu128";
 const TORCH_CPU_INDEX: &str = "https://download.pytorch.org/whl/cpu";
-const LLAMA_RELEASES: &str = "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=15";
 /// Marks a folder to be deleted at the next start.
 const REMOVE_MARK: &str = ".remove";
 /// Holds the version of a part downloaded from a "latest" release.
@@ -45,35 +52,35 @@ pub enum Component {
     PyTorchCuda,
     /// The onnx package, which exports trained models.
     Onnx,
-    LlamaCpu,
-    LlamaCuda12,
-    LlamaCuda13,
-    LlamaVulkan,
+    /// Packages Magi's document tools use.
+    DocumentTools,
+    /// The small vision model Magi's view_image describes pictures with.
+    ImageDescriptions,
+    /// MagiDB, downloaded.
+    MagiDb,
 }
 
 /// How far an install has got: what it is doing, and the share done when known.
 pub type Report<'a> = &'a dyn Fn(&str, Option<f32>);
 
 impl Component {
-    pub const ALL: [Component; 10] = [
+    pub const ALL: [Component; 9] = [
         Component::OnnxRuntime,
         Component::OnnxRuntimeGpu,
         Component::Python,
         Component::PyTorch,
         Component::PyTorchCuda,
         Component::Onnx,
-        Component::LlamaCpu,
-        Component::LlamaCuda12,
-        Component::LlamaCuda13,
-        Component::LlamaVulkan,
+        Component::DocumentTools,
+        Component::ImageDescriptions,
+        Component::MagiDb,
     ];
+    /// For Magi's tools.
+    pub const TOOLS: [Component; 3] = [Component::MagiDb, Component::DocumentTools, Component::ImageDescriptions];
     /// For training, in the AI Python.
     pub const TRAINING: [Component; 3] = [Component::PyTorchCuda, Component::PyTorch, Component::Onnx];
     /// For running ONNX models.
     pub const ONNX: [Component; 2] = [Component::OnnxRuntime, Component::OnnxRuntimeGpu];
-    /// For running GGUF models, most capable first.
-    pub const LLAMA: [Component; 4] =
-        [Component::LlamaCuda13, Component::LlamaCuda12, Component::LlamaVulkan, Component::LlamaCpu];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -83,10 +90,9 @@ impl Component {
             Component::PyTorch => "PyTorch for the CPU",
             Component::PyTorchCuda => "PyTorch for NVIDIA graphics cards",
             Component::Onnx => "onnx",
-            Component::LlamaCpu => "llama.cpp for the CPU",
-            Component::LlamaCuda12 => "llama.cpp CUDA 12",
-            Component::LlamaCuda13 => "llama.cpp CUDA 13",
-            Component::LlamaVulkan => "llama.cpp Vulkan",
+            Component::DocumentTools => "Document tools",
+            Component::ImageDescriptions => "Image descriptions",
+            Component::MagiDb => "MagiDB",
         }
     }
 
@@ -95,6 +101,7 @@ impl Component {
         match self {
             Component::PyTorch | Component::PyTorchCuda | Component::Onnx => "Training",
             Component::Python => "Python",
+            Component::DocumentTools | Component::ImageDescriptions | Component::MagiDb => "Tools",
             _ => "Engine",
         }
     }
@@ -122,16 +129,18 @@ impl Component {
             Component::Onnx => {
                 "Exports trained models so MacroMagi can run them. Training needs it, whichever PyTorch is installed."
             }
-            Component::LlamaCpu => "Runs GGUF models (from LM Studio, Hugging Face or trained here) on the processor.",
-            Component::LlamaCuda12 => {
-                "Runs GGUF models on NVIDIA graphics cards with CUDA 12 – for cards before the RTX 50s. Includes \
-                 the CUDA runtime."
+            Component::DocumentTools => {
+                "Lets Magi models open and change Word, Excel and PowerPoint files and read PDFs (python-docx, \
+                 openpyxl, python-pptx, pypdf), in the AI Python."
             }
-            Component::LlamaCuda13 => {
-                "Runs GGUF models on NVIDIA graphics cards with CUDA 13 – the RTX 20s to the RTX 50s. Includes \
-                 the CUDA runtime."
+            Component::ImageDescriptions => {
+                "Lets Magi models see pictures: a small vision model (SmolVLM-256M-Instruct, Apache-2.0) describes \
+                 them, and Windows reads their text. Needs PyTorch."
             }
-            Component::LlamaVulkan => "Runs GGUF models on any Vulkan graphics card: NVIDIA, AMD or Intel.",
+            Component::MagiDb => {
+                "Magi's library of how things are done, on this computer: faster, and it works offline. Without it, \
+                 Magi models read the pages online."
+            }
         }
     }
 
@@ -144,10 +153,9 @@ impl Component {
             Component::PyTorch => "about 250 MB",
             Component::PyTorchCuda => "about 3 GB",
             Component::Onnx => "about 20 MB",
-            Component::LlamaCpu => "about 25 MB",
-            Component::LlamaCuda12 => "about 500 MB",
-            Component::LlamaCuda13 => "about 600 MB",
-            Component::LlamaVulkan => "about 40 MB",
+            Component::DocumentTools => "about 15 MB",
+            Component::ImageDescriptions => "about 600 MB",
+            Component::MagiDb => "a few MB",
         }
     }
 
@@ -168,13 +176,6 @@ impl Component {
             Component::PyTorchCuda if cfg!(target_os = "macos") => {
                 Some("Macs have no NVIDIA graphics cards; PyTorch for the CPU uses Apple's graphics by itself.")
             }
-            Component::LlamaCpu | Component::LlamaCuda12 | Component::LlamaCuda13 | Component::LlamaVulkan
-                if !cfg!(windows) =>
-            {
-                Some(
-                    "Install llama.cpp with your package manager (it provides llama-server); MacroMagi finds it there.",
-                )
-            }
             _ => None,
         }
     }
@@ -184,30 +185,14 @@ impl Component {
             Component::OnnxRuntime => "onnxruntime",
             Component::OnnxRuntimeGpu => "onnxruntime-gpu",
             Component::Python => "python",
-            Component::PyTorch | Component::PyTorchCuda | Component::Onnx => "pytorch",
-            Component::LlamaCpu => "llama-cpu",
-            Component::LlamaCuda12 => "llama-cuda12",
-            Component::LlamaCuda13 => "llama-cuda13",
-            Component::LlamaVulkan => "llama-vulkan",
+            Component::PyTorch | Component::PyTorchCuda | Component::Onnx | Component::DocumentTools => "pytorch",
+            Component::ImageDescriptions => "vision",
+            Component::MagiDb => "magidb",
         }
     }
 
     fn is_package(self) -> bool {
-        matches!(self, Component::PyTorch | Component::PyTorchCuda | Component::Onnx)
-    }
-
-    fn is_llama(self) -> bool {
-        Component::LLAMA.contains(&self)
-    }
-
-    /// The release asset names of a llama.cpp build: the program, and the CUDA runtime it needs.
-    fn llama_assets(self) -> (&'static str, Option<&'static str>) {
-        match self {
-            Component::LlamaCuda12 => ("-bin-win-cuda-12", Some("cudart-llama-bin-win-cuda-12")),
-            Component::LlamaCuda13 => ("-bin-win-cuda-13", Some("cudart-llama-bin-win-cuda-13")),
-            Component::LlamaVulkan => ("-bin-win-vulkan", None),
-            _ => ("-bin-win-cpu", None),
-        }
+        matches!(self, Component::PyTorch | Component::PyTorchCuda | Component::Onnx | Component::DocumentTools)
     }
 }
 
@@ -241,14 +226,14 @@ pub struct TorchInfo {
     pub devices: Vec<String>,
 }
 
-/// Where every part stands, with what PyTorch and llama.cpp can use.
+/// Where every part stands, with what PyTorch can use.
 #[derive(Clone, Debug, Default)]
 pub struct RuntimeReport {
     pub statuses: Vec<(Component, Status)>,
     pub torch: Option<TorchInfo>,
     pub onnx: Option<String>,
-    /// The devices llama.cpp can use: id (`CUDA0`) and description.
-    pub llama_devices: Vec<(String, String)>,
+    /// Whether the document tools' packages are in the AI Python.
+    pub documents: bool,
 }
 
 #[derive(Clone)]
@@ -321,21 +306,6 @@ fn unzip_files(archive: &[u8], wanted: &[&str], into: &Path) -> Result<usize, St
 }
 
 /// Unpacks a whole ZIP archive into `into`.
-/// A file of that name in a folder or the folders in it.
-fn find_file(dir: &Path, name: &str) -> Option<PathBuf> {
-    for entry in std::fs::read_dir(dir).ok()?.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            if let Some(found) = find_file(&path, name) {
-                return Some(found);
-            }
-        } else if entry.file_name().to_string_lossy().eq_ignore_ascii_case(name) {
-            return Some(path);
-        }
-    }
-    None
-}
-
 fn unzip_all(archive: &[u8], into: &Path) -> Result<(), String> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive)).map_err(|e| e.to_string())?;
     zip.extract(into).map_err(|e| e.to_string())
@@ -426,7 +396,8 @@ impl Components {
         match component {
             Component::OnnxRuntime | Component::OnnxRuntimeGpu => dir.join(Self::library_name()).is_file(),
             Component::Python => dir.join("python.exe").is_file(),
-            c if c.is_llama() => dir.join(llama_server_name()).is_file(),
+            Component::ImageDescriptions => dir.join("model").join("config.json").is_file(),
+            Component::MagiDb => std::fs::read_dir(&dir).is_ok_and(|mut d| d.any(|e| e.is_ok())),
             _ => false,
         }
     }
@@ -457,25 +428,18 @@ impl Components {
         self.installed(Component::Python).then_some(path)
     }
 
-    /// The llama.cpp server to run GGUF models with: the chosen build if it is
-    /// installed, else the most capable one installed, else one on the system.
-    pub fn llama_server(&self, preferred: Option<Component>) -> Option<(Option<Component>, PathBuf)> {
-        let installed = |c: Component| self.installed(c).then(|| (Some(c), self.dir(c).join(llama_server_name())));
-        if let Some(found) = preferred.filter(|c| c.is_llama()).and_then(installed) {
-            return Some(found);
-        }
-        if let Some(found) = Component::LLAMA.into_iter().find_map(installed) {
-            return Some(found);
-        }
-        let beside = self.app_dir.join(llama_server_name());
-        if beside.is_file() {
-            return Some((None, beside));
-        }
-        on_path(llama_server_name()).map(|path| (None, path))
+    /// The image description model, if it is installed.
+    pub fn vision_model(&self) -> Option<PathBuf> {
+        self.installed(Component::ImageDescriptions).then(|| self.dir(Component::ImageDescriptions).join("model"))
+    }
+
+    /// MagiDB, if it was downloaded.
+    pub fn magidb(&self) -> Option<PathBuf> {
+        self.installed(Component::MagiDb).then(|| self.dir(Component::MagiDb))
     }
 
     /// Where every part stands. `python` is the AI Python, where PyTorch and onnx
-    /// are looked for. Starts Python and llama.cpp: call it off the UI thread.
+    /// are looked for. Starts Python: call it off the UI thread.
     pub fn report(&self, python: Option<&Path>) -> RuntimeReport {
         let mut report = RuntimeReport::default();
         if let Some(python) = python {
@@ -496,13 +460,11 @@ impl Components {
                 });
             }
             report.onnx = python_output(python, &["-c", "import onnx; print(onnx.__version__)"]).ok();
+            report.documents = python_output(python, &["-c", "import docx, openpyxl, pptx, pypdf"]).is_ok();
         }
         for component in Component::ALL {
             let status = self.status(component, python, &report);
             report.statuses.push((component, status));
-        }
-        if let Some((_, server)) = self.llama_server(None) {
-            report.llama_devices = magi_ml::llama::list_devices(&server);
         }
         report
     }
@@ -537,11 +499,14 @@ impl Components {
                 Some(version) => in_python(format!("{version}{where_}")),
                 None => Status::Missing,
             },
+            Component::DocumentTools if report.documents => in_python(format!("python-docx, openpyxl…{where_}")),
+            Component::DocumentTools => Status::Missing,
             _ if self.installed(component) => {
                 let detail = match component {
                     Component::OnnxRuntime => ORT_VERSION.to_string(),
                     Component::OnnxRuntimeGpu => format!("{ORT_DIRECTML_VERSION}, DirectML {DIRECTML_VERSION}"),
                     Component::Python => PYTHON_VERSION.to_string(),
+                    Component::ImageDescriptions => VISION_MODEL.to_string(),
                     _ => std::fs::read_to_string(dir.join(VERSION_FILE)).unwrap_or_default().trim().to_owned(),
                 };
                 Status::Installed { bytes: folder_size(&dir), detail }
@@ -553,9 +518,6 @@ impl Components {
                 } else {
                     Status::Missing
                 }
-            }
-            c if c.is_llama() && c == Component::LlamaCpu && !cfg!(windows) => {
-                on_path(llama_server_name()).map_or(Status::Missing, |p| Status::OnSystem(p.display().to_string()))
             }
             _ => Status::Missing,
         }
@@ -712,6 +674,64 @@ impl Components {
                 }
                 Ok(format!("{} installed into {}.", component.name(), python.display()))
             }
+            Component::DocumentTools => {
+                let python = python.ok_or(
+                    "no Python was found to install the document tools into. Choose one under Settings › Engine.",
+                )?;
+                self.ensure_pip(python, progress)?;
+                let mut args = vec!["install"];
+                args.extend(DOCUMENT_PACKAGES);
+                pip(python, &args, progress, "Installing python-docx, openpyxl, python-pptx and pypdf…")
+                    .map_err(|e| format!("pip could not install the document tools: {e}"))?;
+                Ok(format!("Document tools installed into {}.", python.display()))
+            }
+            Component::ImageDescriptions => {
+                let python = python.ok_or(
+                    "no Python was found to install image descriptions into. Choose one under Settings › Engine.",
+                )?;
+                if python_output(python, &["-c", "import torch"]).is_err() {
+                    return Err("image descriptions need PyTorch: install it first (Training models, above)".into());
+                }
+                self.ensure_pip(python, progress)?;
+                pip(
+                    python,
+                    &["install", "transformers", "pillow", "huggingface_hub"],
+                    progress,
+                    "Installing transformers…",
+                )
+                .map_err(|e| format!("pip could not install transformers: {e}"))?;
+                progress("Downloading SmolVLM-256M-Instruct (about 500 MB)…", None);
+                let target = dir.join("model");
+                let script = format!(
+                    "from huggingface_hub import snapshot_download; snapshot_download({VISION_MODEL:?}, local_dir={:?})",
+                    target.display().to_string()
+                );
+                python_output(python, &["-c", &script])
+                    .map_err(|e| format!("the model could not be downloaded: {e}"))?;
+                Ok("Image descriptions installed: Magi models can look at pictures.".into())
+            }
+            Component::MagiDb => {
+                let archive = download(MAGIDB_ZIP, progress)?;
+                progress("Unpacking…", None);
+                let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive)).map_err(|e| e.to_string())?;
+                // The zip holds one folder (MagiDB-main/): its contents go into the part's folder.
+                for index in 0..zip.len() {
+                    let mut entry = zip.by_index(index).map_err(|e| e.to_string())?;
+                    let Some(name) = entry.enclosed_name() else { continue };
+                    let inner: PathBuf = name.components().skip(1).collect();
+                    if inner.as_os_str().is_empty() || entry.is_dir() {
+                        continue;
+                    }
+                    let target = dir.join(inner);
+                    if let Some(parent) = target.parent() {
+                        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                    }
+                    let mut bytes = Vec::new();
+                    entry.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+                    std::fs::write(target, bytes).map_err(|e| e.to_string())?;
+                }
+                Ok("MagiDB downloaded: Magi models read it on this computer.".into())
+            }
             Component::Onnx => {
                 let python =
                     python.ok_or("no Python was found to install onnx into. Choose one under Settings › Engine.")?;
@@ -720,75 +740,6 @@ impl Components {
                     .map_err(|e| format!("pip could not install onnx: {e}"))?;
                 Ok(format!("onnx installed into {}.", python.display()))
             }
-            c => {
-                // llama.cpp: the newest release that has a build for this part. Its
-                // "latest" release can be one without builds, so recent ones are searched.
-                progress("Looking up llama.cpp's releases…", None);
-                let text = ureq::get(LLAMA_RELEASES)
-                    .header("Accept", "application/vnd.github+json")
-                    .call()
-                    .map_err(|e| format!("could not reach GitHub: {e}"))?
-                    .body_mut()
-                    .read_to_string()
-                    .map_err(|e| format!("could not read GitHub's answer: {e}"))?;
-                let releases: serde_json::Value =
-                    serde_json::from_str(&text).map_err(|e| format!("GitHub sent something unexpected: {e}"))?;
-                let (program, runtime) = c.llama_assets();
-                // The CUDA runtime's zip (`cudart-llama-bin-win-cuda-…`) also contains the program's
-                // pattern: only the runtime pattern may match it.
-                let find = |assets: &[(String, String)], part: &str| {
-                    assets
-                        .iter()
-                        .find(|(name, _)| {
-                            name.contains(part)
-                                && name.contains("x64")
-                                && name.ends_with(".zip")
-                                && name.starts_with("cudart") == part.starts_with("cudart")
-                        })
-                        .map(|(_, url)| url.clone())
-                };
-                let found = releases.as_array().into_iter().flatten().find_map(|release| {
-                    let assets: Vec<(String, String)> = release["assets"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|a| {
-                            Some((a["name"].as_str()?.to_owned(), a["browser_download_url"].as_str()?.to_owned()))
-                        })
-                        .collect();
-                    let program_url = find(&assets, program)?;
-                    let runtime_url = match runtime {
-                        Some(part) => Some(find(&assets, part)?),
-                        None => None,
-                    };
-                    Some((release["tag_name"].as_str().unwrap_or_default().to_owned(), program_url, runtime_url))
-                });
-                let (tag, program_url, runtime_url) =
-                    found.ok_or_else(|| format!("none of llama.cpp's recent releases has a {} build", c.name()))?;
-                let archive = download(&program_url, progress)?;
-                progress("Unpacking…", None);
-                unzip_all(&archive, dir)?;
-                if let Some(url) = runtime_url {
-                    progress("Downloading the CUDA runtime…", None);
-                    let archive = download(&url, progress)?;
-                    progress("Unpacking the CUDA runtime…", None);
-                    unzip_all(&archive, dir)?;
-                }
-                // Some builds keep their files in a folder inside the zip: bring them up.
-                if !dir.join(llama_server_name()).is_file()
-                    && let Some(inner) =
-                        find_file(dir, llama_server_name()).and_then(|p| p.parent().map(Path::to_path_buf))
-                {
-                    for entry in std::fs::read_dir(&inner).map_err(|e| e.to_string())?.flatten() {
-                        let _ = std::fs::rename(entry.path(), dir.join(entry.file_name()));
-                    }
-                }
-                if !dir.join(llama_server_name()).is_file() {
-                    return Err("the download did not contain llama-server".into());
-                }
-                let _ = std::fs::write(dir.join(VERSION_FILE), &tag);
-                Ok(format!("{} ({tag}) installed.", c.name()))
-            }
         }
     }
 
@@ -796,14 +747,15 @@ impl Components {
     pub fn uninstall(&self, component: Component, python: Option<&Path>) -> Result<String, String> {
         if component.is_package() {
             let python = python.ok_or("there is no Python to remove it from")?;
-            let package = if component == Component::Onnx { "onnx" } else { "torch" };
-            python_output(python, &["-m", "pip", "uninstall", "-y", "--disable-pip-version-check", package])
-                .map_err(|e| format!("pip could not remove {package}: {e}"))?;
+            let packages: &[&str] = match component {
+                Component::Onnx => &["onnx"],
+                Component::DocumentTools => &DOCUMENT_PACKAGES[..4],
+                _ => &["torch"],
+            };
+            let mut args = vec!["-m", "pip", "uninstall", "-y", "--disable-pip-version-check"];
+            args.extend(packages);
+            python_output(python, &args).map_err(|e| format!("pip could not remove {}: {e}", packages.join(", ")))?;
             return Ok(format!("{} removed from {}.", component.name(), python.display()));
-        }
-        if component.is_llama() {
-            // Its server may be running a model.
-            magi_ml::llama::stop_servers();
         }
         let dir = self.dir(component);
         match std::fs::remove_dir_all(&dir) {
@@ -816,16 +768,6 @@ impl Components {
             Err(_) => Ok(format!("{} removed.", component.name())),
         }
     }
-}
-
-fn llama_server_name() -> &'static str {
-    if cfg!(windows) { "llama-server.exe" } else { "llama-server" }
-}
-
-/// A program on the PATH.
-fn on_path(name: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH")
-        .and_then(|paths| std::env::split_paths(&paths).map(|dir| dir.join(name)).find(|p| p.is_file()))
 }
 
 /// A command that opens no console window.
@@ -951,23 +893,6 @@ mod tests {
             }
         }
         assert!(components.uninstall(Component::OnnxRuntimeGpu, None).unwrap().contains("restarts"), "in use");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-}
-
-#[cfg(test)]
-mod llama_install {
-    use super::*;
-
-    #[test]
-    #[ignore = "downloads llama.cpp (about 25 MB)"]
-    fn llama_cpp_installs_from_its_releases() {
-        let dir = std::env::temp_dir().join(format!("magi-llama-{}", std::process::id()));
-        let components = Components::new(&dir, &dir);
-        let message = components.install(Component::LlamaCpu, None, &|_, _| {}).unwrap();
-        assert!(message.contains("installed"), "{message}");
-        let (_, server) = components.llama_server(None).unwrap();
-        assert!(server.is_file());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

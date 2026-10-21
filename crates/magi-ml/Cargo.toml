@@ -21,10 +21,6 @@ serde_json.workspace = true
 # The native engine spreads big matrix products over the processor cores.
 rayon.workspace = true
 
-# llama.cpp servers close with MacroMagi, even when it is killed (a job object).
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
-
 [dev-dependencies]
 # Builds a tiny ONNX model for the tests.
 prost = "0.14"

@@ -7,9 +7,12 @@
 //! this computer and its result goes back to the model in a tool turn, so a
 //! tiny model only has to learn *which* tool to call and *how*, not the work.
 //!
-//! MacroMagi comes with a set of them (`src/nt`): calculator, web_search,
-//! fetch_page, get_time, get_weather, read_file, list_files, describe_image,
-//! transcribe_audio, translate and wiki_search. A model's own files under
+//! MacroMagi comes with a set of them (`src/nt`): MagiDB (db_search,
+//! db_read), web_search and fetch_page, files (list_files, read_file,
+//! search_files, write_file, edit_file), run_command, documents
+//! (open_document, edit_document), view_image, calculator, get_time,
+//! get_weather, transcribe_audio, translate and wiki_search. Tools that change
+//! files or run programs ask the user first (`confirm`). A model's own files under
 //! `nt/<tool>/` in its `.magic` data take the place of the built-in ones.
 
 use std::collections::BTreeMap;
@@ -27,7 +30,8 @@ static BUILT_IN: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/src/nt");
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RunSpec {
-    /// `python` (its entry with the Python for AI) or `command` (its entry as a program).
+    /// `python` (its entry with the Python for AI), `command` (its entry as a program) or `host`
+    /// (carried out by the program running the model, which knows it by its entry's name).
     pub kind: String,
     pub entry: String,
     pub timeout_ms: u64,
@@ -47,6 +51,9 @@ pub struct NativeTool {
     pub description: String,
     pub parameters: Value,
     pub run: RunSpec,
+    /// It changes files or runs programs: the user is asked before each call.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub confirm: bool,
 }
 
 impl NativeTool {
@@ -129,13 +136,14 @@ mod tests {
     fn the_built_in_tools_are_complete() {
         let tools = built_in();
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-        for wanted in ["calculator", "web_search", "get_weather", "get_time", "describe_image", "transcribe_audio"] {
+        for wanted in ["calculator", "web_search", "get_weather", "get_time", "view_image", "transcribe_audio"] {
             assert!(names.contains(&wanted), "{wanted}");
         }
         for tool in &tools {
             assert!(tool.parameters["type"] == "object", "{}", tool.name);
             let files = files(&tool.name, &BTreeMap::new());
-            assert!(files.iter().any(|(p, _)| p == "run.py"), "{}", tool.name);
+            // A tool the program carries out itself has no program of its own.
+            assert!(tool.run.kind == "host" || files.iter().any(|(p, _)| *p == tool.run.entry), "{}", tool.name);
             assert!(tool.spec().native);
         }
         // A model's own copy wins.

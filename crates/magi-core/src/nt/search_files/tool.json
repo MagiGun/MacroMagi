@@ -1,0 +1,26 @@
+{
+  "name": "search_files",
+  "description": "Finds text in the files of a folder: each line that has it, with its file and line number.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "text": {
+        "type": "string",
+        "description": "what to find (any case)"
+      },
+      "folder": {
+        "type": "string",
+        "description": "the folder to look in"
+      }
+    },
+    "required": [
+      "text",
+      "folder"
+    ]
+  },
+  "run": {
+    "kind": "python",
+    "entry": "run.py",
+    "timeout_ms": 60000
+  }
+}

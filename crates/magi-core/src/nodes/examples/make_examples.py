@@ -1,7 +1,9 @@
 """Writes the example datasets a new text model starts with (the files beside
 this script). They are original, short and general: plain English, everyday
 conversation, step-by-step reasoning at three effort levels, using tools, and
-naming conversations. Run it again after changing it:
+naming conversations – and, from make_agent_data.py, thinking when it helps,
+tools one after another, errors, small talk and longer answers. Run it again
+after changing either:
 
     python crates/magi-core/src/nodes/examples/make_examples.py
 """
@@ -640,6 +642,326 @@ def facts():
     return out
 
 
+# ---- knowing what it knows ---------------------------------------------------------
+#
+# A small model knows little. These teach it to act well anyway: greet back and
+# keep small talk short (with a short thought, so a greeting is never taken for a
+# problem to work out), say plainly when it does not know, search when a search
+# tool is offered instead of guessing, and ask when a request is unclear.
+
+SMALL_TALK = [
+    (["Hello", "hello", "Hi", "hi", "Hey", "hey there", "Hello!", "Hi!", "Heya", "hiya", "Yo", "Hello Magi"],
+     "Someone greets me. I greet back and offer help.",
+     ["Hello! How can I help?", "Hi! What can I do for you?", "Hey! What would you like to do?"]),
+    (["Good morning", "good morning!", "Morning"],
+     "A morning greeting. I answer in kind.", ["Good morning! What can I do for you today?"]),
+    (["Good evening", "Good night"],
+     "An evening greeting. I answer in kind.", ["Good evening! How can I help?", "Good night! Sleep well."]),
+    (["How are you?", "how are you doing", "How's it going?", "What's up?", "How are things?"],
+     "Small talk about how I am. A short, friendly answer, then back to them.",
+     ["I'm doing well, thanks. How can I help?", "All good here. What can I do for you?"]),
+    (["Thanks", "thank you", "Thanks a lot!", "Thank you so much", "thx", "Cheers"],
+     "They thank me. I say they're welcome.", ["You're welcome!", "Happy to help!", "Any time."]),
+    (["Bye", "Goodbye", "See you later", "bye!", "I have to go"],
+     "They are leaving. A short goodbye.", ["Goodbye! Have a good day.", "See you later!", "Bye! Take care."]),
+    (["Who are you?", "What are you?", "What's your name?", "Are you a person?", "Are you an AI?"],
+     "They ask about me. I'm Magi, a small AI assistant.",
+     ["I'm Magi, a small AI assistant made in MacroMagi. I can chat, work through simple problems and use tools.",
+      "I'm Magi, an AI assistant. I'm small, so I know only a little, but I can use tools like search."]),
+    (["What can you do?", "How can you help me?", "What are you good at?"],
+     "They ask what I can do. I list it briefly and honestly.",
+     ["I can chat, explain simple things, work through small problems step by step, write a little Python, and use tools such as search and a calculator when they're available. I'm small, so for facts I often need to look things up."]),
+    (["Are you smart?", "Do you know everything?", "How much do you know?"],
+     "They ask how much I know. I'm small: I should be honest about it.",
+     ["Not everything – I'm a small model, so I know only basic things. When I'm not sure, I'll say so or look it up."]),
+    (["ok", "OK", "okay", "Alright", "Cool", "Nice", "Great"],
+     "A short acknowledgement. Nothing to work out; I keep it short.",
+     ["Great! Anything else?", "Alright. Let me know if you need anything."]),
+    (["lol", "haha", ":)", "😂"],
+     "They laugh. A light, short reply.", ["Glad that made you smile!", "Ha! What else can I do for you?"]),
+    (["I'm bored", "I'm tired", "I'm sad"],
+     "They share how they feel. A kind, short reply.",
+     ["Sorry to hear that. Want to talk about it, or should I suggest something to do?"]),
+]
+
+UNCLEAR = ["asdfgh", "jkjkjk", "??", "hmm", "the thing", "do it", "blue seven run", "what about that one", "x", "...",
+           "can you", "and then?"]
+UNCLEAR_REPLIES = ["I'm not sure what you mean. Could you say a bit more?",
+                   "Sorry, I didn't understand that. What would you like me to do?",
+                   "Could you tell me a little more about what you need?"]
+
+# Facts a small model cannot know, or know reliably: specific, recent, personal or made up.
+UNKNOWN_FACTS = [
+    ("What is the population of Ulaanbaatar?", "population of Ulaanbaatar", "About 1.7 million people live in Ulaanbaatar."),
+    ("Who won the 2018 Tour de France?", "2018 Tour de France winner", "Geraint Thomas won the 2018 Tour de France."),
+    ("How tall is the Burj Khalifa?", "Burj Khalifa height", "The Burj Khalifa is 828 metres tall."),
+    ("When was the University of Oslo founded?", "University of Oslo founded", "It was founded in 1811."),
+    ("What is the price of gold today?", "gold price today", "Gold is trading at about 2,350 dollars an ounce today."),
+    ("What's the latest news about electric cars?", "latest news electric cars", "The top results are about new, cheaper models and more charging stations."),
+    ("Who is the mayor of Lyon?", "mayor of Lyon", "Grégory Doucet is the mayor of Lyon."),
+    ("How many moons does Neptune have?", "how many moons does Neptune have", "Neptune has 16 known moons."),
+    ("What year did the Berlin Wall fall?", "year Berlin Wall fell", "The Berlin Wall fell in 1989."),
+    ("What is the deepest lake in Africa?", "deepest lake in Africa", "Lake Tanganyika is the deepest lake in Africa."),
+    ("Who wrote the novel Things Fall Apart?", "Things Fall Apart author", "Chinua Achebe wrote Things Fall Apart."),
+    ("What is the boiling point of ethanol?", "boiling point of ethanol", "Ethanol boils at about 78 °C."),
+    ("How long is the Danube?", "length of the Danube river", "The Danube is about 2,850 km long."),
+    ("Which company makes the Model Y?", "Model Y car maker", "Tesla makes the Model Y."),
+    ("What is the speed of sound in water?", "speed of sound in water", "Sound travels about 1,480 metres a second in water."),
+    ("When is the next full moon?", "next full moon date", "The next full moon is in 9 days."),
+    ("What's the score of the game last night?", "score of last night's game", "The search found several games last night; which team do you mean?"),
+    ("Who invented the telephone?", "who invented the telephone", "Alexander Graham Bell is credited with inventing the telephone in 1876."),
+    ("What is the GDP of Kenya?", "GDP of Kenya", "Kenya's GDP is about 110 billion dollars."),
+    ("How many people speak Swahili?", "number of Swahili speakers", "Around 200 million people speak Swahili."),
+]
+NO_TOOL_UNKNOWN = [
+    "I don't know that for sure, and I can't look it up right now. I'd rather not guess.",
+    "I'm not sure. I'm a small model and don't have that fact; a search would find it.",
+    "I don't know. If you give me a search tool, I can look it up.",
+]
+UNKNOWABLE = [
+    ("What am I thinking right now?", "I can't know what you're thinking – you'll have to tell me!"),
+    ("How old is my neighbour?", "I don't know your neighbour, so I can't tell. You could ask them."),
+    ("What's my name?", "I don't know your name unless you tell me."),
+    ("What did I have for breakfast?", "I can't know that – I only see what you write here."),
+    ("What's the password to my email?", "I don't know it, and I shouldn't. If you've forgotten it, use the email service's reset option."),
+    ("Where did I leave my keys?", "I can't know that. Try retracing your steps: the last place you used them, pockets, bags and the door."),
+    ("What is the capital of Zandoria?", "I don't know a country called Zandoria. Did you mean another name?"),
+    ("Who won the match tomorrow?", "Nobody knows yet – it hasn't happened."),
+    ("What will the weather be next year?", "Nobody can know that far ahead. I can check the forecast for the next few days if you like."),
+]
+
+
+def knowing():
+    samples = []
+    for asks, thought, replies in SMALL_TALK:
+        for n, ask in enumerate(asks):
+            reply = replies[n % len(replies)]
+            samples.append({"prompt": ask, "thinking": thought, "response": reply})
+            if n % 2 == 0:
+                # With tools offered, small talk still needs none.
+                samples.append({"tools": DEFAULT_TOOLS, "prompt": ask, "thinking": thought + " No tool is needed.",
+                                "response": reply})
+    for n, ask in enumerate(UNCLEAR):
+        samples.append({"prompt": ask, "thinking": "I can't tell what they want. I'll ask, not guess.",
+                        "response": UNCLEAR_REPLIES[n % len(UNCLEAR_REPLIES)]})
+    for n, (ask, query, found) in enumerate(UNKNOWN_FACTS):
+        # Without a search tool: say so, do not make it up.
+        samples.append({"tools": [], "prompt": ask,
+                        "thinking": "A specific fact. I don't know it reliably, and I have no search tool.",
+                        "response": NO_TOOL_UNKNOWN[n % len(NO_TOOL_UNKNOWN)]})
+        # With one: search, then answer from the result.
+        samples.append({"tools": DEFAULT_TOOLS, "messages": [
+            user(ask),
+            say("", "A specific fact I don't know reliably. I'll search instead of guessing.",
+                [call("web_search", query=query)]),
+            result({"results": [{"title": query.capitalize(), "snippet": found}]}),
+            say(found),
+        ]})
+    for ask, reply in UNKNOWABLE:
+        samples.append({"tools": [], "prompt": ask, "thinking": "I have no way to know this. I say so plainly.",
+                        "response": reply})
+        samples.append({"tools": DEFAULT_TOOLS, "prompt": ask,
+                        "thinking": "No tool can tell me this. I say so plainly.", "response": reply})
+    return samples
+
+
+# ---- compaction: a long conversation, kept short -------------------------------------
+#
+# When a chat grows past what the model can read, MacroMagi asks the model to
+# write the earlier part short and goes on with that. Each sample is a
+# conversation written as "User: … / Magi: …" lines and what to keep of it:
+# who the user is, what they want, and the facts found – not the small talk.
+
+# Many names, places, likes and tasks, so that the only way to write a chat short
+# is to copy what it says – not to remember a few names from the samples.
+NAMES = ["Sam", "Lena", "Omar", "Mia", "Kenji", "Ana", "Tom", "Priya", "Luca", "Zoe", "Farid", "Hana", "Diego",
+         "Ingrid", "Kwame", "Aiko", "Mateus", "Freya", "Rashid", "Elif", "Joon", "Amara", "Pavel", "Sofia", "Tariq",
+         "Noor", "Ewan", "Chiara", "Bilal", "Yara", "Henrik", "Lucía", "Femi", "Mei", "Arjun", "Greta", "Tomás",
+         "Leila", "Kofi", "Sakura", "Nikolai", "Inés", "Dmitri", "Asha", "Bruno", "Olga", "Hugo", "Nadia", "Rafael",
+         "Keiko", "Jonah", "Selin", "Marek", "Ayla", "Theo", "Rosa", "Imran", "Clara", "Viktor", "Esther", "Ravi",
+         "Wanjiru", "Oskar", "Lina", "Emeka", "Paula", "Haruto", "Mira", "Andrés", "Fatima", "Jakob", "Ines", "Cyrus",
+         "Daria", "Malik", "Nora", "Seo-yeon", "Gabriel", "Thandi", "Ilya", "Beatriz", "Kai", "Layla", "Ruben"]
+LIKES = ["tea", "jazz", "hiking", "chess", "cooking", "old films", "cycling", "painting", "gardening", "photography",
+         "knitting", "rock climbing", "board games", "poetry", "baking bread", "birdwatching", "swimming", "sci-fi books",
+         "pottery", "running", "camping", "tango", "sushi", "astronomy", "woodwork", "yoga", "football", "the piano",
+         "crosswords", "travel vlogs", "sourdough", "skateboarding", "ceramics", "surfing", "opera", "video games"]
+TRIP_CITIES = ["Rome", "Tokyo", "Lisbon", "Oslo", "Cairo", "Toronto", "Vienna", "Seoul", "Lima", "Hanoi", "Dublin",
+               "Marrakesh", "Kyoto", "Prague", "Nairobi", "Reykjavik", "Mexico City", "Istanbul", "Sydney", "Bergen",
+               "Porto", "Krakow", "Bali", "Cape Town", "Montreal", "Edinburgh", "Buenos Aires", "Athens", "Hamburg"]
+MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October",
+          "November", "December"]
+TASKS = ["call the dentist", "buy milk", "send the report", "water the plants", "book the train tickets",
+         "pay the electricity bill", "call the bank", "renew my passport", "email Professor Lee", "pick up the parcel",
+         "fix the bike tyre", "book a haircut", "return the library books", "order new glasses", "back up my laptop",
+         "buy a birthday present for Jo", "cancel the gym membership", "clean the oven", "pay the rent",
+         "check the car tyres", "send the invoice to Marta", "get flowers for Mum"]
+HELLOS = [("Hi! I'm %s.", "Hi %s! How can I help?"), ("hey, I'm %s", "Hi %s! What can I do for you?"),
+          ("My name is %s.", "Nice to meet you, %s! How can I help?"), ("Hello, %s here.", "Hello %s! What do you need?")]
+SMALL = [("How are you?", "I'm doing well, thanks!"), ("haha thanks", "You're welcome!"), ("ok cool", "Great. Anything else?"),
+         ("lol", "Glad that made you smile!"), ("nice", "Good! Let me know if you need anything.")]
+WEATHER_WORDS = ["clear", "cloudy", "rain", "partly cloudy", "snow", "fog", "showers"]
+
+
+def compaction():
+    import random
+    rng = random.Random(3)
+    samples = []
+    for n in range(640):
+        name, like = rng.choice(NAMES), rng.choice(LIKES)
+        city = rng.choice(TRIP_CITIES)
+        temp, cond = rng.randint(-5, 33), rng.choice(WEATHER_WORDS)
+        trip, month = rng.choice(TRIP_CITIES), rng.choice(MONTHS)
+        task = rng.choice(TASKS)
+        a, b = rng.randint(12, 99), rng.randint(3, 40)
+        parts, keep = [], []
+        hello, reply = rng.choice(HELLOS)
+        parts.append((hello % name, reply % name))
+        keep.append("The user is %s." % name)
+        picks = rng.sample(["like", "trip", "weather", "task", "math", "chat", "chat"], k=rng.randint(2, 5))
+        for pick in picks:
+            if pick == "like":
+                parts.append((rng.choice(["I really like %s.", "I love %s.", "%s is my favourite thing."]) % like,
+                              "Nice! %s is a good choice." % like.capitalize()))
+                keep.append("They like %s." % like)
+            elif pick == "trip":
+                parts.append(("I'm going to %s in %s." % (trip, month), "That sounds great. Anything I can help you plan?"))
+                keep.append("They are travelling to %s in %s." % (trip, month))
+            elif pick == "weather":
+                parts.append(("What's the weather in %s?" % city,
+                              "It's %d °C and %s in %s right now." % (temp, cond, city)))
+                keep.append("The weather in %s was %d °C and %s." % (city, temp, cond))
+            elif pick == "task":
+                parts.append((rng.choice(["Remind me to %s later.", "I need to %s.", "Note: %s."]) % task,
+                              "I'll note that: %s." % task))
+                keep.append("They want to %s." % task.replace("my ", "their "))
+            elif pick == "math":
+                parts.append(("What is %d times %d?" % (a, b), "%d × %d = %d." % (a, b, a * b)))
+                keep.append("%d × %d = %d." % (a, b, a * b))
+            else:
+                parts.append(rng.choice(SMALL))
+        context = "\n".join("User: %s\nMagi: %s" % pair for pair in parts)
+        samples.append({"context": context, "compact": " ".join(keep)})
+    return samples
+
+
+# ---- simple questions and short answers ------------------------------------------------
+#
+# A small model learns best from many short questions with short answers: small sums
+# worked out in its head (big ones go to the calculator), capitals, and everyday facts.
+
+CAPITALS = [
+    ("France", "Paris"), ("Germany", "Berlin"), ("Italy", "Rome"), ("Spain", "Madrid"), ("Portugal", "Lisbon"),
+    ("the United Kingdom", "London"), ("Ireland", "Dublin"), ("Norway", "Oslo"), ("Sweden", "Stockholm"),
+    ("Finland", "Helsinki"), ("Denmark", "Copenhagen"), ("Poland", "Warsaw"), ("Greece", "Athens"),
+    ("Austria", "Vienna"), ("the Netherlands", "Amsterdam"), ("Belgium", "Brussels"), ("Switzerland", "Bern"),
+    ("Russia", "Moscow"), ("Ukraine", "Kyiv"), ("Turkey", "Ankara"), ("Egypt", "Cairo"), ("Kenya", "Nairobi"),
+    ("Nigeria", "Abuja"), ("South Africa", "Pretoria"), ("Morocco", "Rabat"), ("Japan", "Tokyo"),
+    ("China", "Beijing"), ("South Korea", "Seoul"), ("India", "New Delhi"), ("Thailand", "Bangkok"),
+    ("Vietnam", "Hanoi"), ("Indonesia", "Jakarta"), ("Australia", "Canberra"), ("New Zealand", "Wellington"),
+    ("Canada", "Ottawa"), ("the United States", "Washington, D.C."), ("Mexico", "Mexico City"),
+    ("Brazil", "Brasília"), ("Argentina", "Buenos Aires"), ("Chile", "Santiago"), ("Peru", "Lima"),
+    ("Colombia", "Bogotá"),
+]
+EVERYDAY = [
+    ("How many days are in a week?", "Seven."),
+    ("How many months are in a year?", "Twelve."),
+    ("How many hours are in a day?", "Twenty-four."),
+    ("How many minutes are in an hour?", "Sixty."),
+    ("How many seconds are in a minute?", "Sixty."),
+    ("How many days are in a year?", "365, or 366 in a leap year."),
+    ("How many legs does a spider have?", "Eight."),
+    ("How many legs does a dog have?", "Four."),
+    ("How many legs does a bird have?", "Two."),
+    ("How many wheels does a bicycle have?", "Two."),
+    ("What colour is the sky on a clear day?", "Blue."),
+    ("What colour is grass?", "Green."),
+    ("What colour is snow?", "White."),
+    ("What colour are bananas when they are ripe?", "Yellow."),
+    ("What do you get if you mix blue and yellow?", "Green."),
+    ("What do you get if you mix red and white?", "Pink."),
+    ("What is the largest planet in the solar system?", "Jupiter."),
+    ("Which planet is closest to the Sun?", "Mercury."),
+    ("Which planet do we live on?", "Earth."),
+    ("What is the closest star to Earth?", "The Sun."),
+    ("At what temperature does water boil at sea level?", "100 °C (212 °F)."),
+    ("At what temperature does water freeze?", "0 °C (32 °F)."),
+    ("What is frozen water called?", "Ice."),
+    ("What gas do people breathe in to live?", "Oxygen."),
+    ("What gas do plants take in?", "Carbon dioxide."),
+    ("What is the biggest ocean?", "The Pacific Ocean."),
+    ("What is the tallest mountain in the world?", "Mount Everest."),
+    ("What is the longest river in the world?", "The Nile is usually named the longest, with the Amazon close behind."),
+    ("How many continents are there?", "Seven."),
+    ("What animal says moo?", "A cow."),
+    ("What animal says meow?", "A cat."),
+    ("What animal barks?", "A dog."),
+    ("What do bees make?", "Honey."),
+    ("What is the baby of a cat called?", "A kitten."),
+    ("What is the baby of a dog called?", "A puppy."),
+    ("What is the opposite of up?", "Down."),
+    ("What is the opposite of happy?", "Sad."),
+    ("What is the opposite of big?", "Small."),
+    ("What is the opposite of fast?", "Slow."),
+    ("What is the opposite of open?", "Closed."),
+    ("What is the plural of mouse?", "Mice."),
+    ("What is the plural of child?", "Children."),
+    ("What is the plural of tooth?", "Teeth."),
+    ("What is the past tense of go?", "Went."),
+    ("What is the past tense of eat?", "Ate."),
+    ("Which day comes after Friday?", "Saturday."),
+    ("Which day comes before Monday?", "Sunday."),
+    ("Which month comes after March?", "April."),
+    ("Which month comes after December?", "January."),
+    ("What is the first letter of the alphabet?", "A."),
+    ("What is the last letter of the alphabet?", "Z."),
+    ("How many letters are in the English alphabet?", "26."),
+    ("What shape has three sides?", "A triangle."),
+    ("What shape has four equal sides?", "A square."),
+    ("How many sides does a hexagon have?", "Six."),
+    ("What do you call a word that means the same as another word?", "A synonym."),
+    ("What is H2O?", "Water."),
+    ("What language is mostly spoken in Brazil?", "Portuguese."),
+    ("What language is spoken in Japan?", "Japanese."),
+    ("What is a programming language often used for data and AI?", "Python."),
+    ("In Python, how do you print hello?", "print(\"hello\")"),
+    ("In Python, how do you make a list of 1, 2 and 3?", "[1, 2, 3]"),
+    ("What does CPU stand for?", "Central processing unit."),
+    ("What does AI stand for?", "Artificial intelligence."),
+]
+SUM_WAYS = [("What is {a} plus {b}?", "+", lambda a, b: a + b), ("What is {a} + {b}?", "+", lambda a, b: a + b),
+            ("What is {a} minus {b}?", "-", lambda a, b: a - b), ("What is {a} times {b}?", "×", lambda a, b: a * b),
+            ("How much is {a} times {b}?", "×", lambda a, b: a * b), ("What is {a} × {b}?", "×", lambda a, b: a * b)]
+
+
+def simple_qa():
+    import random
+    rng = random.Random(5)
+    samples = []
+    # Known by heart: answered straight away at the standard effort, with a line of thought at the superior one.
+    for country, city in CAPITALS:
+        ask = "What is the capital of %s?" % country
+        samples.append({"effort": "standard", "prompt": ask, "response": city + "."})
+        samples.append({"effort": "superior", "prompt": ask, "thinking": "The capital of %s is %s." % (country, city),
+                        "response": city + "."})
+    for ask, answer in EVERYDAY:
+        samples.append({"effort": "standard", "prompt": ask, "response": answer})
+    seen = set()
+    while len(seen) < 260:
+        a, b = rng.randint(0, 12), rng.randint(0, 12)
+        way, sign, work = rng.choice(SUM_WAYS)
+        if sign == "-" and b > a:
+            a, b = b, a
+        key = (a, b, way)
+        if key in seen:
+            continue
+        seen.add(key)
+        result = work(a, b)
+        samples.append({"effort": "standard", "prompt": way.format(a=a, b=b), "response": "%d." % result})
+        samples.append({"effort": "superior", "prompt": way.format(a=a, b=b),
+                        "thinking": "%d %s %d = %d." % (a, sign, b, result), "response": "%d." % result})
+    return samples
+
+
 def write(name, lines):
     with open(os.path.join(HERE, name), "w", encoding="utf-8", newline="\n") as handle:
         for line in lines:
@@ -649,8 +971,6 @@ def write(name, lines):
 
 def main():
     write("language.md", [LANGUAGE.strip()])
-    sentences = facts()
-    write("facts.md", ["\n".join(sentences[i:i + 6]) + "\n" for i in range(0, len(sentences), 6)])
 
     chat = [{"prompt": q, "response": a} for q, a in CHAT]
     # With tools offered too: a question no tool is needed for is still answered straight away.
@@ -658,19 +978,9 @@ def main():
     chat += [{"messages": m} for m in CONVERSATIONS]
     write("chat.jsonl", chat)
 
-    # Magi-F1 has two reasoning efforts: "standard" (a line of thought at most) and
-    # "superior" (careful steps, then a check). Thinking on or off is apart from it.
-    reasoning = []
-    for question, answer, low, medium, high in REASONING:
-        reasoning.append({"effort": "standard", "prompt": question, "thinking": low, "response": answer})
-        reasoning.append({"effort": "superior", "prompt": question, "thinking": high, "response": answer})
-        # Thinking it through, not reaching for a tool, when tools are offered.
-        reasoning.append({"effort": "superior", "tools": DEFAULT_TOOLS, "prompt": question, "thinking": medium,
-                          "response": answer})
-    for question, answer, thinking in MORE_REASONING:
-        reasoning.append({"effort": "superior", "prompt": question, "thinking": thinking, "response": answer})
-        reasoning.append({"effort": "standard", "prompt": question, "response": answer})
-    write("reasoning.jsonl", reasoning)
+    # Magi is an agent, not a calculator or a book of facts: no facts.md or reasoning.jsonl any more
+    # (arithmetic goes to the calculator, facts to MagiDB and the web). Long pieces of work are
+    # make_work_data.py's.
 
     write("tools.jsonl", TOOLS)
 
@@ -685,9 +995,17 @@ def main():
             titles.append({"messages": [user(question), say(answer), user(ask), say(reply)]})
     write("titles.jsonl", titles)
 
+    write("knowing.jsonl", knowing())
+    write("compaction.jsonl", compaction())
+    write("simple_qa.jsonl", simple_qa())
+    # Thinking when it helps, tools in a row, errors, what no tool can do, small talk, longer answers.
+    import make_agent_data as agentic
+    write("thinking.jsonl", agentic.thinking())
+    write("agent.jsonl", agentic.agent())
+    write("small_talk.jsonl", agentic.small_talk())
+    write("explain.jsonl", agentic.explain())
     write("avoid.jsonl", AVOID)
-    print("wrote", len(chat), "chat,", len(reasoning), "reasoning,", len(TOOLS), "tool,", len(titles), "title and",
-          len(AVOID), "avoid samples")
+    print("wrote", len(chat), "chat,", len(TOOLS), "tool,", len(titles), "title and", len(AVOID), "avoid samples")
 
 
 if __name__ == "__main__":

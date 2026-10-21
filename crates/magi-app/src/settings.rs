@@ -119,6 +119,12 @@ impl Default for ExportChoices {
 #[serde(default)]
 pub struct Settings {
     pub tab: Tab,
+    /// Where the dataset editor generates samples: an OpenAI-compatible endpoint.
+    pub generator: crate::magic::generate::GeneratorSettings,
+    /// MagiDB's online address (raw files); empty: MacroMagi/MagiDB on GitHub.
+    pub magidb_url: String,
+    /// A folder of MagiDB pages to read instead of the downloaded copy (a checkout being written).
+    pub magidb_dir: Option<PathBuf>,
     /// The Auto Clicker tab's current settings.
     pub clicker: AutoClickerConfig,
     /// Stops everything, always.
@@ -182,24 +188,23 @@ pub struct Settings {
     /// While a model trains, the Magic tab shows only the training, and the
     /// background picture and see-through panels are off.
     pub optimize_training: bool,
+    /// A sound and a desktop notification when a training run of more than a minute ends.
+    pub notify_after_training: bool,
     /// The Magic tab's console, and the panel of the selected block.
     pub magic_console: bool,
     pub magic_panel: bool,
     /// The graphics cards training uses (CUDA numbers): `None` is the first
     /// one there is; an empty list is the CPU.
     pub train_gpus: Option<Vec<u32>>,
-    /// The llama.cpp build GGUF models run with; `None`: the most capable installed.
-    pub llama_build: Option<crate::components::Component>,
-    /// Layers of a GGUF model put on graphics cards (999: all of them; 0: the CPU only).
-    pub llama_gpu_layers: u32,
-    /// The devices llama.cpp uses (`CUDA0`…); empty: its own choice.
-    pub llama_devices: Vec<String>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             tab: Tab::AutoClicker,
+            generator: crate::magic::generate::GeneratorSettings::default(),
+            magidb_url: String::new(),
+            magidb_dir: None,
             clicker: AutoClickerConfig::default(),
             stop_hotkey: Hotkey::key(Key::F8),
             record_hotkey: Hotkey::key(Key::F9),
@@ -235,12 +240,10 @@ impl Default for Settings {
             recent_files: Vec::new(),
             recent_models: Vec::new(),
             optimize_training: true,
+            notify_after_training: true,
             magic_console: true,
             magic_panel: true,
             train_gpus: None,
-            llama_build: None,
-            llama_gpu_layers: 999,
-            llama_devices: Vec::new(),
         }
     }
 }

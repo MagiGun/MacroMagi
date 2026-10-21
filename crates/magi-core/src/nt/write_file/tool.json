@@ -1,0 +1,27 @@
+{
+  "name": "write_file",
+  "description": "Writes a text file (a new one, or all of one). Asks the user first.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string",
+        "description": "the file's path"
+      },
+      "text": {
+        "type": "string",
+        "description": "everything the file is to hold"
+      }
+    },
+    "required": [
+      "path",
+      "text"
+    ]
+  },
+  "run": {
+    "kind": "python",
+    "entry": "run.py",
+    "timeout_ms": 60000
+  },
+  "confirm": true
+}

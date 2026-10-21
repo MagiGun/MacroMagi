@@ -2,6 +2,8 @@
 //! model being edited, and trying it out live.
 
 pub mod export_python;
+pub mod generate;
+pub mod host_tools;
 pub mod import;
 pub mod train;
 
@@ -14,7 +16,7 @@ use magi_core::geom::Displays;
 use magi_core::graph::{Fragment, Node, PortRef, Wire};
 use magi_core::host::Host;
 use magi_core::input::InputEvent;
-use magi_core::magic::{DataItem, Decision, MagicFile, MagicModel, ModelKind};
+use magi_core::magic::{DataItem, Decision, MagicFile, MagicModel, ModelKind, TextSpec};
 use magi_core::nodes::ai::AiWatchParams;
 use magi_core::nodes::flow::StartParams;
 use magi_core::nodes::notes::CommentParams;
@@ -74,6 +76,18 @@ impl MagicDoc {
         doc.sync_canvas();
         doc.history = History::new(&doc.snapshot());
         doc.saved = doc.path.as_ref().map(|_| (doc.file.model.clone(), 0));
+        // An ONNX copy of a text model the native engine runs from its weights is not kept – it
+        // doubled the memory a trained model takes – unless Compile Package saves one.
+        let native = doc.file.model.architecture.as_ref().is_some_and(|a| a.native_problem().is_none());
+        if doc.file.model.kind == ModelKind::Text
+            && native
+            && !doc.file.weights.is_empty()
+            && !doc.file.onnx.is_empty()
+            && !doc.compile_settings().is_some_and(|c| c.onnx)
+        {
+            doc.file.onnx = Vec::new();
+            doc.shape = None;
+        }
         doc
     }
 
@@ -157,6 +171,9 @@ impl MagicDoc {
         self.files_changed();
         self.file.onnx = trained.onnx;
         self.file.weights = trained.weights;
+        if let Some(tokenizer) = trained.tokenizer {
+            self.set_tokenizer(tokenizer);
+        }
         let model = &mut self.file.model;
         model.kind = trained.kind;
         model.architecture = Some(trained.architecture);
@@ -172,7 +189,7 @@ impl MagicDoc {
                 node.set_param("value", value.clone());
             }
         }
-        self.shape = magi_ml::inspect(&self.file.onnx).ok();
+        self.shape = (!self.file.onnx.is_empty()).then(|| magi_ml::inspect(&self.file.onnx).ok()).flatten();
         self.sync_canvas();
     }
 
@@ -221,18 +238,15 @@ impl MagicDoc {
     }
 
     /// Saves the package as the Compile block says, into a folder of its own:
-    /// the `.magic` workspace, the Magi model (`szi/`), and a `.gguf`, a copy
-    /// in LM Studio, a Hugging Face folder and an ONNX file when asked for and
-    /// possible. Returns what was written, and what was skipped and why.
+    /// the `.magic` workspace, the Magi model (one `.szi` file) and an ONNX file
+    /// when asked for. Returns what was written, and what was skipped and why.
     pub fn compile(&mut self) -> Result<(Vec<PathBuf>, Vec<String>), String> {
         let params = self.compile_settings().ok_or("Add a Compile Package block to the canvas.")?;
         if params.folder.trim().is_empty() {
             return Err("Choose the folder Compile Package saves into.".into());
         }
-        if !(params.magic || params.szi || params.gguf || params.lmstudio || params.huggingface || params.onnx) {
-            return Err(
-                "Choose what Compile Package saves: the .magic workspace, the .szi model or another format.".into()
-            );
+        if !(params.magic || params.szi || params.onnx) {
+            return Err("Choose what Compile Package saves: the .magic workspace, the .szi model or ONNX.".into());
         }
         let title = self.title();
         let stem = file_stem(if params.file.trim().is_empty() { &title } else { params.file.trim() });
@@ -241,16 +255,16 @@ impl MagicDoc {
         std::fs::create_dir_all(&project)
             .map_err(|e| format!("The folder {} could not be made: {e}", project.display()))?;
         let mut written = Vec::new();
-        let mut skipped = Vec::new();
-        let text = self.file.model.kind == ModelKind::Text;
+        let skipped = Vec::new();
         let trained = !self.file.weights.is_empty() || !self.file.onnx.is_empty();
         if self.file.model.blocks.is_none() {
             self.file.model.blocks = Some(starter_blocks(&self.file.model, "", &Registry::builtin()));
         }
 
-        // The Magi model: its weights and its native tools.
+        // The Magi model: one .szi file with its weights and its native tools.
         if params.szi && trained {
-            let szi = magi_core::szi::write(&self.file, &project.join("szi"), &stem, !self.file.onnx.is_empty())
+            let szi = project.join(format!("{stem}.{}", magi_core::szi::EXTENSION));
+            magi_core::szi::write(&self.file, &szi, params.onnx)
                 .map_err(|e| format!("Could not write the Magi model: {e}"))?;
             self.file.model.package = Some(szi.display().to_string());
             written.push(szi);
@@ -269,38 +283,6 @@ impl MagicDoc {
             written.insert(0, path);
         }
 
-        let exportable =
-            self.file.model.architecture.as_ref().is_some_and(|a| a.gguf_compatible()) && !self.file.weights.is_empty();
-        if (params.gguf || params.lmstudio || params.huggingface) && text && !exportable {
-            skipped.push(
-                "GGUF, LM Studio and Hugging Face need Transformer Layers in the Llama, Qwen3 or Gemma 3 layout; the \
-                 .szi model (and an ONNX file, if chosen) hold this model."
-                    .to_owned(),
-            );
-        } else if text {
-            if params.gguf {
-                let quant = magi_core::export::Quant::parse(&params.quant).unwrap_or_default();
-                // The quantization ends the name, as LM Studio and others expect.
-                let folder = project.join("gguf");
-                std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
-                let gguf = folder.join(format!("{stem}-{}.gguf", quant.name()));
-                let bytes = magi_core::export::gguf_with(&self.file.model, &self.file.weights, quant)
-                    .map_err(|e| e.to_string())?;
-                std::fs::write(&gguf, bytes).map_err(|e| format!("Could not save {}: {e}", gguf.display()))?;
-                written.push(gguf);
-            }
-            if params.lmstudio {
-                match self.add_to_lmstudio() {
-                    Ok(paths) => written.extend(paths),
-                    Err(error) => skipped.push(error),
-                }
-            }
-            if params.huggingface {
-                let hf = project.join("huggingface");
-                magi_core::export::huggingface(&self.file.model, &self.file.weights, &hf).map_err(|e| e.to_string())?;
-                written.push(hf);
-            }
-        }
         if params.onnx && !self.file.onnx.is_empty() {
             let folder = project.join("onnx");
             std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
@@ -309,71 +291,6 @@ impl MagicDoc {
             written.push(onnx);
         }
         Ok((written, skipped))
-    }
-
-    /// Puts this model into LM Studio: a GGUF file of its own (at the Compile
-    /// block's LM Studio precision) into its models folder
-    /// (`<owner>/<Name>-GGUF/`), and a `model.yaml` with a `manifest.json` into
-    /// its hub folder, so LM Studio shows the model's size, context, Enable
-    /// Thinking and Reasoning Effort. The file is marked as the hub model's
-    /// own, so My Models lists the model once. Returns what was written.
-    pub fn add_to_lmstudio(&self) -> Result<Vec<PathBuf>, String> {
-        let root = lmstudio_root().ok_or(
-            "LM Studio was not found (its folder is .lmstudio in your home folder). Install and open it once first.",
-        )?;
-        let model = &self.file.model;
-        if !model.architecture.as_ref().is_some_and(|a| a.gguf_compatible()) || self.file.weights.is_empty() {
-            return Err(
-                "LM Studio needs a trained model of Transformer Layers (Llama, Qwen3 or Gemma 3 layout).".into()
-            );
-        }
-        let params = self.compile_settings().unwrap_or_default();
-        let quant = magi_core::export::Quant::parse(&params.lmstudio_quant).unwrap_or_default();
-        let exported = magi_core::export::describe(model, &self.file.weights).map_err(|e| e.to_string())?;
-        let owner = lmstudio_owner(model);
-        let stem = file_stem(&self.title()).replace(' ', "-");
-        let repo = format!("{stem}-GGUF");
-        let folder = root.join("models").join(&owner).join(&repo);
-        std::fs::create_dir_all(&folder).map_err(|e| format!("Could not make {}: {e}", folder.display()))?;
-        let name = format!("{stem}-{}.gguf", quant.name());
-        let copy = folder.join(&name);
-        let bytes = magi_core::export::gguf_with(model, &self.file.weights, quant).map_err(|e| e.to_string())?;
-        std::fs::write(&copy, &bytes).map_err(|e| format!("Could not save the GGUF file into LM Studio: {e}"))?;
-        // Files of other precisions written before would be listed too.
-        if let Ok(entries) = std::fs::read_dir(&folder) {
-            for entry in entries.flatten() {
-                let other = entry.file_name().to_string_lossy().into_owned();
-                if other != name && other.starts_with(&format!("{stem}-")) && other.ends_with(".gguf") {
-                    let _ = std::fs::remove_file(entry.path());
-                }
-            }
-        }
-        let hub = root
-            .join("hub")
-            .join("models")
-            .join(magi_core::export::lmstudio_key(&owner))
-            .join(magi_core::export::lmstudio_key(&model.name));
-        std::fs::create_dir_all(&hub).map_err(|e| format!("Could not make {}: {e}", hub.display()))?;
-        let yaml = magi_core::export::lmstudio_model_yaml(model, &exported, &owner, &repo, bytes.len() as u64)
-            .map_err(|e| e.to_string())?;
-        std::fs::write(hub.join("model.yaml"), yaml).map_err(|e| format!("Could not write model.yaml: {e}"))?;
-        std::fs::write(hub.join("manifest.json"), magi_core::export::lmstudio_manifest(model, &owner, &repo))
-            .map_err(|e| format!("Could not write manifest.json: {e}"))?;
-        lmstudio_mark_part_of_model(&root, &format!("{owner}/{repo}/{name}"))?;
-        Ok(vec![copy, hub.join("model.yaml")])
-    }
-
-    /// The GGUF file the last compile wrote for this model, if it is there.
-    pub fn compiled_gguf(&self) -> Option<PathBuf> {
-        let params = self.compile_settings()?;
-        if !params.gguf || params.folder.trim().is_empty() {
-            return None;
-        }
-        let title = self.title();
-        let stem = file_stem(if params.file.trim().is_empty() { &title } else { params.file.trim() });
-        let quant = magi_core::export::Quant::parse(&params.quant).unwrap_or_default();
-        let name = format!("{stem}-{}.gguf", quant.name());
-        Some(PathBuf::from(params.folder.trim()).join(&stem).join("gguf").join(name)).filter(|p| p.is_file())
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -419,51 +336,321 @@ impl MagicDoc {
     }
 }
 
-/// LM Studio's own folder: `.lmstudio` in the home folder (or `MAGI_LMSTUDIO_DIR`).
-pub fn lmstudio_root() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("MAGI_LMSTUDIO_DIR") {
-        return Some(PathBuf::from(dir));
-    }
-    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
-    Some(PathBuf::from(home).join(".lmstudio")).filter(|p| p.is_dir())
+/// Where a training starts, and which stages it runs.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TrainChoice {
+    pub from: TrainFrom,
+    /// The stages to run (their blocks); empty: all of them.
+    pub stages: Vec<magi_core::graph::NodeId>,
 }
 
-/// Marks a GGUF file in LM Studio's models folder as part of a hub model
-/// (`"transitive"` in `.internal/model-data.json`), as LM Studio marks the
-/// files it downloads for one. Without it, My Models lists the file a second
-/// time, apart from the model. The list is backed up first, as
-/// `model-data.json.bak`.
-fn lmstudio_mark_part_of_model(root: &std::path::Path, key: &str) -> Result<(), String> {
-    use serde_json::Value;
-    let path = root.join(".internal").join("model-data.json");
-    // LM Studio writes it on its first start; until then there is nothing to mark.
-    let Ok(raw) = std::fs::read(&path) else { return Ok(()) };
-    let mut data: Value = serde_json::from_slice(&raw)
-        .map_err(|e| format!("LM Studio's model list could not be read ({}): {e}", path.display()))?;
-    let entries = data
-        .get_mut("json")
-        .and_then(Value::as_array_mut)
-        .ok_or_else(|| format!("LM Studio's model list is not as expected: {}", path.display()))?;
-    match entries.iter_mut().find(|entry| entry.get(0).and_then(Value::as_str) == Some(key)) {
-        Some(entry) => match entry.get_mut(1).and_then(Value::as_object_mut) {
-            Some(record) if record.get("transitive") == Some(&Value::Bool(true)) => return Ok(()),
-            Some(record) => {
-                record.insert("transitive".into(), Value::Bool(true));
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum TrainFrom {
+    /// As the canvas's start says: new weights, or the base model's.
+    #[default]
+    Start,
+    /// The weights saved after a stage (its block).
+    Checkpoint(magi_core::graph::NodeId),
+    /// The model as it was last trained.
+    Trained,
+}
+
+/// The weights saved after a stage of the last training that ran it.
+#[derive(Clone, Debug)]
+pub struct Checkpoint {
+    pub stage: magi_core::graph::NodeId,
+    pub path: PathBuf,
+    pub saved: Option<std::time::SystemTime>,
+    pub loss: Option<f64>,
+}
+
+impl MagicDoc {
+    /// Learns a learned tokenizer's pieces from the datasets the canvas trains
+    /// on (and keeps them in the Text block). Returns how many, or `None` when
+    /// the model's tokens are bytes.
+    pub fn learn_tokens(&mut self) -> Option<usize> {
+        let text = self.file.model.text.as_ref()?;
+        if !text.tokenizer.learned() {
+            return None;
+        }
+        let mut files: Vec<String> = studio::stage_files(&self.studio.graph).into_iter().flat_map(|(_, f)| f).collect();
+        files.sort();
+        files.dedup();
+        let mut texts: Vec<String> = Vec::new();
+        for file in &files {
+            let Some(bytes) = self.file.data.get(file) else { continue };
+            let content = String::from_utf8_lossy(bytes);
+            let jsonl = studio::is_jsonl(file);
+            for sample in studio::split_samples(file, &content) {
+                texts.extend(magi_core::dataset::texts(&sample, jsonl));
             }
-            None => return Ok(()),
-        },
-        None => entries.push(serde_json::json!([key, { "transitive": true }])),
+        }
+        let mut spec = text.clone();
+        let count = spec.learn_tokens(texts.iter().map(String::as_str));
+        self.set_tokenizer(spec.tokenizer);
+        Some(count)
     }
-    let backup = root.join(".internal").join("model-data.json.bak");
-    std::fs::write(&backup, &raw).map_err(|e| format!("Could not back up {}: {e}", path.display()))?;
-    let text = serde_json::to_vec(&data).map_err(|e| e.to_string())?;
-    std::fs::write(&path, text).map_err(|e| format!("Could not update {}: {e}", path.display()))
+
+    /// Whether training reads a corpus where it runs (a Hugging Face Dataset block): then learned
+    /// tokens are learned there, from it, rather than here from the files alone.
+    pub fn reads_corpus(&self) -> bool {
+        studio::pipeline(&self.studio.graph).is_ok_and(|p| {
+            p.stages
+                .iter()
+                .flat_map(|s| &s.data)
+                .any(|(node, _)| self.studio.graph.node(*node).is_some_and(|n| n.kind == studio::kinds::CORPUS))
+        })
+    }
+
+    /// Learned tokens to learn again where training runs (their pieces dropped, their size kept).
+    pub fn forget_tokens(&mut self) {
+        if let Some(text) =
+            self.file.model.text.as_ref().filter(|t| t.tokenizer.learned() && !t.tokenizer.merges.is_empty())
+        {
+            self.set_tokenizer(magi_core::magic::TokenizerSpec::learned_of(text.tokenizer.size));
+        }
+    }
+
+    /// The model's tokens, put into the Text block, where the model's text setup lives.
+    fn set_tokenizer(&mut self, tokenizer: magi_core::magic::TokenizerSpec) {
+        let value = {
+            let mut model = self.file.model.clone();
+            if let Some(text) = model.text.as_mut() {
+                text.tokenizer = tokenizer;
+            }
+            studio::section_of(studio::kinds::TEXT, &model)
+        };
+        for node in self.studio.graph.nodes_mut().filter(|n| n.kind == studio::kinds::TEXT) {
+            node.set_param("value", value.clone());
+        }
+        self.sync_canvas();
+    }
+
+    /// When the canvas starts from a base model file (Load Base Model), the model reads text in the
+    /// base's tokens – its weights learned those pieces – and its architecture blocks must be the
+    /// base's. Takes the tokens; says what it did, or why it cannot start from that base.
+    pub fn take_base_tokens(&mut self) -> Result<Option<String>, String> {
+        let Ok(pipeline) = studio::pipeline(&self.studio.graph) else { return Ok(None) };
+        if pipeline.entry.kind != studio::kinds::BASE {
+            return Ok(None);
+        }
+        let params: studio::BaseParams = pipeline.entry.params_or_default();
+        if params.path.trim().is_empty() {
+            return Ok(None);
+        }
+        let base = magi_core::szi::open(std::path::Path::new(params.path.trim()))
+            .map_err(|e| format!("The base model could not be opened: {e}"))?;
+        let (Some(theirs), Some(mine)) = (base.model.text.as_ref(), self.file.model.text.as_ref()) else {
+            return Ok(None);
+        };
+        let mut note = None;
+        if theirs.tokenizer != mine.tokenizer {
+            self.set_tokenizer(theirs.tokenizer.clone());
+            note = Some(if theirs.tokenizer.merges.is_empty() {
+                "Uses the base model's tokens: bytes.".to_owned()
+            } else {
+                format!("Uses the base model's tokens: {} pieces of words.", theirs.tokenizer.merges.len())
+            });
+        }
+        if let Some(architecture) = &base.model.architecture {
+            let base_key = Self::architecture_key(architecture, base.model.text.as_ref());
+            if Self::architecture_key(&pipeline.architecture, self.file.model.text.as_ref()) != base_key {
+                return Err(format!(
+                    "The architecture blocks are not the base model's ({} layers, {} wide; its tags and tools \
+                     decide its vocabulary too). File › New text model from a base sets them up.",
+                    architecture.layers.len(),
+                    architecture.width
+                ));
+            }
+        }
+        Ok(note)
+    }
+
+    /// The project's own folder (Compile's *Save into*, then its name).
+    pub fn project_dir(&self) -> Option<PathBuf> {
+        let params = self.compile_settings()?;
+        if params.folder.trim().is_empty() {
+            return None;
+        }
+        let title = self.title();
+        let stem = file_stem(if params.file.trim().is_empty() { &title } else { params.file.trim() });
+        Some(PathBuf::from(params.folder.trim()).join(stem))
+    }
+
+    /// Where the weights after each stage are kept.
+    pub fn checkpoint_dir(&self) -> Option<PathBuf> {
+        self.project_dir().map(|dir| dir.join("checkpoints"))
+    }
+
+    /// What the weights' shapes depend on, as a short key: checkpoints made with
+    /// another architecture do not fit.
+    pub fn architecture_key(architecture: &magi_core::magic::Architecture, text: Option<&TextSpec>) -> String {
+        let mut value = serde_json::to_value(architecture).unwrap_or_default();
+        // The tokens decide the size of the embedding table.
+        if let (Some(object), Some(text)) = (value.as_object_mut(), text) {
+            object.insert("vocabulary".into(), serde_json::json!(text.vocab_size()));
+            object.insert("pieces".into(), serde_json::json!(text.tokenizer.merges));
+        }
+        if let Some(object) = value.as_object_mut() {
+            // Neither changes a weight's shape.
+            object.remove("blocks");
+            object.remove("rope_scaling");
+        }
+        // FNV-1a: stable across versions, unlike the standard hasher.
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in value.to_string().bytes() {
+            hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+        }
+        format!("{hash:016x}")
+    }
+
+    /// The checkpoints that fit the canvas as it is, in the order of its stages.
+    pub fn checkpoints(&self) -> Vec<Checkpoint> {
+        let (Some(dir), Ok(pipeline)) = (self.checkpoint_dir(), studio::pipeline(&self.studio.graph)) else {
+            return Vec::new();
+        };
+        let key = Self::architecture_key(&pipeline.architecture, self.file.model.text.as_ref());
+        let mut found = Vec::new();
+        for stage in &pipeline.stages {
+            let path = dir.join(format!("{}.safetensors", stage.node));
+            let Ok(meta) = std::fs::read(dir.join(format!("{}.json", stage.node))) else { continue };
+            let Ok(meta) = serde_json::from_slice::<serde_json::Value>(&meta) else { continue };
+            if !path.is_file() || meta.get("architecture").and_then(|a| a.as_str()) != Some(key.as_str()) {
+                continue;
+            }
+            let saved = meta
+                .get("saved")
+                .and_then(serde_json::Value::as_f64)
+                .map(|s| std::time::UNIX_EPOCH + std::time::Duration::from_secs_f64(s.max(0.0)));
+            found.push(Checkpoint { stage: stage.node, path, saved, loss: meta.get("loss").and_then(|l| l.as_f64()) });
+        }
+        found
+    }
+
+    /// The weights kept after a stage as a base model (`.szi`): the model's description with the
+    /// canvas's architecture and tokens, those weights and its native tools – to fine-tune others from.
+    pub fn save_base(&self, stage: magi_core::graph::NodeId, path: &std::path::Path, name: &str) -> Result<(), String> {
+        let checkpoint = self
+            .checkpoints()
+            .into_iter()
+            .find(|c| c.stage == stage)
+            .ok_or("No weights are kept after that stage for this architecture: train it first.")?;
+        let weights =
+            std::fs::read(&checkpoint.path).map_err(|e| format!("The kept weights could not be read: {e}"))?;
+        let pipeline = studio::pipeline(&self.studio.graph)?;
+        let mut model = self.file.model.clone();
+        model.name = name.to_owned();
+        model.architecture = Some(pipeline.architecture.clone());
+        let stages: Vec<String> = pipeline
+            .stages
+            .iter()
+            .take_while(|s| s.node != stage)
+            .chain(pipeline.stages.iter().filter(|s| s.node == stage))
+            .map(|s| s.kind.trim_start_matches("magic.").to_owned())
+            .collect();
+        model.trained = Some(magi_core::magic::TrainingRecord {
+            stages,
+            loss: checkpoint.loss.unwrap_or(f64::NAN),
+            parameters: self.file.model.trained.as_ref().map_or(0, |t| t.parameters),
+            ..Default::default()
+        });
+        let file = MagicFile {
+            model,
+            weights,
+            onnx: Vec::new(),
+            data: self
+                .file
+                .data
+                .iter()
+                .filter(|(p, _)| p.starts_with("nt/"))
+                .map(|(p, b)| (p.clone(), b.clone()))
+                .collect(),
+        };
+        magi_core::szi::write(&file, path, false).map_err(|e| format!("Could not save {}: {e}", path.display()))
+    }
+
+    /// Whether the trained model fits the canvas's architecture (so it can be trained further).
+    pub fn trained_fits(&self) -> bool {
+        let Ok(pipeline) = studio::pipeline(&self.studio.graph) else { return false };
+        !self.file.weights.is_empty()
+            && self.file.model.architecture.as_ref().is_some_and(|a| {
+                let text = self.file.model.text.as_ref();
+                Self::architecture_key(a, text) == Self::architecture_key(&pipeline.architecture, text)
+            })
+    }
+
+    /// A stage's name as people say it, with its own title when it has one.
+    pub fn stage_title(&self, stage: magi_core::graph::NodeId) -> String {
+        let Some(node) = self.studio.graph.node(stage) else { return "?".into() };
+        if !node.label.trim().is_empty() {
+            return node.label.clone();
+        }
+        studio::registry().get(&node.kind).map(|d| d.name.clone()).unwrap_or_default()
+    }
+
+    /// Training from a stage: from the weights saved after the stage before it
+    /// (or from the start, for the first), through the stages after it.
+    pub fn train_from_here(&self, stage: magi_core::graph::NodeId) -> Result<TrainChoice, String> {
+        let pipeline = studio::pipeline(&self.studio.graph)?;
+        let index =
+            pipeline.stages.iter().position(|s| s.node == stage).ok_or("This stage is not on the Model wire.")?;
+        let stages: Vec<_> = pipeline.stages[index..].iter().map(|s| s.node).collect();
+        if index == 0 {
+            return Ok(TrainChoice { from: TrainFrom::Start, stages });
+        }
+        let before = pipeline.stages[index - 1].node;
+        if !self.checkpoints().iter().any(|c| c.stage == before) {
+            return Err(format!(
+                "No weights are saved after {} yet: train once with it, then start from here.",
+                self.stage_title(before)
+            ));
+        }
+        Ok(TrainChoice { from: TrainFrom::Checkpoint(before), stages })
+    }
+
+    /// The ways to train the canvas now, each with what it does: from the start,
+    /// from after each stage that has saved weights, and each stage again on
+    /// the trained model.
+    pub fn train_choices(&self) -> Vec<(String, TrainChoice)> {
+        let mut choices = vec![("Everything, from the start".to_owned(), TrainChoice::default())];
+        let Ok(pipeline) = studio::pipeline(&self.studio.graph) else { return choices };
+        let checkpoints = self.checkpoints();
+        for index in 1..pipeline.stages.len() {
+            let before = pipeline.stages[index - 1].node;
+            if let Some(saved) = checkpoints.iter().find(|c| c.stage == before) {
+                let rest: Vec<String> = pipeline.stages[index..].iter().map(|s| self.stage_title(s.node)).collect();
+                choices.push((
+                    format!("{} on, from after {} ({})", rest.join(" → "), self.stage_title(before), ago(saved.saved)),
+                    TrainChoice {
+                        from: TrainFrom::Checkpoint(before),
+                        stages: pipeline.stages[index..].iter().map(|s| s.node).collect(),
+                    },
+                ));
+            }
+        }
+        if self.trained_fits() {
+            for stage in &pipeline.stages {
+                choices.push((
+                    format!("{} again, on the trained model", self.stage_title(stage.node)),
+                    TrainChoice { from: TrainFrom::Trained, stages: vec![stage.node] },
+                ));
+            }
+        }
+        choices
+    }
 }
 
-/// Whose model LM Studio files it under: its author, or MacroMagi.
-fn lmstudio_owner(model: &MagicModel) -> String {
-    let owner: String = model.author.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
-    if owner.is_empty() { "MacroMagi".into() } else { owner }
+/// How long ago something was, in words.
+pub fn ago(time: Option<std::time::SystemTime>) -> String {
+    let Some(seconds) = time.and_then(|t| t.elapsed().ok()).map(|d| d.as_secs()) else {
+        return "saved".into();
+    };
+    match seconds {
+        0..60 => "saved just now".into(),
+        60..3600 => format!("saved {} min ago", seconds / 60),
+        3600..86_400 => format!("saved {} h ago", seconds / 3600),
+        _ => format!("saved {} days ago", seconds / 86_400),
+    }
 }
 
 /// A name usable as a file name.
@@ -474,13 +661,13 @@ pub fn file_stem(name: &str) -> String {
     if cleaned.is_empty() { "model".into() } else { cleaned }
 }
 
-/// A new model, with a canvas ready to train it: for a text model, an
-/// example agent with its datasets, which trains in a minute or two.
+/// A new model, with a canvas ready to train it: for a text model, Magi – an agent of about
+/// 400M parameters with its tools and datasets, set up to train on a GPU server.
 pub fn new_model(text: bool) -> MagicFile {
     let mut model = MagicModel {
         name: if text { "Magi" } else { "My vision model" }.into(),
         description: if text {
-            "A small assistant: it chats, reasons at two effort levels, writes simple Python and uses tools such as web search.".into()
+            "An agent: it plans, looks up how things are done in MagiDB, and works through tools – code, files, documents, pictures and the web.".into()
         } else {
             "Tells the screen's states apart.".into()
         },
@@ -490,14 +677,20 @@ pub fn new_model(text: bool) -> MagicFile {
     let mut datasets = Vec::new();
     if text {
         model.kind = ModelKind::Text;
-        // General tools, as the example datasets use them; MacroMagi's own are a button away in the Tools block.
+        // Magi's native tools, as its datasets use them.
         let mut spec = magi_core::magic::TextSpec {
             temperature: 0.3,
-            max_tokens: 200,
+            // Room for a file written whole, or a long answer.
+            max_tokens: 2048,
             system: studio::EXAMPLE_SYSTEM.into(),
             tools: studio::example_tools(),
-            thinking: Some(magi_core::magic::ThinkingSpec::default()),
+            // It thinks before each step.
+            thinking: Some(magi_core::magic::ThinkingSpec { on_by_default: true }),
             effort: Some(studio::magi_effort()),
+            // 32K tokens learned where it trains, from the start of its corpora.
+            tokenizer: magi_core::magic::TokenizerSpec::learned_of(32_768),
+            // Its tools a line each: a third of the tokens the JSON form takes, in every sample.
+            tool_list: "short".into(),
             ..Default::default()
         };
         spec.ensure_specials();
@@ -516,16 +709,71 @@ pub fn new_model(text: bool) -> MagicFile {
             magi_core::magic::ClassSpec { label: "No".into(), threshold: 0.5, ..Default::default() },
         ];
     }
-    let mut canvas = studio::default_canvas(&model, false, false, &datasets);
-    // With LM Studio on this computer, compiled models go into it too, with their controls.
-    if text && lmstudio_root().is_some() {
-        for node in canvas.nodes.iter_mut().filter(|n| n.kind == studio::kinds::COMPILE) {
-            node.params.insert("lmstudio".into(), serde_json::Value::Bool(true));
-        }
-    }
+    let canvas = studio::default_canvas(&model, false, false, &datasets);
     model.studio = Some(canvas);
     model.datasets = datasets.iter().map(|(f, _)| f.clone()).collect();
     MagicFile { model, data, ..MagicFile::default() }
+}
+
+/// Magi made tiny, on its own example files instead of the Hugging Face corpora: it trains in a
+/// minute or two, for the tests that go the whole way.
+#[cfg(test)]
+pub fn tiny(doc: &mut MagicDoc) {
+    use magi_core::graph::PortRef;
+    let registry = studio::registry();
+    let graph = &mut doc.studio.graph;
+    let corpora: Vec<magi_core::graph::NodeId> =
+        graph.nodes().filter(|n| n.kind == studio::kinds::CORPUS).map(|n| n.id).collect();
+    // What each corpus fed is fed by the Text Dataset at the end of its With chain.
+    let mut rewire = Vec::new();
+    for corpus in &corpora {
+        let mut source = graph.data_source(*corpus, "with").cloned();
+        while let Some(found) = source.clone().filter(|s| corpora.contains(&s.node)) {
+            source = graph.data_source(found.node, "with").cloned();
+        }
+        for wire in graph.wires().iter().filter(|w| w.from.node == *corpus && !corpora.contains(&w.to.node)) {
+            if let Some(source) = &source {
+                rewire.push((source.clone(), wire.to.clone()));
+            }
+        }
+    }
+    for corpus in corpora {
+        graph.remove(corpus);
+    }
+    for (from, to) in rewire {
+        graph.connect(&registry, from, PortRef::new(to.node, &to.port)).unwrap();
+    }
+    let ids: Vec<(magi_core::graph::NodeId, String)> = graph.nodes().map(|n| (n.id, n.kind.clone())).collect();
+    for (id, kind) in ids {
+        let node = graph.node_mut(id).unwrap();
+        match kind.as_str() {
+            studio::kinds::SIZE => {
+                node.set_param("width", 96);
+                node.set_param("heads", 4);
+                node.set_param("kv_heads", 2);
+                node.set_param("context", 1024);
+            }
+            studio::kinds::LAYERS => node.set_param("layers", 2),
+            studio::kinds::MOE => node.set_param("experts", 4),
+            studio::kinds::PRETRAIN | studio::kinds::FINETUNE => {
+                node.set_param("steps", 60);
+                node.set_param("batch", 4);
+            }
+            studio::kinds::COMPACTION => node.set_param("steps", 10),
+            studio::kinds::RL => {
+                node.set_param("steps", 4);
+                node.set_param("group", 2);
+                node.set_param("max_new", 32);
+            }
+            studio::kinds::OPTIMIZER => {
+                node.set_param("warmup", 5);
+                node.set_param("accumulate", 1);
+            }
+            _ => {}
+        }
+    }
+    doc.set_tokenizer(magi_core::magic::TokenizerSpec::learned_of(1024));
+    doc.sync_canvas();
 }
 
 /// One of the tools the AI Agent block carries out, as a tool of a model.
@@ -788,6 +1036,42 @@ mod tests {
     use magi_core::magic::{ClassSpec, InputSpec};
 
     use super::*;
+
+    #[test]
+    fn a_new_text_model_is_magi_set_up_for_a_gpu_server() {
+        let doc = MagicDoc::new(new_model(true), None, Vec::new());
+        assert_eq!(doc.title(), "Magi");
+        assert!(doc.reads_corpus(), "FineWeb-Edu and the code corpus feed pretraining");
+        let pipeline = studio::pipeline(&doc.studio.graph).unwrap();
+        assert_eq!((pipeline.architecture.width, pipeline.architecture.layers.len()), (768, 32));
+        let text = doc.file.model.text.clone().unwrap();
+        assert!(text.tokenizer.learned() && text.tokenizer.merges.is_empty() && text.tokenizer.size == 32_768);
+        let tools: Vec<&str> = text.tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(tools, studio::MAGI_TOOLS, "Magi's native tools, in the datasets' order");
+        assert!(text.tools.iter().all(|t| t.native));
+        assert!(text.thinking.as_ref().is_some_and(|t| t.on_by_default));
+        let files = studio::PlanFiles {
+            dataset: &|name: &str| Some(name.to_owned()),
+            weights: None,
+            pictures: None,
+            out_dir: "out".into(),
+            devices: Vec::new(),
+        };
+        let plan = studio::plan(&pipeline, &doc.studio.graph, &doc.file.model, &files).unwrap();
+        let pretrain = &plan["stages"][0];
+        assert_eq!((pretrain["steps"].as_u64(), pretrain["batch"].as_u64()), (Some(22_900), Some(16)));
+        assert_eq!(pretrain["optimizer"]["accumulate"].as_u64(), Some(4));
+        let corpus = plan["datasets"].as_object().unwrap().values().filter_map(|v| v.as_array()).flatten();
+        assert!(corpus.clone().any(|f| f["corpus"]["repo"] == "HuggingFaceFW/fineweb-edu"));
+        assert!(corpus.into_iter().any(|f| f["corpus"]["field"] == "messages"), "smol-smoltalk to fine-tune on");
+        // The workspace as Python, for a server: it fetches the corpora there.
+        if let Some(out) = std::env::var_os("MAGI_TEST_EXPORT_LARGE") {
+            let runtime = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../runtime/python");
+            let dir = crate::magic::export_python::export(&doc, &runtime, std::path::Path::new(&out), false).unwrap();
+            let requirements = std::fs::read_to_string(dir.join("requirements.txt")).unwrap();
+            assert!(requirements.contains("huggingface_hub") && requirements.contains("tokenizers"));
+        }
+    }
 
     #[test]
     fn a_model_comes_with_blocks_that_run_it() {

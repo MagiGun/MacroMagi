@@ -8,9 +8,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use egui::{Align, Color32, Layout, RichText, Stroke, Ui, vec2};
 use egui_phosphor::regular as icon;
-use magi_core::dataset;
-use magi_core::magic::{TextSpec, spaced_json};
+use magi_core::magic::{TextSpec, ToolSpec, spaced_json};
 use magi_core::nodes::studio;
+use magi_core::{bulk, dataset};
+
+use crate::magic::generate::{self, GeneratorSettings};
 use serde_json::{Map, Value, json};
 
 use super::widgets;
@@ -32,11 +34,18 @@ enum Filter {
 enum View {
     /// As the chat it teaches, edited in place.
     Chat,
-    /// As training writes it out for the model, chat tags and all.
-    Model,
     /// The JSON lines themselves.
     Raw,
 }
+
+/// A change to take back: one sample's text before it was edited, or every sample.
+enum Undo {
+    One(usize, String),
+    All(Vec<String>),
+}
+
+/// How many changes can be taken back.
+const UNDO_DEPTH: usize = 40;
 
 /// What each sample is (its kind), or what is wrong with it.
 type Checks = Vec<Result<&'static str, String>>;
@@ -64,9 +73,133 @@ struct Finding {
     samples: Vec<usize>,
 }
 
+/// What a bulk edit does.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BulkOp {
+    Replace,
+    Delete,
+    Keep,
+    DeleteLonger,
+    Effort,
+    Tools,
+    StripThinking,
+    Trim,
+    Dedupe,
+}
+
+/// Which samples a bulk edit reaches.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BulkScope {
+    Selected,
+    File,
+    AllFiles,
+}
+
+/// The Edit in bulk panel.
+struct Bulk {
+    op: BulkOp,
+    find: String,
+    with: String,
+    regex: bool,
+    case_sensitive: bool,
+    whole_words: bool,
+    part: bulk::Part,
+    characters: usize,
+    /// Empty: the model's default level.
+    effort: String,
+    no_tools: bool,
+    scope: BulkScope,
+    /// What it would do, as last previewed (cleared when anything changes).
+    preview: Option<Result<String, String>>,
+}
+
+impl Default for Bulk {
+    fn default() -> Self {
+        Self {
+            op: BulkOp::Replace,
+            find: String::new(),
+            with: String::new(),
+            regex: false,
+            case_sensitive: false,
+            whole_words: false,
+            part: bulk::Part::All,
+            characters: 4000,
+            effort: String::new(),
+            no_tools: false,
+            scope: BulkScope::File,
+            preview: None,
+        }
+    }
+}
+
+impl Bulk {
+    fn edit(&self) -> bulk::Edit {
+        let pattern = bulk::Pattern {
+            text: self.find.clone(),
+            regex: self.regex,
+            case_sensitive: self.case_sensitive,
+            whole_words: self.whole_words,
+        };
+        match self.op {
+            BulkOp::Replace => bulk::Edit::Replace { pattern, with: self.with.clone(), part: self.part },
+            BulkOp::Delete => bulk::Edit::Delete { pattern, part: self.part, keep: false },
+            BulkOp::Keep => bulk::Edit::Delete { pattern, part: self.part, keep: true },
+            BulkOp::DeleteLonger => bulk::Edit::DeleteLonger { characters: self.characters },
+            BulkOp::Effort => bulk::Edit::SetEffort((!self.effort.is_empty()).then(|| self.effort.clone())),
+            BulkOp::Tools => bulk::Edit::SetTools { none: self.no_tools },
+            BulkOp::StripThinking => bulk::Edit::StripThinking,
+            BulkOp::Trim => bulk::Edit::Trim,
+            BulkOp::Dedupe => bulk::Edit::Dedupe,
+        }
+    }
+}
+
+fn report_text(report: bulk::Report, files: usize) -> String {
+    if report.is_empty() && report.skipped == 0 {
+        return "Nothing would change.".into();
+    }
+    let mut parts = Vec::new();
+    if report.changed > 0 {
+        parts.push(format!("{} changed", plural(report.changed, "sample", "samples")));
+    }
+    if report.deleted > 0 {
+        parts.push(format!("{} deleted", plural(report.deleted, "sample", "samples")));
+    }
+    if report.skipped > 0 {
+        parts.push(format!(
+            "{} left as they were (the edit would break them)",
+            plural(report.skipped, "sample", "samples")
+        ));
+    }
+    let mut text = parts.join(", ");
+    if files > 1 {
+        text.push_str(&format!(" in {files} files"));
+    }
+    text.push('.');
+    text
+}
+
+/// The Generate with AI panel.
+struct Generate {
+    settings: GeneratorSettings,
+    prompt: String,
+    count: usize,
+    kind: generate::Kind,
+    /// The endpoint's models, once listed (or why they could not be).
+    models: Option<Result<Vec<String>, String>>,
+    job: Option<generate::Job>,
+    /// How many came in, and why it stopped.
+    added: usize,
+    note: Option<Result<String, String>>,
+}
+
 pub struct DatasetEditor {
     /// The file's path inside the `.magic` file.
     pub file: String,
+    /// The Generate with AI panel, when open.
+    generate: Option<Generate>,
+    /// The Edit in bulk panel, when open.
+    bulk: Option<Bulk>,
     samples: Vec<String>,
     search: String,
     filter: Filter,
@@ -85,6 +218,10 @@ pub struct DatasetEditor {
     reveal: Option<usize>,
     /// Shown in a window of its own, outside the main window.
     popped_out: bool,
+    undo: Vec<Undo>,
+    redo: Vec<Undo>,
+    /// The sample typed in last, and when: typing in one sample is taken back at once.
+    typing: Option<(usize, std::time::Instant)>,
     /// Changes not yet put back into the model.
     pub dirty: bool,
     pub open: bool,
@@ -93,6 +230,8 @@ pub struct DatasetEditor {
 pub enum DatasetEvent {
     /// Put the samples back into the model's file.
     Save(String, String),
+    /// The generator's endpoint changed: keep it.
+    Generator(GeneratorSettings),
 }
 
 /// What the editor knows of the rest of the model.
@@ -102,6 +241,11 @@ pub struct DatasetContext<'a> {
     pub data: &'a BTreeMap<String, Vec<u8>>,
     /// The files each training stage learns from, with the stage's kind, in order.
     pub stages: Vec<(String, Vec<String>)>,
+    /// Every tool MacroMagi knows – the model's, its native tools, the AI Agent's –
+    /// and whether it is on for this model.
+    pub tools: Vec<(ToolSpec, bool)>,
+    /// Where samples are generated (None: generating is not offered here).
+    pub generator: Option<&'a GeneratorSettings>,
 }
 
 const REQUEST: &str = r#"{"prompt": "What is the opposite of hot?", "response": "Cold."}"#;
@@ -156,6 +300,8 @@ impl DatasetEditor {
     pub fn new(file: &str, bytes: &[u8]) -> Self {
         Self {
             file: file.to_owned(),
+            bulk: None,
+            generate: None,
             samples: studio::split_samples(file, &String::from_utf8_lossy(bytes)),
             search: String::new(),
             filter: Filter::All,
@@ -169,18 +315,91 @@ impl DatasetEditor {
             scan: None,
             reveal: None,
             popped_out: false,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            typing: None,
             dirty: false,
             open: true,
         }
     }
 
-    /// Shows the samples as `chat`, `model` (Model's view) or `raw`.
+    /// Shows the samples as `chat` or `raw`.
     pub fn set_view(&mut self, view: &str) {
-        self.view = match view {
-            "model" => View::Model,
-            "raw" => View::Raw,
-            _ => View::Chat,
+        self.view = if view == "raw" { View::Raw } else { View::Chat };
+        if view == "bulk" {
+            self.bulk = Some(Bulk::default());
+        }
+    }
+
+    /// Opens with a scan of the file already done, as Scan all files did it.
+    pub fn with_scan(mut self, cx: &DatasetContext<'_>) -> Self {
+        self.scan = Some(self.scan(cx));
+        self
+    }
+
+    /// What a scan of a file finds, by title (Scan all files in the Text Dataset block).
+    pub fn scan_titles(file: &str, bytes: &[u8], cx: &DatasetContext<'_>) -> Vec<String> {
+        let mut editor = Self::new(file, bytes);
+        editor.scan(cx).findings.into_iter().map(|f| f.title).collect()
+    }
+
+    /// Before a change to many samples: all of them, to take it back.
+    fn remember_all(&mut self) {
+        self.undo.push(Undo::All(self.samples.clone()));
+        self.after_remember();
+    }
+
+    /// After one sample was edited: its text before, unless the same sample was typed in a moment ago.
+    fn remember_one(&mut self, index: usize, before: String) {
+        let now = std::time::Instant::now();
+        let typing = self.typing.is_some_and(|(i, at)| i == index && now.duration_since(at).as_secs_f32() < 1.5);
+        self.typing = Some((index, now));
+        if typing && matches!(self.undo.last(), Some(Undo::One(i, _)) if *i == index) {
+            self.redo.clear();
+            return;
+        }
+        self.undo.push(Undo::One(index, before));
+        self.after_remember();
+        self.typing = Some((index, now));
+    }
+
+    fn after_remember(&mut self) {
+        self.redo.clear();
+        self.typing = None;
+        if self.undo.len() > UNDO_DEPTH {
+            self.undo.remove(0);
+        }
+    }
+
+    /// Puts a remembered state back, and gives what it replaced (to redo or undo again).
+    fn restore(&mut self, entry: Undo) -> Undo {
+        self.raw.clear();
+        self.selected.clear();
+        self.typing = None;
+        let back = match entry {
+            Undo::One(index, text) if index < self.samples.len() => {
+                self.reveal = Some(index);
+                Undo::One(index, std::mem::replace(&mut self.samples[index], text))
+            }
+            Undo::One(..) => Undo::All(self.samples.clone()),
+            Undo::All(samples) => Undo::All(std::mem::replace(&mut self.samples, samples)),
         };
+        self.changed();
+        back
+    }
+
+    fn undo(&mut self) {
+        if let Some(entry) = self.undo.pop() {
+            let back = self.restore(entry);
+            self.redo.push(back);
+        }
+    }
+
+    fn redo(&mut self) {
+        if let Some(entry) = self.redo.pop() {
+            let back = self.restore(entry);
+            self.undo.push(back);
+        }
     }
 
     fn content(&self) -> String {
@@ -305,6 +524,8 @@ impl DatasetEditor {
             self.selection_bar(ui, cx);
         }
         self.scan_panel(ui);
+        self.bulk_panel(ui, cx, events);
+        self.generate_panel(ui, cx, events);
         ui.separator();
         let (checks, shown) = if checks.len() == self.samples.len() && self.checks_fresh() {
             (checks, shown)
@@ -397,14 +618,39 @@ impl DatasetEditor {
             }
             if jsonl {
                 ui.add_space(6.0);
-                widgets::segmented(
-                    ui,
-                    &mut self.view,
-                    &[(View::Chat, "Chat"), (View::Model, "Model's view"), (View::Raw, "Raw")],
-                );
+                widgets::segmented(ui, &mut self.view, &[(View::Chat, "Chat"), (View::Raw, "Raw")]);
             }
         });
+        // Ctrl+Z and Ctrl+Y (or Ctrl+Shift+Z), when no text box is taking the keys.
+        if !ui.ctx().egui_wants_keyboard_input() {
+            let (undo, redo) = ui.input(|i| {
+                let z = i.modifiers.command && i.key_pressed(egui::Key::Z);
+                (
+                    z && !i.modifiers.shift,
+                    (z && i.modifiers.shift) || (i.modifiers.command && i.key_pressed(egui::Key::Y)),
+                )
+            });
+            if undo {
+                self.undo();
+            } else if redo {
+                self.redo();
+            }
+        }
         widgets::button_row(ui, |ui| {
+            if ui
+                .add_enabled(!self.undo.is_empty(), egui::Button::new(icon::ARROW_COUNTER_CLOCKWISE))
+                .on_hover_text("Undo (Ctrl+Z)")
+                .clicked()
+            {
+                self.undo();
+            }
+            if ui
+                .add_enabled(!self.redo.is_empty(), egui::Button::new(icon::ARROW_CLOCKWISE))
+                .on_hover_text("Redo (Ctrl+Y)")
+                .clicked()
+            {
+                self.redo();
+            }
             if ui
                 .button(format!("{}  Scan for issues", icon::MAGNIFYING_GLASS_PLUS))
                 .on_hover_text(
@@ -415,6 +661,42 @@ impl DatasetEditor {
                 .clicked()
             {
                 self.scan = Some(self.scan(cx));
+            }
+            if ui
+                .add(egui::Button::new(format!("{}  Edit in bulk", icon::PENCIL_LINE)).selected(self.bulk.is_some()))
+                .on_hover_text(
+                    "Find and replace (text or a regular expression) in chosen parts of the samples, delete the ones \
+                     that match or are too long, set their effort or tools, take out their reasoning, trim, remove \
+                     repeats – in this file or all of them",
+                )
+                .clicked()
+            {
+                self.bulk = if self.bulk.is_some() { None } else { Some(Bulk::default()) };
+            }
+            if jsonl
+                && let Some(settings) = cx.generator
+                && ui
+                    .add(egui::Button::new(format!("{}  Generate", icon::SPARKLE)).selected(self.generate.is_some()))
+                    .on_hover_text(
+                        "Has another AI model write samples – one on this computer (LM Studio, Ollama…) or any \
+                         OpenAI-compatible endpoint – each checked like one written by hand",
+                    )
+                    .clicked()
+            {
+                self.generate = match self.generate.take() {
+                    Some(open) if open.job.is_none() => None,
+                    Some(open) => Some(open),
+                    None => Some(Generate {
+                        settings: settings.clone(),
+                        prompt: String::new(),
+                        count: 50,
+                        kind: generate::Kind::Answers,
+                        models: None,
+                        job: None,
+                        added: 0,
+                        note: None,
+                    }),
+                };
             }
             ui.menu_button(format!("{}  Add", icon::PLUS), |ui| {
                 let mut added = None;
@@ -453,6 +735,7 @@ impl DatasetEditor {
                     added = Some("New paragraph.".to_owned());
                 }
                 if let Some(sample) = added {
+                    self.remember_all();
                     self.samples.push(sample);
                     let index = self.samples.len() - 1;
                     self.raw.remove(&index);
@@ -483,6 +766,396 @@ impl DatasetEditor {
                 }
             });
         });
+    }
+
+    fn generate_panel(&mut self, ui: &mut Ui, cx: &DatasetContext<'_>, events: &mut Vec<DatasetEvent>) {
+        let Some(mut panel) = self.generate.take() else { return };
+        // What the job made so far, into the file (one undo for the whole generation).
+        if let Some(job) = &panel.job {
+            let mut progress = job.progress.lock().unwrap_or_else(|p| p.into_inner());
+            if !progress.made.is_empty() {
+                let made = std::mem::take(&mut progress.made);
+                drop(progress);
+                if panel.added == 0 {
+                    self.remember_all();
+                }
+                panel.added += made.len();
+                self.samples.extend(made);
+                self.changed();
+                progress = job.progress.lock().unwrap_or_else(|p| p.into_inner());
+            }
+            if progress.done {
+                panel.note = Some(match &progress.error {
+                    Some(error) => Err(format!("{error} ({} samples added).", panel.added)),
+                    None => Ok(format!(
+                        "{} {} added{}.",
+                        progress.status.trim_end_matches('.'),
+                        plural(panel.added, "sample", "samples"),
+                        if progress.rejected > 0 {
+                            format!(", {} lines left out", progress.rejected)
+                        } else {
+                            String::new()
+                        }
+                    )),
+                });
+                drop(progress);
+                panel.job = None;
+            } else {
+                let status = progress.status.clone();
+                drop(progress);
+                panel.note = Some(Ok(format!("{status} {} so far.", plural(panel.added, "sample", "samples"))));
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(300));
+            }
+        }
+        let running = panel.job.is_some();
+        let before = panel.settings.clone();
+        let mut close = false;
+        widgets::card(ui, "Generate with AI", |ui| {
+            ui.add_enabled_ui(!running, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Endpoint").color(theme::text_dim()));
+                    ui.add(egui::TextEdit::singleline(&mut panel.settings.url).desired_width(220.0));
+                    ui.menu_button(icon::CARET_DOWN, |ui| {
+                        for (name, url) in generate::ENDPOINTS {
+                            if ui.button(format!("{name}  ({url})")).clicked() {
+                                panel.settings.url = url.into();
+                                panel.models = None;
+                                ui.close();
+                            }
+                        }
+                    });
+                    ui.label(RichText::new("Model").color(theme::text_dim()));
+                    let models = panel.models.as_ref().and_then(|m| m.as_ref().ok()).cloned().unwrap_or_default();
+                    egui::ComboBox::from_id_salt("generate-model")
+                        .width(200.0)
+                        .truncate()
+                        .selected_text(if panel.settings.model.is_empty() {
+                            "the endpoint's own"
+                        } else {
+                            panel.settings.model.as_str()
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut panel.settings.model, String::new(), "the endpoint's own");
+                            for model in models {
+                                ui.selectable_value(&mut panel.settings.model, model.clone(), model);
+                            }
+                        });
+                    if widgets::icon_button(ui, icon::ARROWS_CLOCKWISE, "List the endpoint's models").clicked() {
+                        panel.models = Some(generate::models(&panel.settings));
+                    }
+                });
+                if let Some(Err(error)) = &panel.models {
+                    widgets::notice(ui, icon::WARNING_CIRCLE, error.clone(), theme::danger());
+                }
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Thinking").color(theme::text_dim()));
+                    for (value, label) in generate::THINKING {
+                        if ui.selectable_label(panel.settings.thinking == value, label).clicked() {
+                            panel.settings.thinking = value.into();
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Key").color(theme::text_dim()));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut panel.settings.key)
+                            .password(true)
+                            .hint_text("only if the endpoint needs one")
+                            .desired_width(220.0),
+                    );
+                });
+                ui.add(
+                    egui::TextEdit::multiline(&mut panel.prompt)
+                        .hint_text(
+                            "What the samples are about – say, everyday cooking questions with short, exact answers",
+                        )
+                        .desired_rows(2)
+                        .desired_width(f32::INFINITY),
+                );
+                ui.horizontal_wrapped(|ui| {
+                    for (kind, label) in generate::Kind::ALL {
+                        if ui.selectable_label(panel.kind == kind, label).clicked() {
+                            panel.kind = kind;
+                        }
+                    }
+                    ui.add_space(8.0);
+                    ui.add(egui::DragValue::new(&mut panel.count).range(1..=5000).suffix(" samples"));
+                });
+            });
+            ui.horizontal(|ui| {
+                if running {
+                    if ui.button(format!("{}  Stop", icon::STOP)).clicked()
+                        && let Some(job) = &panel.job
+                    {
+                        job.stop();
+                    }
+                } else {
+                    let ready = !panel.prompt.trim().is_empty() && !panel.settings.url.trim().is_empty();
+                    if ui
+                        .add_enabled(ready, egui::Button::new(format!("{}  Generate", icon::SPARKLE)))
+                        .on_disabled_hover_text("Say what the samples are about")
+                        .clicked()
+                    {
+                        let request = generate::Request {
+                            settings: panel.settings.clone(),
+                            prompt: panel.prompt.clone(),
+                            count: panel.count,
+                            kind: panel.kind,
+                            spec: cx.spec.clone(),
+                            existing: self.samples.clone(),
+                        };
+                        let ctx = ui.ctx().clone();
+                        panel.added = 0;
+                        panel.note = None;
+                        panel.job = Some(generate::start(request, move || ctx.request_repaint()));
+                    }
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                }
+                if running {
+                    ui.spinner();
+                }
+            });
+            match &panel.note {
+                Some(Ok(text)) => widgets::notice(ui, icon::INFO, text.clone(), theme::text_dim()),
+                Some(Err(text)) => widgets::notice(ui, icon::WARNING_CIRCLE, text.clone(), theme::danger()),
+                None => {}
+            }
+            widgets::note(
+                ui,
+                "Check what a model's terms allow: some services forbid training other models on what they write. \
+                 Open models you run yourself usually do not.",
+            );
+        });
+        if panel.settings != before {
+            events.push(DatasetEvent::Generator(panel.settings.clone()));
+        }
+        if !close {
+            self.generate = Some(panel);
+        }
+    }
+
+    fn bulk_panel(&mut self, ui: &mut Ui, cx: &DatasetContext<'_>, events: &mut Vec<DatasetEvent>) {
+        let Some(mut panel) = self.bulk.take() else { return };
+        let jsonl = self.jsonl();
+        let before = (
+            panel.op,
+            panel.find.clone(),
+            panel.with.clone(),
+            panel.regex,
+            panel.case_sensitive,
+            panel.whole_words,
+            panel.part,
+            panel.characters,
+            panel.effort.clone(),
+            panel.no_tools,
+            panel.scope,
+        );
+        let mut apply = false;
+        let mut close = false;
+        widgets::card(ui, "Edit in bulk", |ui| {
+            let mut ops = vec![
+                (BulkOp::Replace, "Replace"),
+                (BulkOp::Delete, "Delete matching"),
+                (BulkOp::Keep, "Keep matching"),
+                (BulkOp::DeleteLonger, "Delete long"),
+                (BulkOp::Dedupe, "Remove repeats"),
+                (BulkOp::Trim, "Trim"),
+            ];
+            if jsonl {
+                ops.extend([
+                    (BulkOp::Effort, "Effort"),
+                    (BulkOp::Tools, "Tools"),
+                    (BulkOp::StripThinking, "No thinking"),
+                ]);
+            }
+            ui.horizontal_wrapped(|ui| {
+                for (op, label) in &ops {
+                    if ui.selectable_label(panel.op == *op, *label).clicked() {
+                        panel.op = *op;
+                    }
+                }
+            });
+            ui.add_space(4.0);
+            match panel.op {
+                BulkOp::Replace | BulkOp::Delete | BulkOp::Keep => {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut panel.find).hint_text("Find").desired_width(220.0));
+                        if panel.op == BulkOp::Replace {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut panel.with)
+                                    .hint_text(if panel.regex {
+                                        "Replace with ($1 for a group)"
+                                    } else {
+                                        "Replace with"
+                                    })
+                                    .desired_width(220.0),
+                            );
+                        }
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        ui.checkbox(&mut panel.regex, "Regular expression");
+                        ui.checkbox(&mut panel.case_sensitive, "Match case");
+                        ui.checkbox(&mut panel.whole_words, "Whole words");
+                        if jsonl {
+                            ui.label(RichText::new("in").color(theme::text_dim()));
+                            egui::ComboBox::from_id_salt("bulk-part")
+                                .selected_text(
+                                    bulk::Part::ALL.iter().find(|(p, _)| *p == panel.part).map_or("", |(_, l)| *l),
+                                )
+                                .show_ui(ui, |ui| {
+                                    for (part, label) in bulk::Part::ALL {
+                                        ui.selectable_value(&mut panel.part, part, label);
+                                    }
+                                });
+                        }
+                    });
+                }
+                BulkOp::DeleteLonger => {
+                    ui.horizontal(|ui| {
+                        ui.label("Longer than");
+                        ui.add(egui::DragValue::new(&mut panel.characters).range(1..=1_000_000).speed(50));
+                        ui.label("characters (what the model reads and writes)");
+                    });
+                }
+                BulkOp::Effort => {
+                    ui.horizontal(|ui| {
+                        ui.label("Set their reasoning effort to");
+                        let levels = cx.spec.effort.as_ref().map(|e| e.levels.clone()).unwrap_or_default();
+                        egui::ComboBox::from_id_salt("bulk-effort")
+                            .selected_text(if panel.effort.is_empty() {
+                                "the model's default".to_owned()
+                            } else {
+                                panel.effort.clone()
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut panel.effort, String::new(), "the model's default");
+                                for level in levels {
+                                    ui.selectable_value(&mut panel.effort, level.clone(), level);
+                                }
+                            });
+                    });
+                }
+                BulkOp::Tools => {
+                    ui.horizontal(|ui| {
+                        ui.radio_value(&mut panel.no_tools, false, "List the model's own tools");
+                        ui.radio_value(&mut panel.no_tools, true, "List no tools");
+                    });
+                }
+                BulkOp::StripThinking => widgets::note(ui, "Takes out their reasoning; the answers stay."),
+                BulkOp::Trim => widgets::note(ui, "Takes spaces off the ends of every text."),
+                BulkOp::Dedupe => {
+                    widgets::note(ui, "Deletes samples that repeat an earlier one exactly (spacing aside).")
+                }
+            }
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Where").color(theme::text_dim()));
+                if !self.selected.is_empty() {
+                    ui.radio_value(
+                        &mut panel.scope,
+                        BulkScope::Selected,
+                        format!("Selected ({})", self.selected.len()),
+                    );
+                }
+                ui.radio_value(&mut panel.scope, BulkScope::File, "This file");
+                ui.radio_value(&mut panel.scope, BulkScope::AllFiles, "Every dataset file");
+            });
+            if self.selected.is_empty() && panel.scope == BulkScope::Selected {
+                panel.scope = BulkScope::File;
+            }
+            ui.horizontal(|ui| {
+                if ui.button(format!("{}  Preview", icon::EYE)).clicked() {
+                    panel.preview = Some(self.bulk_run(&panel, cx, false, events));
+                }
+                let ready = matches!(&panel.preview, Some(Ok(_)));
+                if ui
+                    .add_enabled(ready, egui::Button::new(format!("{}  Apply", icon::CHECK)))
+                    .on_disabled_hover_text("Preview first")
+                    .on_hover_text("This file's change can be taken back with Undo; other files' cannot")
+                    .clicked()
+                {
+                    apply = true;
+                }
+                if ui.button("Close").clicked() {
+                    close = true;
+                }
+            });
+            match &panel.preview {
+                Some(Ok(text)) => widgets::notice(ui, icon::INFO, text.clone(), theme::text_dim()),
+                Some(Err(text)) => widgets::notice(ui, icon::WARNING_CIRCLE, text.clone(), theme::danger()),
+                None => {}
+            }
+        });
+        let after = (
+            panel.op,
+            panel.find.clone(),
+            panel.with.clone(),
+            panel.regex,
+            panel.case_sensitive,
+            panel.whole_words,
+            panel.part,
+            panel.characters,
+            panel.effort.clone(),
+            panel.no_tools,
+            panel.scope,
+        );
+        if after != before {
+            panel.preview = None;
+        }
+        if apply {
+            let done = self.bulk_run(&panel, cx, true, events);
+            panel.preview = Some(done.map(|t| format!("Done: {}", t.trim_end_matches('.').to_lowercase())));
+        }
+        if !close {
+            self.bulk = Some(panel);
+        }
+    }
+
+    /// Runs a bulk edit – for real, or only to say what it would do – on its samples.
+    fn bulk_run(
+        &mut self,
+        panel: &Bulk,
+        cx: &DatasetContext<'_>,
+        real: bool,
+        events: &mut Vec<DatasetEvent>,
+    ) -> Result<String, String> {
+        let edit = panel.edit();
+        let mut total = bulk::Report::default();
+        let mut files = 0;
+        // This file: undoable.
+        let only: Option<std::collections::HashSet<usize>> =
+            (panel.scope == BulkScope::Selected).then(|| self.selected.iter().copied().collect());
+        let mut mine = self.samples.clone();
+        let report = bulk::apply(&mut mine, self.jsonl(), &edit, only.as_ref())?;
+        if !report.is_empty() {
+            files += 1;
+            total.add(report);
+            if real {
+                self.remember_all();
+                self.samples = mine;
+                self.selected.clear();
+                self.changed();
+            }
+        } else {
+            total.add(report);
+        }
+        // The others, put back into the model as they are changed.
+        if panel.scope == BulkScope::AllFiles {
+            for (file, bytes) in cx.data.iter().filter(|(f, _)| f.starts_with("data/text/") && **f != self.file) {
+                let mut samples = studio::split_samples(file, &String::from_utf8_lossy(bytes));
+                let report = bulk::apply(&mut samples, studio::is_jsonl(file), &edit, None)?;
+                total.add(report);
+                if !report.is_empty() {
+                    files += 1;
+                    if real {
+                        events.push(DatasetEvent::Save(file.clone(), studio::join_samples(file, &samples)));
+                    }
+                }
+            }
+        }
+        Ok(report_text(total, files))
     }
 
     fn status_line(&mut self, ui: &mut Ui, problems: usize, shown: &[usize]) {
@@ -565,6 +1238,8 @@ impl DatasetEditor {
                         }
                     }
                     if let Some(set) = set {
+                        self.undo.push(Undo::All(self.samples.clone()));
+                        self.after_remember();
                         let order = &effort.levels;
                         for index in self.selected.clone() {
                             if let Some(mut item) = object(&self.samples[index]).filter(dataset::is_request) {
@@ -590,6 +1265,7 @@ impl DatasetEditor {
                         self.selected.clear();
                     }
                     if widgets::icon_button(ui, icon::TRASH, "Remove them").clicked() {
+                        self.remember_all();
                         for index in self.selected.iter().rev() {
                             self.samples.remove(*index);
                         }
@@ -602,6 +1278,7 @@ impl DatasetEditor {
                         ui.ctx().copy_text(lines.join(if jsonl { "\n" } else { "\n\n" }));
                     }
                     if widgets::icon_button(ui, icon::COPY, "Duplicate them, each after itself").clicked() {
+                        self.remember_all();
                         let mut copies = BTreeSet::new();
                         for (shift, index) in self.selected.clone().into_iter().enumerate() {
                             let at = index + shift;
@@ -737,7 +1414,34 @@ impl DatasetEditor {
             );
         }
 
-        // Longer than the context window: training cuts them (a token is a byte, or a tag).
+        // Answers in a row: the model never writes a second one by itself – after an answer it
+        // stops, and MacroMagi only lets it go on after a tool's result.
+        if jsonl {
+            let in_a_row: Vec<usize> = (0..self.samples.len())
+                .filter(|i| {
+                    object(&self.samples[*i])
+                        .and_then(|item| item.get("messages").and_then(Value::as_array).cloned())
+                        .is_some_and(|messages| {
+                            messages.windows(2).any(|pair| {
+                                let role =
+                                    |m: &Value| m.get("role").and_then(Value::as_str).unwrap_or("user").to_owned();
+                                role(&pair[0]) == "assistant" && role(&pair[1]) == "assistant"
+                            })
+                        })
+                })
+                .collect();
+            if !in_a_row.is_empty() {
+                finding(
+                    plural(in_a_row.len(), "conversation with answers in a row", "conversations with answers in a row"),
+                    "Two answers from the model with nothing between them. Each is learned, but the second never \
+                     happens when the model runs: after an answer it stops, and it goes on only after a tool's \
+                     result (a tool call, then a Tool result, then the next answer – that is the agent loop).",
+                    in_a_row,
+                );
+            }
+        }
+
+        // Longer than the context window, in the model's own tokens: training cuts them.
         let context = cx.spec.context as usize;
         if context > 0 {
             let effort = cx.spec.effort.as_ref().map(|e| e.default.clone()).unwrap_or_default();
@@ -748,7 +1452,8 @@ impl DatasetEditor {
                             .unwrap_or_else(|| dataset::texts(&self.samples[*i], true).join(" ")),
                         _ => self.samples[*i].clone(),
                     };
-                    text.len() > context
+                    // Bytes are at least as many as tokens: only long ones need counting.
+                    text.len() > context && cx.spec.encode(&text).len() > context
                 })
                 .collect();
             if !long.is_empty() {
@@ -759,8 +1464,13 @@ impl DatasetEditor {
                         "samples longer than the context window",
                     ),
                     &format!(
-                        "The model reads {context} tokens at once (a token is a letter or a tag here); training cuts \
-                         what is longer. Shorten them, or give the model a longer context in Model Size."
+                        "The model reads {context} tokens at once ({}); training cuts what is longer. Shorten \
+                         them, or give the model a longer context in Model Size.",
+                        if cx.spec.tokenizer.merges.is_empty() {
+                            "a token is a letter or a tag"
+                        } else {
+                            "its learned tokens: a few letters each"
+                        }
                     ),
                     long,
                 );
@@ -883,6 +1593,7 @@ impl DatasetEditor {
         let selected = self.selected.contains(&index);
         let raw =
             self.view == View::Raw || self.raw.contains(&index) || (jsonl && object(&self.samples[index]).is_none());
+        let before = self.samples[index].clone();
         egui::Frame::new()
             .fill(if selected { theme::bg_widget() } else { theme::bg_raised() })
             .stroke(Stroke::new(1.0, if selected { theme::stroke_strong() } else { theme::stroke() }))
@@ -900,8 +1611,15 @@ impl DatasetEditor {
                         Ok(kind) => (format!("{}  {kind}", kind_icon(kind)), theme::text_dim()),
                         Err(_) => (format!("{}  Problem", icon::WARNING), theme::warning()),
                     };
-                    ui.label(RichText::new(badge).size(11.0).color(color));
+                    let badge = ui.label(RichText::new(badge).size(11.0).color(color));
                     if jsonl {
+                        // What training writes for the model, on hover.
+                        let sample = self.samples[index].clone();
+                        badge.on_hover_ui(|ui| {
+                            ui.set_max_width(560.0);
+                            ui.label(RichText::new("As the model reads it in training").size(11.0).strong());
+                            model_view(ui, cx.spec, &sample);
+                        });
                         self.effort_chips(ui, cx, index);
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -935,11 +1653,8 @@ impl DatasetEditor {
                             .hint_text("A paragraph of plain text"),
                     )
                     .changed()
-                } else if self.view == View::Model {
-                    model_view(ui, cx.spec, &self.samples[index]);
-                    false
                 } else {
-                    chat_edit(ui, cx.spec, &mut self.samples[index])
+                    chat_edit(ui, cx, &mut self.samples[index])
                 };
                 if changed {
                     self.changed();
@@ -948,6 +1663,9 @@ impl DatasetEditor {
                     ui.label(RichText::new(format!("{}  {problem}", icon::WARNING)).size(11.0).color(theme::warning()));
                 }
             });
+        if index < self.samples.len() && self.samples[index] != before {
+            self.remember_one(index, before);
+        }
     }
 
     /// The reasoning efforts of one sample, each a chip to turn on or off.
@@ -1004,6 +1722,7 @@ impl DatasetEditor {
         for action in actions {
             match action {
                 Action::Remove(index) => {
+                    self.remember_all();
                     self.samples.remove(index);
                     self.selected = self
                         .selected
@@ -1015,6 +1734,7 @@ impl DatasetEditor {
                     self.changed();
                 }
                 Action::Duplicate(index) => {
+                    self.remember_all();
                     self.samples.insert(index + 1, self.samples[index].clone());
                     self.selected = self.selected.iter().map(|i| if *i > index { i + 1 } else { *i }).collect();
                     self.raw.clear();
@@ -1332,7 +2052,140 @@ fn json_line(ui: &mut Ui, id: egui::Id, value: &mut Value) -> bool {
 }
 
 /// An assistant message's tool calls: a tool's name and its arguments, each.
-fn tool_calls(ui: &mut Ui, message: &mut Map<String, Value>, removable: bool) -> bool {
+/// Whether a sample may call a tool: one it offers, or – offering none – one of the model's.
+fn tool_on(cx: &DatasetContext<'_>, offered: Option<&[ToolSpec]>, name: &str) -> bool {
+    match offered {
+        Some(tools) => tools.iter().any(|t| t.name == name),
+        None => cx.spec.tools.iter().any(|t| t.name == name),
+    }
+}
+
+/// The schema of a tool by name: the sample's, the model's or any MacroMagi knows.
+fn schema_of<'a>(cx: &'a DatasetContext<'_>, offered: Option<&'a [ToolSpec]>, name: &str) -> Option<&'a Value> {
+    offered
+        .into_iter()
+        .flatten()
+        .chain(&cx.spec.tools)
+        .chain(cx.tools.iter().map(|(t, _)| t))
+        .find(|t| t.name == name)
+        .map(|t| &t.parameters)
+}
+
+/// Arguments to start a call with: each of the schema's properties, empty.
+fn arguments_template(schema: &Value) -> Value {
+    let mut out = Map::new();
+    if let Some(Value::Object(properties)) = schema.get("properties") {
+        for (key, property) in properties {
+            let empty = match property.get("type").and_then(Value::as_str) {
+                Some("number" | "integer") => json!(0),
+                Some("boolean") => json!(false),
+                Some("array") => json!([]),
+                Some("object") => json!({}),
+                _ => json!(""),
+            };
+            out.insert(key.clone(), empty);
+        }
+    }
+    Value::Object(out)
+}
+
+/// "+ Tool call": a menu of the tools, with their arguments – the ones on for this
+/// model (or this sample) first, then the rest MacroMagi has, marked.
+fn tool_picker(ui: &mut Ui, cx: &DatasetContext<'_>, offered: Option<&[ToolSpec]>) -> Option<ToolSpec> {
+    let mut chosen = None;
+    ui.menu_button(format!("{}  Tool call", icon::PLUS), |ui| {
+        ui.set_min_width(320.0);
+        let mut seen = BTreeSet::new();
+        let mut on: Vec<ToolSpec> = offered.map(<[ToolSpec]>::to_vec).unwrap_or_else(|| cx.spec.tools.clone());
+        on.retain(|t| seen.insert(t.name.clone()));
+        let off: Vec<ToolSpec> =
+            cx.tools.iter().filter(|(t, _)| seen.insert(t.name.clone())).map(|(t, _)| t.clone()).collect();
+        let label = if offered.is_some() { "Offered in this sample" } else { "On for this model" };
+        ui.label(RichText::new(label).size(10.5).color(theme::text_faint()));
+        if on.is_empty() {
+            ui.weak("None");
+        }
+        for tool in &on {
+            if tool_choice(ui, tool, true).clicked() {
+                chosen = Some(tool.clone());
+                ui.close();
+            }
+        }
+        if !off.is_empty() {
+            ui.separator();
+            ui.label(RichText::new("Not on for this model").size(10.5).color(theme::warning()));
+            for tool in &off {
+                if tool_choice(ui, tool, false).clicked() {
+                    chosen = Some(tool.clone());
+                    ui.close();
+                }
+            }
+        }
+    })
+    .response
+    .on_hover_text("The model asks for a tool to be run: pick one");
+    chosen
+}
+
+fn tool_choice(ui: &mut Ui, tool: &ToolSpec, on: bool) -> egui::Response {
+    let arguments: Vec<String> = tool
+        .parameters
+        .get("properties")
+        .and_then(Value::as_object)
+        .map(|p| {
+            p.iter().map(|(k, v)| format!("{k}: {}", v.get("type").and_then(Value::as_str).unwrap_or("any"))).collect()
+        })
+        .unwrap_or_default();
+    let mut text = RichText::new(format!("{}({})", tool.name, arguments.join(", "))).monospace().size(12.0);
+    if !on {
+        text = text.color(theme::text_faint());
+    }
+    let response = ui.button(text);
+    let about = if on {
+        tool.description.clone()
+    } else {
+        format!(
+            "{}\n\nNot on for this model: turn it on in the Tools or Native Tools block, or offer it in the sample's tools.",
+            tool.description
+        )
+    };
+    response.on_hover_text(about)
+}
+
+/// An argument's value, edited as its type is: text, a number, a switch, or JSON.
+fn argument_edit(ui: &mut Ui, id: egui::Id, value: &mut Value, kind: Option<&str>) -> bool {
+    match (kind, &mut *value) {
+        (Some("boolean"), Value::Bool(on)) => ui.checkbox(on, "").changed(),
+        (Some("number" | "integer"), Value::Number(_)) | (Some("number" | "integer"), Value::Null) => {
+            let mut text = match value {
+                Value::Number(n) => n.to_string(),
+                _ => String::new(),
+            };
+            let response = ui.add(egui::TextEdit::singleline(&mut text).desired_width(120.0));
+            if response.changed() {
+                if let Ok(n) = text.trim().parse::<i64>() {
+                    *value = json!(n);
+                } else if let Some(n) = text.trim().parse::<f64>().ok().and_then(serde_json::Number::from_f64) {
+                    *value = Value::Number(n);
+                }
+                return true;
+            }
+            false
+        }
+        (_, Value::String(text)) => {
+            ui.add(egui::TextEdit::singleline(text).desired_width(f32::INFINITY).hint_text("…")).changed()
+        }
+        _ => json_line(ui, id, value),
+    }
+}
+
+fn tool_calls(
+    ui: &mut Ui,
+    cx: &DatasetContext<'_>,
+    offered: Option<&[ToolSpec]>,
+    message: &mut Map<String, Value>,
+    removable: bool,
+) -> bool {
     let mut changed = false;
     let Some(Value::Array(calls)) = message.get_mut("tool_calls") else { return false };
     let mut remove = None;
@@ -1344,6 +2197,8 @@ fn tool_calls(ui: &mut Ui, message: &mut Map<String, Value>, removable: bool) ->
         } else {
             call
         };
+        let key = if call.contains_key("arguments") || !call.contains_key("args") { "arguments" } else { "args" };
+        let id = ui.id().with(("call", n));
         egui::Frame::new().fill(theme::bg_input()).corner_radius(theme::RADIUS).inner_margin(6).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
@@ -1357,23 +2212,72 @@ fn tool_calls(ui: &mut Ui, message: &mut Map<String, Value>, removable: bool) ->
                     call.insert("name".into(), Value::String(name));
                     changed = true;
                 }
-                let key =
-                    if call.contains_key("arguments") || !call.contains_key("args") { "arguments" } else { "args" };
                 let mut arguments = call.get(key).cloned().unwrap_or_else(|| json!({}));
-                let id = ui.id().with(("call", n));
-                if json_line(ui, id, &mut arguments) {
-                    call.insert(key.into(), arguments);
+                let name = call.get("name").and_then(Value::as_str).unwrap_or_default().to_owned();
+                if !tool_on(cx, offered, &name) {
+                    ui.label(
+                        RichText::new(format!("{}  not on for this model", icon::WARNING))
+                            .size(10.5)
+                            .color(theme::warning()),
+                    )
+                    .on_hover_text(
+                        "This model has no tool of that name (and the sample does not offer it): turn it on in \
+                             the Tools or Native Tools block, or add it to the sample's tools",
+                    );
+                }
+                let raw_id = id.with("raw");
+                let schema = schema_of(cx, offered, &name).cloned();
+                let mut raw = ui.data(|d| d.get_temp::<bool>(raw_id)).unwrap_or(schema.is_none());
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if removable
+                        && ui
+                            .add(egui::Button::new(RichText::new(icon::X).size(11.0)).frame(false))
+                            .on_hover_text("Remove this call")
+                            .clicked()
+                    {
+                        remove = Some(n);
+                    }
+                    if schema.is_some()
+                        && widgets::icon_toggle(ui, icon::BRACKETS_CURLY, raw, "Edit the arguments as JSON").clicked()
+                    {
+                        raw = !raw;
+                        ui.data_mut(|d| d.insert_temp(raw_id, raw));
+                    }
+                });
+                if raw && json_line(ui, id, &mut arguments) {
+                    call.insert(key.into(), arguments.clone());
                     changed = true;
                 }
-                if removable
-                    && ui
-                        .add(egui::Button::new(RichText::new(icon::X).size(11.0)).frame(false))
-                        .on_hover_text("Remove this call")
-                        .clicked()
-                {
-                    remove = Some(n);
-                }
             });
+            // One line per argument, as the tool's schema describes it.
+            let properties = schema_of(cx, offered, call.get("name").and_then(Value::as_str).unwrap_or_default())
+                .and_then(|s| s.get("properties"))
+                .and_then(Value::as_object)
+                .cloned();
+            let raw = ui.data(|d| d.get_temp::<bool>(id.with("raw"))).unwrap_or(properties.is_none());
+            if let (false, Some(properties), Some(Value::Object(arguments))) = (raw, properties, call.get_mut(key)) {
+                egui::Grid::new(id.with("arguments")).num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
+                    let mut keys: Vec<String> = properties.keys().cloned().collect();
+                    keys.extend(arguments.keys().filter(|k| !properties.contains_key(*k)).cloned());
+                    for key in keys {
+                        let property = properties.get(&key);
+                        let kind = property.and_then(|p| p.get("type")).and_then(Value::as_str);
+                        let label = ui.label(RichText::new(&key).monospace().size(11.5).color(theme::text_dim()));
+                        if let Some(about) = property.and_then(|p| p.get("description")).and_then(Value::as_str) {
+                            label.on_hover_text(about);
+                        }
+                        let value = arguments.entry(key.clone()).or_insert_with(|| match kind {
+                            Some("number" | "integer") => json!(0),
+                            Some("boolean") => json!(false),
+                            _ => json!(""),
+                        });
+                        if argument_edit(ui, id.with(("arg", &key)), value, kind) {
+                            changed = true;
+                        }
+                        ui.end_row();
+                    }
+                });
+            }
         });
     }
     if let Some(n) = remove {
@@ -1384,7 +2288,8 @@ fn tool_calls(ui: &mut Ui, message: &mut Map<String, Value>, removable: bool) ->
 }
 
 /// The sample as the chat it teaches, every part editable where it shows.
-fn chat_edit(ui: &mut Ui, spec: &TextSpec, sample: &mut String) -> bool {
+fn chat_edit(ui: &mut Ui, cx: &DatasetContext<'_>, sample: &mut String) -> bool {
+    let spec = cx.spec;
     let Some(mut item) = object(sample) else { return raw_edit(ui, sample) };
     let mut changed = false;
     if item.contains_key("system") {
@@ -1400,7 +2305,7 @@ fn chat_edit(ui: &mut Ui, spec: &TextSpec, sample: &mut String) -> bool {
         });
     }
     if item.contains_key("messages") {
-        changed |= conversation_edit(ui, spec, &mut item);
+        changed |= conversation_edit(ui, cx, &mut item);
     } else if item.contains_key("context") && item.contains_key("compact") {
         bubble(ui, Who::Tool, false, |ui| {
             ui.label(RichText::new("Long context").size(10.5).color(theme::text_faint()));
@@ -1452,8 +2357,13 @@ fn chat_edit(ui: &mut Ui, spec: &TextSpec, sample: &mut String) -> bool {
     changed
 }
 
-fn conversation_edit(ui: &mut Ui, spec: &TextSpec, item: &mut Map<String, Value>) -> bool {
+fn conversation_edit(ui: &mut Ui, cx: &DatasetContext<'_>, item: &mut Map<String, Value>) -> bool {
+    let spec = cx.spec;
     let mut changed = false;
+    // The tools this sample can call: its own ("tools"), or the model's.
+    let offered: Option<Vec<ToolSpec>> = item.get("tools").and_then(Value::as_array).map(|list| {
+        list.iter().filter_map(|t| serde_json::from_value(t.get("function").unwrap_or(t).clone()).ok()).collect()
+    });
     let Some(Value::Array(messages)) = item.get_mut("messages") else { return false };
     let mut remove = None;
     for (n, message) in messages.iter_mut().enumerate() {
@@ -1472,16 +2382,11 @@ fn conversation_edit(ui: &mut Ui, spec: &TextSpec, item: &mut Map<String, Value>
                     let calls = message.get("tool_calls").is_some_and(|c| c.as_array().is_some_and(|c| !c.is_empty()));
                     let hint = if calls { "Text before its tool calls (often none)" } else { "The answer" };
                     changed |= field_text(ui, message, "content", hint, None, false);
-                    changed |= tool_calls(ui, message, true);
-                    if ui
-                        .small_button(format!("{}  Tool call", icon::PLUS))
-                        .on_hover_text("The model asks for a tool to be run")
-                        .clicked()
-                    {
-                        let tool = spec.tools.first().map_or("tool", |t| t.name.as_str());
+                    changed |= tool_calls(ui, cx, offered.as_deref(), message, true);
+                    if let Some(tool) = tool_picker(ui, cx, offered.as_deref()) {
                         let calls = message.entry("tool_calls").or_insert_with(|| json!([]));
                         if let Some(calls) = calls.as_array_mut() {
-                            calls.push(json!({ "name": tool, "arguments": {} }));
+                            calls.push(json!({ "name": tool.name, "arguments": arguments_template(&tool.parameters) }));
                         }
                         changed = true;
                     }

@@ -335,11 +335,27 @@ fn edit_param(
         }
         ParamKind::Float { min, max, unit } => {
             let mut value: f64 = read(node, param);
-            // Dragging covers a narrow range finely and a wide one quickly.
+            // Dragging covers a narrow range finely and a wide one quickly; small values (learning
+            // rates) show their digits and drag in proportion to their size.
             let range = max - min;
-            let speed = if range > 1e6 { 0.1 } else { (range / 1000.0).clamp(0.02, 5.0) };
-            let field =
-                DragValue::new(&mut value).range(*min..=*max).speed(speed).max_decimals(2).suffix(pad_unit(unit));
+            let small = value != 0.0 && value.abs() < 0.1;
+            let speed = if small {
+                value.abs() * 0.02
+            } else if range > 1e6 {
+                0.1
+            } else {
+                (range / 1000.0).clamp(0.02, 5.0)
+            };
+            let decimals = if small { (2 + (-value.abs().log10()).floor() as usize).min(7) } else { 2 };
+            let field = DragValue::new(&mut value)
+                .range(*min..=*max)
+                .speed(speed)
+                .max_decimals(decimals)
+                .custom_formatter(move |v, _| {
+                    let text = format!("{v:.decimals$}");
+                    if text.contains('.') { text.trim_end_matches('0').trim_end_matches('.').to_owned() } else { text }
+                })
+                .suffix(pad_unit(unit));
             if ui.add(field).changed() {
                 node.set_param(key, value);
             }
@@ -815,10 +831,7 @@ fn edit_model(ui: &mut Ui, project: &mut Project, node_id: NodeId, key: &str, re
     ui.horizontal_wrapped(|ui| {
         if ui
             .button(format!("{}  Load model file…", icon::FOLDER_OPEN))
-            .on_hover_text(
-                "A .magic workspace or .szi Magi model from the Magic tab, a .gguf file (runs with llama.cpp, \
-                 where it is) or an .onnx model",
-            )
+            .on_hover_text("A .magic workspace or .szi Magi model from the Magic tab, or an .onnx model")
             .clicked()
         {
             requests.push(UiRequest::LoadModel(node_id, key.to_owned()));

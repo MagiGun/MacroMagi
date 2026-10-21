@@ -41,8 +41,6 @@ pub enum ImportFrom {
     Folder,
     /// A `.zip` or `.onnx` file.
     File,
-    /// A GGUF model file (LM Studio, llama.cpp…).
-    Gguf,
 }
 
 pub enum MagicEvent {
@@ -68,16 +66,19 @@ pub enum MagicEvent {
     TryPicture,
     StartTest,
     StopTest,
-    Train,
+    /// Train: from where, and which stages.
+    Train(crate::magic::TrainChoice),
+    /// Save the weights kept after a stage as a base model (`.szi`) to fine-tune other models from.
+    SaveBase(NodeId),
     StopTraining,
     /// Save the package as the Compile block says.
     Compile,
-    /// Put the compiled GGUF file into LM Studio.
-    AddToLmStudio,
     UseInMacro,
     OpenFolder(PathBuf),
     OpenRuntime,
     Toast(String),
+    /// The dataset editor's generator endpoint changed: keep it in the settings.
+    GeneratorSettings(crate::magic::generate::GeneratorSettings),
 }
 
 pub struct MagicEnv<'a> {
@@ -90,6 +91,8 @@ pub struct MagicEnv<'a> {
     pub show_console: bool,
     pub show_panel: bool,
     pub show_grid: bool,
+    /// Where the dataset editor generates samples.
+    pub generator: crate::magic::generate::GeneratorSettings,
 }
 
 /// The Magic tab's blocks.
@@ -110,14 +113,14 @@ struct Chat {
     answers: Vec<(String, Result<magi_ml::tools::AgentAnswer, String>)>,
     /// The ONNX model, loaded once and kept, with the fingerprint of its bytes.
     engine: Arc<Mutex<Option<(u64, magi_ml::TextModel)>>>,
-    /// Loading it (or starting llama.cpp) in the background.
+    /// Loading it in the background.
     loading: Option<Job>,
     load_error: Option<String>,
 }
 
 /// Loads a model for the Prompt Model block: on the native engine (from its
 /// weights) when it can, else its ONNX model.
-fn load_engine(
+pub(crate) fn load_engine(
     native: bool,
     architecture: &magi_core::magic::Architecture,
     memory: &magi_core::magic::MemorySpec,
@@ -132,7 +135,7 @@ fn load_engine(
 }
 
 /// A cheap fingerprint of a model's bytes: its length and a sample of them.
-fn fingerprint(bytes: &[u8]) -> u64 {
+pub(crate) fn fingerprint(bytes: &[u8]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     bytes.len().hash(&mut hasher);
@@ -307,14 +310,17 @@ impl MagicTab {
                 spec: &spec,
                 data: &doc.file.data,
                 stages: studio::stage_files(&doc.studio.graph),
+                tools: known_tools(&spec),
+                generator: Some(&env.generator),
             };
-            let events = editor.show(ui.ctx(), &cx);
-            for event in events {
+            let edits = editor.show(ui.ctx(), &cx);
+            for event in edits {
                 match event {
                     DatasetEvent::Save(file, content) => {
                         doc.file.data.insert(file, content.into_bytes());
                         doc.files_changed();
                     }
+                    DatasetEvent::Generator(settings) => events.push(MagicEvent::GeneratorSettings(settings)),
                 }
             }
             if !editor.open {
@@ -453,7 +459,7 @@ impl MagicTab {
         let share = state.progress.filter(|(_, n)| *n > 0).map(|(s, n)| s as f32 / n as f32);
         widgets::progress_bar(ui, share);
         let seconds = job.started.elapsed().as_secs_f64();
-        let mut facts = vec![format!("{}:{:02} so far", seconds as u64 / 60, seconds as u64 % 60)];
+        let mut facts = vec![format!("{} so far", time_words(seconds))];
         if let Some(last) = state.losses.last() {
             facts.push(format!("loss {:.4}", last[1]));
         }
@@ -465,7 +471,7 @@ impl MagicTab {
             && share > 0.0
         {
             let stage_left = (steps - step) as f64 * (state.stage_seconds() / step as f64);
-            facts.push(format!("this stage ends in about {:.0} s", stage_left.max(0.0)));
+            facts.push(format!("this stage ends in about {}", time_words(stage_left)));
         }
         ui.label(RichText::new(facts.join("  ·  ")).monospace().color(theme::text_dim()));
         ui.add_space(8.0);
@@ -518,9 +524,21 @@ impl MagicTab {
             kinds::PROMPT => self.chat_panel(ui, node_id, events),
             kinds::TEST => self.test_panel(ui, env, events),
             kinds::TEXT_DATA => {
-                if let Some(open) = text_data_card(ui, doc, node_id, events) {
+                if let Some((open, scanned)) = text_data_card(ui, doc, node_id, events) {
                     let bytes = doc.file.data.get(&open).cloned().unwrap_or_default();
-                    self.dataset = Some(DatasetEditor::new(&open, &bytes));
+                    let mut editor = DatasetEditor::new(&open, &bytes);
+                    if scanned {
+                        let spec = doc.file.model.text.clone().unwrap_or_default();
+                        let cx = dataset_editor::DatasetContext {
+                            spec: &spec,
+                            data: &doc.file.data,
+                            stages: studio::stage_files(&doc.studio.graph),
+                            tools: known_tools(&spec),
+                            generator: None,
+                        };
+                        editor = editor.with_scan(&cx);
+                    }
+                    self.dataset = Some(editor);
                 }
             }
             kinds::IMAGE_DATA => pictures_card(ui, doc, &mut self.thumbnails, events),
@@ -550,16 +568,19 @@ impl MagicTab {
                 }
                 connections(ui, doc, node_id);
                 match kind.as_str() {
+                    kinds::PRETRAIN | kinds::FINETUNE | kinds::RL | kinds::COMPACTION => {
+                        stage_card(ui, doc, node_id, self.job.as_ref().is_some_and(|j| j.is_running()), events)
+                    }
                     kinds::COMPILE => compile_card(ui, doc, &self.compiled, events),
                     kinds::BASE => widgets::note(
                         ui,
                         "Training further needs the weights of a model trained in MacroMagi. Models imported from \
-                         elsewhere (ONNX or GGUF) can be set up and used with Use As It Is, but not trained further.",
+                         elsewhere (ONNX) can be set up and used with Use As It Is, but not trained further.",
                     ),
                     kinds::ZERO => widgets::note(
                         ui,
                         "Next: Model Size and layer blocks give it a shape; the training stages after them teach it. \
-                         Presets › Commons puts well-known architectures (DeepSeek, Llama) in place.",
+                         Presets › Commons puts Magi's architectures in place.",
                     ),
                     _ => {}
                 }
@@ -605,22 +626,11 @@ impl MagicTab {
         let architecture = doc.file.model.architecture.clone().unwrap_or_default();
         let memory = doc.file.model.memory.clone().unwrap_or_default();
 
-        // What runs it: MacroMagi's native engine (with its cache) or the ONNX
-        // model – both "built-in" – or llama.cpp with a GGUF file.
+        // What runs it: MacroMagi's native engine (with its cache), or the ONNX model.
         let native = own && !doc.file.weights.is_empty() && architecture.native_problem().is_none();
         let has_onnx = !doc.file.onnx.is_empty();
-        let built_in = native || has_onnx;
-        let llama = magi_ml::llama::llama().is_some();
-        let gguf = doc.file.model.gguf.clone().map(PathBuf::from).or_else(|| doc.compiled_gguf());
-        let use_gguf = match params.engine.as_str() {
-            "onnx" if built_in => false,
-            "gguf" if gguf.is_some() => true,
-            _ => doc.file.model.gguf.is_some() || (!native && gguf.is_some() && (llama || !has_onnx)),
-        };
-        let ready = if use_gguf { gguf.is_some() } else { built_in };
-        let key = if use_gguf {
-            0
-        } else if native {
+        let ready = native || has_onnx;
+        let key = if native {
             fingerprint(&doc.file.weights) ^ fingerprint(serde_json::to_string(&memory).unwrap_or_default().as_bytes())
         } else {
             fingerprint(&doc.file.onnx)
@@ -640,23 +650,7 @@ impl MagicTab {
 
         // ---- the model: what runs it, and whether it is loaded ----
         card(ui, "Model", |ui| {
-            if built_in && gguf.is_some() {
-                ui.horizontal(|ui| {
-                    widgets::fixed_label(ui, RichText::new("Run with").color(theme::text_dim()), 110.0).on_hover_text(
-                        "Built-in: MacroMagi's native engine (with its cache), or the ONNX model. llama.cpp: the \
-                         compiled GGUF file",
-                    );
-                    let mut engine = if use_gguf { "gguf".to_owned() } else { "onnx".to_owned() };
-                    if widgets::segmented(
-                        ui,
-                        &mut engine,
-                        &[("onnx".to_owned(), "Built-in"), ("gguf".to_owned(), "llama.cpp")],
-                    ) {
-                        params.engine = engine;
-                    }
-                });
-            }
-            if !use_gguf && ready {
+            if ready {
                 ui.label(
                     RichText::new(if native {
                         "Native engine: a key/value cache, so each token is one step"
@@ -668,13 +662,9 @@ impl MagicTab {
                 );
             }
             let busy = self.chat.pending.is_some() || self.chat.loading.is_some();
-            let loaded = if use_gguf {
-                gguf.as_deref().is_some_and(magi_ml::llama::is_loaded)
-            } else {
-                match self.chat.engine.try_lock() {
-                    Ok(slot) => slot.as_ref().is_some_and(|(k, _)| *k == key),
-                    Err(_) => true,
-                }
+            let loaded = match self.chat.engine.try_lock() {
+                Ok(slot) => slot.as_ref().is_some_and(|(k, _)| *k == key),
+                Err(_) => true,
             };
             let (dot, text, color) = if self.chat.loading.is_some() {
                 (icon::CIRCLE_NOTCH, "Loading…", theme::text_dim())
@@ -692,13 +682,7 @@ impl MagicTab {
                             .on_hover_text("Frees its memory")
                             .clicked()
                         {
-                            if use_gguf {
-                                if let Some(path) = &gguf {
-                                    magi_ml::llama::stop_server(path);
-                                }
-                            } else {
-                                *self.chat.engine.lock().unwrap_or_else(|p| p.into_inner()) = None;
-                            }
+                            *self.chat.engine.lock().unwrap_or_else(|p| p.into_inner()) = None;
                         }
                     } else if ui.small_button(format!("{}  Load", icon::UPLOAD_SIMPLE)).clicked() {
                         self.chat.load_error = None;
@@ -706,22 +690,11 @@ impl MagicTab {
                         let (done, ctx) = (Arc::clone(&slot), ui.ctx().clone());
                         let engine = Arc::clone(&self.chat.engine);
                         let (spec, architecture, memory) = (spec.clone(), architecture.clone(), memory.clone());
-                        let options = magi_ml::AskOptions { context: params.context as usize, ..Default::default() }
-                            .with_memory(Some(&memory))
-                            .with_scaling(own.then_some(&architecture));
-                        let bytes = match (use_gguf, native) {
-                            (true, _) => Vec::new(),
-                            (false, true) => doc.file.weights.clone(),
-                            (false, false) => doc.file.onnx.clone(),
-                        };
-                        let path = gguf.clone().filter(|_| use_gguf);
+                        let bytes = if native { doc.file.weights.clone() } else { doc.file.onnx.clone() };
                         std::thread::spawn(move || {
-                            let result = match path {
-                                Some(path) => magi_ml::llama::load_gguf(&path, &spec, own, &options),
-                                None => load_engine(native, &architecture, &memory, &spec, &bytes).map(|model| {
-                                    *engine.lock().unwrap_or_else(|p| p.into_inner()) = Some((key, model));
-                                }),
-                            };
+                            let result = load_engine(native, &architecture, &memory, &spec, &bytes).map(|model| {
+                                *engine.lock().unwrap_or_else(|p| p.into_inner()) = Some((key, model));
+                            });
                             *done.lock().unwrap_or_else(|p| p.into_inner()) = Some(result.map_err(|e| e.0));
                             ctx.request_repaint();
                         });
@@ -732,13 +705,7 @@ impl MagicTab {
             if let Some(error) = &self.chat.load_error {
                 ui.add(egui::Label::new(RichText::new(error).size(11.5).color(theme::danger())).wrap());
             }
-            if use_gguf && !llama {
-                widgets::note(ui, "llama.cpp is not installed: Settings › Runtime installs it.");
-                if ui.small_button(format!("{}  Open Settings › Runtime", icon::GEAR)).clicked() {
-                    events.push(MagicEvent::OpenRuntime);
-                }
-            }
-            if !use_gguf && !native && has_onnx && spec.context > 512 {
+            if !native && has_onnx && spec.context > 512 {
                 widgets::note(
                     ui,
                     "The ONNX model reads the whole context window again for every token it writes, so long answers \
@@ -749,8 +716,7 @@ impl MagicTab {
         ui.add_space(4.0);
 
         // ---- the memory of what it read (native engine) ----
-        if !use_gguf
-            && native
+        if native
             && let Ok(slot) = self.chat.engine.try_lock()
             && let Some(telemetry) = slot.as_ref().filter(|(k, _)| *k == key).and_then(|(_, m)| m.telemetry())
         {
@@ -786,20 +752,18 @@ impl MagicTab {
         card(ui, "Answering", |ui| {
             ui.horizontal(|ui| {
                 widgets::fixed_label(ui, RichText::new("Context window").color(theme::text_dim()), 110.0);
-                if use_gguf || native {
+                if native {
                     let mut own_context = params.context == 0;
-                    let theirs = if use_gguf && !own { "the model's".to_owned() } else { format!("{longest}") };
-                    if ui.checkbox(&mut own_context, format!("The model's ({theirs})")).changed() {
-                        params.context = match (own_context, own) {
-                            (true, _) => 0,
-                            (false, true) => (longest / 2).max(256),
-                            (false, false) => 16384,
-                        };
+                    if ui.checkbox(&mut own_context, format!("The model's ({longest})")).changed() {
+                        params.context = if own_context { 0 } else { (longest / 2).max(256) };
                     }
-                    // llama.cpp keeps a model it knows within the context it learned.
-                    let most = if own { longest.max(256) } else { 1_048_576 };
                     if !own_context {
-                        ui.add(DragValue::new(&mut params.context).range(256..=most).speed(64).suffix(" tokens"));
+                        ui.add(
+                            DragValue::new(&mut params.context)
+                                .range(256..=longest.max(256))
+                                .speed(64)
+                                .suffix(" tokens"),
+                        );
                     }
                 } else {
                     ui.label(RichText::new(format!("{} tokens", spec.context)).color(theme::text_dim()));
@@ -807,7 +771,7 @@ impl MagicTab {
             });
             widgets::note(
                 ui,
-                if use_gguf || native {
+                if native {
                     format!(
                         "How much text it reads at once – system text, tools, request and answer together. It \
                          learned {} tokens{}; less keeps only the latest part and saves memory.",
@@ -854,7 +818,7 @@ impl MagicTab {
                     widgets::toggle(ui, &mut params.native_tools)
                         .on_hover_text("Run the tools it calls on this computer and give it their results");
                     if params.native_tools {
-                        ui.add(DragValue::new(&mut params.max_steps).range(1..=64).suffix(" calls at most"));
+                        ui.add(DragValue::new(&mut params.max_steps).range(1..=200).suffix(" calls at most"));
                     }
                 });
             }
@@ -931,10 +895,7 @@ impl MagicTab {
                             _ => None,
                         },
                         effort: params.effort.clone(),
-                        ..Default::default()
-                    }
-                    .with_memory(Some(&memory))
-                    .with_scaling(own.then_some(&architecture));
+                    };
                     let steps = if native_tools && params.native_tools { params.max_steps as usize } else { 0 };
                     let (engine, spec, architecture, memory) =
                         (Arc::clone(&self.chat.engine), spec.clone(), architecture.clone(), memory.clone());
@@ -949,37 +910,24 @@ impl MagicTab {
                     // The model's bytes go along only when it must be loaded first.
                     let loaded_now =
                         self.chat.engine.try_lock().is_ok_and(|s| s.as_ref().is_some_and(|(k, _)| *k == key));
-                    let bytes = match (use_gguf || loaded_now, native) {
+                    let bytes = match (loaded_now, native) {
                         (true, _) => Vec::new(),
                         (false, true) => doc.file.weights.clone(),
                         (false, false) => doc.file.onnx.clone(),
                     };
-                    let path = gguf.clone().filter(|_| use_gguf);
                     std::thread::spawn(move || {
                         let mut run = |call: &magi_core::magic::ToolCall| magi_ml::tools::run_call(&spec, &tools, call);
-                        let result = match path {
-                            Some(path) if own => {
-                                let mut generate =
-                                    |prompt: &str| magi_ml::llama::complete_gguf(&path, &spec, prompt, &options);
-                                magi_ml::tools::agent(&spec, &asked, &options, steps, &mut generate, &mut run)
+                        let mut generate = |prompt: &str| {
+                            let mut slot = engine.lock().unwrap_or_else(|p| p.into_inner());
+                            if slot.as_ref().is_none_or(|(k, _)| *k != key) {
+                                *slot = None;
+                                *slot = Some((key, load_engine(native, &architecture, &memory, &spec, &bytes)?));
                             }
-                            Some(path) => magi_ml::llama::ask_gguf_with(&path, &spec, false, &asked, &options)
-                                .map(|answer| magi_ml::tools::AgentAnswer { answer, steps: Vec::new() }),
-                            None => {
-                                let mut generate = |prompt: &str| {
-                                    let mut slot = engine.lock().unwrap_or_else(|p| p.into_inner());
-                                    if slot.as_ref().is_none_or(|(k, _)| *k != key) {
-                                        *slot = None;
-                                        *slot =
-                                            Some((key, load_engine(native, &architecture, &memory, &spec, &bytes)?));
-                                    }
-                                    let (_, model) = slot.as_mut().expect("loaded above");
-                                    magi_ml::complete(model, &spec, prompt, &options)
-                                };
-                                magi_ml::tools::agent(&spec, &asked, &options, steps, &mut generate, &mut run)
-                            }
-                        }
-                        .map_err(|e| e.0);
+                            let (_, model) = slot.as_mut().expect("loaded above");
+                            magi_ml::complete(model, &spec, prompt, &options)
+                        };
+                        let result = magi_ml::tools::agent(&spec, &asked, &options, steps, &mut generate, &mut run)
+                            .map_err(|e| e.0);
                         *slot.lock().unwrap_or_else(|p| p.into_inner()) = Some(result);
                         ctx.request_repaint();
                     });
@@ -1008,7 +956,7 @@ impl MagicTab {
                         match done {
                             Err(error) => {
                                 ui.add(egui::Label::new(RichText::new(error).color(theme::danger())).wrap());
-                                if error.contains("llama.cpp") || error.contains("Python") {
+                                if error.contains("Python") {
                                     runtime |= ui.button(format!("{}  Open Settings › Runtime", icon::GEAR)).clicked();
                                 }
                             }
@@ -1340,7 +1288,7 @@ fn overview(
                     if widgets::accent_button(ui, format!("{}  Train", icon::PLAY), theme::accent(), vec2(0.0, 28.0))
                         .clicked()
                     {
-                        events.push(MagicEvent::Train);
+                        events.push(MagicEvent::Train(Default::default()));
                     }
                 }
                 _ => {}
@@ -1371,7 +1319,7 @@ fn overview(
              model is.",
             "Datasets wire into the stages that learn from them; an Optimizer block wires into each stage it drives.",
             "Select a block to change it and see what is wired into it. Right-click the canvas, or Add in the banner, \
-             for more blocks; Presets › Commons has well-known architectures.",
+             for more blocks; Presets › Commons has Magi's architectures.",
         ] {
             ui.add(egui::Label::new(RichText::new(format!("•  {line}")).size(11.5).color(theme::text_dim())).wrap());
         }
@@ -1509,11 +1457,9 @@ fn empty_state(ui: &mut Ui, events: &mut Vec<MagicEvent>) {
             }
             ui.label(RichText::new("·").color(theme::text_faint()));
             ui.menu_button(format!("{}  Import…", icon::DOWNLOAD_SIMPLE), |ui| {
-                for (from, label) in [
-                    (ImportFrom::Gguf, "A GGUF model (LM Studio, llama.cpp)…"),
-                    (ImportFrom::Folder, "An ONNX project folder…"),
-                    (ImportFrom::File, "A .zip or .onnx file…"),
-                ] {
+                for (from, label) in
+                    [(ImportFrom::Folder, "An ONNX project folder…"), (ImportFrom::File, "A .zip or .onnx file…")]
+                {
                     if ui.button(label).clicked() {
                         events.push(MagicEvent::Import(from));
                         ui.close();
@@ -1577,8 +1523,7 @@ fn thinking_card(ui: &mut Ui, model: &mut MagicModel) {
         format!(
             "Training learns every answer that has reasoning both ways: thinking first ({}…{}), and straight away after \
              an empty thinking span. Answers without reasoning are learned without it. Requests then choose: the \
-             Prompt Model block's Thinking switch, LM Studio's Enable Thinking toggle, or enable_thinking in a chat \
-             template.",
+             Prompt Model block's Thinking switch, or the AI Agent window's.",
             text.think_tags.0, text.think_tags.1
         ),
     );
@@ -1654,7 +1599,7 @@ fn effort_card(ui: &mut Ui, model: &mut MagicModel, doc: &MagicDoc) {
             "The model is told its level at the top of every request – “Reasoning effort: {}” – and learns how much \
              to reason at each level from samples written at it. In the dataset editor, give a sample one or more \
              levels (in its file: \"effort\": \"{}\", or a list for several); samples without one are at the \
-             default. LM Studio gets a Reasoning Effort choice.",
+             default.",
             effort.levels.last().map_or("high", String::as_str),
             effort.levels.last().map_or("high", String::as_str),
         ),
@@ -1685,9 +1630,7 @@ fn info_card(ui: &mut Ui, model: &mut MagicModel, doc: &MagicDoc, events: &mut V
         );
     });
     let size_mb = doc.file.onnx.len() as f64 / (1024.0 * 1024.0);
-    let facts = if let Some(path) = &doc.file.model.gguf {
-        format!("GGUF model · {}", path)
-    } else if size_mb > 0.0 && doc.file.model.kind == ModelKind::Vision {
+    let facts = if size_mb > 0.0 && doc.file.model.kind == ModelKind::Vision {
         let classes = doc.shape.as_ref().and_then(|s| s.classes());
         format!(
             "Vision · reads {}×{} pictures · {} answers · {size_mb:.1} MB",
@@ -1740,7 +1683,6 @@ fn memory_card(ui: &mut Ui, model: &mut MagicModel) {
                         ("f32", "F32 – exact, the largest"),
                         ("f16", "F16 – half the size"),
                         ("q8_0", "Q8_0 – a quarter"),
-                        ("q4_0", "Q4_0 – an eighth (llama.cpp; Q8_0 in MacroMagi)"),
                     ] {
                         ui.selectable_value(&mut memory.precision, value.to_owned(), label);
                     }
@@ -1785,12 +1727,6 @@ fn memory_card(ui: &mut Ui, model: &mut MagicModel) {
             ui.add(DragValue::new(&mut memory.read_blocks).range(0..=4096))
                 .on_hover_text("0: all of them, exactly. Otherwise the first, the latest and the most relevant ones");
         });
-        widgets::toggle_row(
-            ui,
-            "Flash attention (llama.cpp)",
-            "Needed for a quantized cache in llama.cpp",
-            &mut memory.flash_attention,
-        );
         widgets::note(
             ui,
             "Reading only some blocks makes very long texts fast, at the cost of exactness: each block of 256 tokens is chosen by how well its mean key matches the token's query. The Prompt Model block shows how full each tier is while it runs.",
@@ -1924,6 +1860,49 @@ fn text_card(ui: &mut Ui, model: &mut MagicModel) {
         );
     }
     ui.add_space(4.0);
+    card(ui, "Tokens", |ui| {
+        let mut learned = text.tokenizer.learned();
+        ui.horizontal(|ui| {
+            widgets::fixed_label(ui, RichText::new("Tokens").color(theme::text_dim()), 120.0);
+            if widgets::segmented(ui, &mut learned, &[(true, "Learned"), (false, "Bytes")]) {
+                text.tokenizer = if learned {
+                    magi_core::magic::TokenizerSpec::learned_of(4096)
+                } else {
+                    magi_core::magic::TokenizerSpec::default()
+                };
+            }
+        });
+        if learned {
+            ui.horizontal(|ui| {
+                widgets::fixed_label(ui, RichText::new("Size").color(theme::text_dim()), 120.0);
+                let mut size = text.tokenizer.size;
+                if ui.add(DragValue::new(&mut size).range(512..=65_536).speed(64).suffix(" tokens")).changed() {
+                    text.tokenizer.size = size;
+                    text.tokenizer.merges.clear();
+                }
+            });
+            let pieces = text.tokenizer.merges.len();
+            widgets::note(
+                ui,
+                if pieces > 0 {
+                    format!(
+                        "{pieces} pieces learned from the datasets: about a third as many tokens as bytes, so the model reads \
+                         three times the text at once and trains three times faster."
+                    )
+                } else {
+                    "Pieces of words learned from the datasets when training starts from zero: about a third as many \
+                     tokens as bytes, so the model reads three times the text at once and trains three times faster."
+                        .to_owned()
+                },
+            );
+        } else {
+            widgets::note(ui, "Every byte is a token: simple, but the model reads a third as much text at once.");
+        }
+        if trained {
+            widgets::note(ui, "Changing the tokens means training again from the start.");
+        }
+    });
+    ui.add_space(4.0);
     card(ui, "How it writes", |ui| {
         ui.horizontal(|ui| {
             widgets::fixed_label(ui, RichText::new("Temperature").color(theme::text_dim()), 120.0);
@@ -1942,8 +1921,7 @@ fn text_card(ui: &mut Ui, model: &mut MagicModel) {
         widgets::note(
             ui,
             format!(
-                "Context window: {} tokens – set in the Model Size block (a token is a byte of text or a tag). \
-                 The Prompt Model block can run GGUF models with another.",
+                "Context window: {} tokens – set in the Model Size block (a token is a piece of a word or a tag).",
                 text.context
             ),
         );
@@ -1993,9 +1971,14 @@ fn text_card(ui: &mut Ui, model: &mut MagicModel) {
             text.ensure_specials();
         }
         ui.label(
-            RichText::new(format!("{} tokens: 256 bytes and {} tags", text.vocab_size(), text.specials.len()))
-                .size(11.0)
-                .color(theme::text_faint()),
+            RichText::new(format!(
+                "{} tokens: 256 bytes, {} learned pieces and {} tags",
+                text.vocab_size(),
+                text.tokenizer.merges.len(),
+                text.specials.len()
+            ))
+            .size(11.0)
+            .color(theme::text_faint()),
         );
     });
 }
@@ -2451,11 +2434,61 @@ fn pictures_card(
 // ---- datasets -------------------------------------------------------------------
 
 /// A Text Dataset block's files. Returns a file to open in the editor.
-fn text_data_card(ui: &mut Ui, doc: &mut MagicDoc, node_id: NodeId, events: &mut Vec<MagicEvent>) -> Option<String> {
+/// How many samples a dataset file has, and how many with problems – worked out
+/// again only when the file or the model's text setup changes.
+fn file_counts(ui: &Ui, file: &str, bytes: &[u8], spec: &TextSpec) -> (usize, usize) {
+    type Counts = std::collections::HashMap<String, (usize, usize, String, usize, usize)>;
+    let id = egui::Id::new("magic-dataset-counts");
+    let key = format!("{:?}{:?}{}", spec.effort, spec.tool_tags, spec.tools.len());
+    let (len, at) = (bytes.len(), bytes.as_ptr() as usize);
+    if let Some((_, _, _, samples, problems)) = ui
+        .data(|d| d.get_temp::<std::sync::Arc<Counts>>(id))
+        .and_then(|c| c.get(file).cloned())
+        .filter(|(l, a, k, ..)| *l == len && *a == at && *k == key)
+    {
+        return (samples, problems);
+    }
+    let jsonl = studio::is_jsonl(file);
+    let samples = studio::split_samples(file, &String::from_utf8_lossy(bytes));
+    let problems = samples.iter().filter(|s| studio::check_sample(jsonl, s, spec).is_err()).count();
+    ui.data_mut(|d| {
+        let mut counts: Counts = d.get_temp::<std::sync::Arc<Counts>>(id).map(|c| (*c).clone()).unwrap_or_default();
+        counts.insert(file.to_owned(), (len, at, key, samples.len(), problems));
+        d.insert_temp(id, std::sync::Arc::new(counts));
+    });
+    (samples.len(), problems)
+}
+
+/// The files of a Text Dataset block, and their scans (Scan all files). Returns
+/// a file to open in the dataset editor, and whether to open it with its scan.
+fn text_data_card(
+    ui: &mut Ui,
+    doc: &mut MagicDoc,
+    node_id: NodeId,
+    events: &mut Vec<MagicEvent>,
+) -> Option<(String, bool)> {
     let mut params: TextDataParams = doc.studio.graph.node(node_id)?.params_or_default();
     let spec = doc.file.model.text.clone().unwrap_or_default();
     let mut open = None;
     let mut changed = false;
+    // What the last Scan all files found, by file: (bytes scanned, finding titles).
+    type Scans = std::collections::HashMap<String, (usize, Vec<String>)>;
+    let scans_id = egui::Id::new(("magic-dataset-scans", node_id));
+    let scans: Scans =
+        ui.data(|d| d.get_temp::<std::sync::Arc<Scans>>(scans_id)).map(|s| (*s).clone()).unwrap_or_default();
+    let mut scan_now = false;
+    widgets::button_row(ui, |ui| {
+        if ui
+            .button(format!("{}  Scan all files", icon::MAGNIFYING_GLASS_PLUS))
+            .on_hover_text(
+                "Scans every file of this block for issues, as the dataset editor's Scan for issues does, and marks \
+                 the ones with any: click a mark to see them",
+            )
+            .clicked()
+        {
+            scan_now = true;
+        }
+    });
     for negative in [false, true] {
         let (title, about) = if negative {
             (
@@ -2480,22 +2513,38 @@ fn text_data_card(ui: &mut Ui, doc: &mut MagicDoc, node_id: NodeId, events: &mut
             }
             for (index, file) in list.iter().enumerate() {
                 let bytes = doc.file.data.get(file);
-                let samples =
-                    bytes.map(|b| studio::split_samples(file, &String::from_utf8_lossy(b))).unwrap_or_default();
-                let jsonl = studio::is_jsonl(file);
-                let problems = samples.iter().filter(|s| studio::check_sample(jsonl, s, &spec).is_err()).count();
+                let (count, problems) = bytes.map(|b| file_counts(ui, file, b, &spec)).unwrap_or_default();
                 ui.horizontal(|ui| {
                     ui.label(format!("{}  {}", icon::FILE_TEXT, file.rsplit('/').next().unwrap_or_default()));
                     let detail = match (bytes.is_some(), problems) {
                         (false, _) => "missing".to_owned(),
-                        (true, 0) => format!("{} samples", samples.len()),
-                        (true, n) => format!("{} samples · {n} with problems", samples.len()),
+                        (true, 0) => format!("{count} samples"),
+                        (true, n) => format!("{count} samples · {n} with problems"),
                     };
                     ui.label(RichText::new(detail).size(11.0).color(if problems > 0 {
                         theme::warning()
                     } else {
                         theme::text_faint()
                     }));
+                    // Its scan, when Scan all files has run since it last changed.
+                    if let Some((_, titles)) = scans.get(file).filter(|(len, _)| Some(*len) == bytes.map(Vec::len)) {
+                        if titles.is_empty() {
+                            ui.label(RichText::new(icon::CHECK_CIRCLE).color(theme::success()))
+                                .on_hover_text("No issues found");
+                        } else {
+                            let mark = egui::Button::new(
+                                RichText::new(format!("{}  {}", icon::WARNING, titles.len())).color(theme::warning()),
+                            )
+                            .small();
+                            if ui
+                                .add(mark)
+                                .on_hover_text(format!("{}\n\nClick to see them.", titles.join("\n")))
+                                .clicked()
+                            {
+                                open = Some((file.clone(), true));
+                            }
+                        }
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if widgets::icon_button(ui, icon::TRASH, "Take it out of the dataset").clicked() {
                             remove = Some(index);
@@ -2503,7 +2552,7 @@ fn text_data_card(ui: &mut Ui, doc: &mut MagicDoc, node_id: NodeId, events: &mut
                         if bytes.is_some()
                             && widgets::icon_button(ui, icon::PENCIL_SIMPLE, "Open it in the dataset editor").clicked()
                         {
-                            open = Some(file.clone());
+                            open = Some((file.clone(), false));
                         }
                     });
                 });
@@ -2535,7 +2584,7 @@ fn text_data_card(ui: &mut Ui, doc: &mut MagicDoc, node_id: NodeId, events: &mut
                     let file = new_name(&doc.file.data, "jsonl");
                     doc.file.data.insert(file.clone(), dataset_editor::template(&file, negative).into_bytes());
                     list.push(file.clone());
-                    open = Some(file);
+                    open = Some((file, false));
                     changed = true;
                 }
                 if !negative
@@ -2547,7 +2596,7 @@ fn text_data_card(ui: &mut Ui, doc: &mut MagicDoc, node_id: NodeId, events: &mut
                     let file = new_name(&doc.file.data, "md");
                     doc.file.data.insert(file.clone(), dataset_editor::template(&file, false).into_bytes());
                     list.push(file.clone());
-                    open = Some(file);
+                    open = Some((file, false));
                     changed = true;
                 }
                 let examples: Vec<(String, String, bool)> =
@@ -2577,8 +2626,233 @@ fn text_data_card(ui: &mut Ui, doc: &mut MagicDoc, node_id: NodeId, events: &mut
             node.set_params(&params);
         }
     }
+    if scan_now {
+        let cx = dataset_editor::DatasetContext {
+            spec: &spec,
+            data: &doc.file.data,
+            stages: studio::stage_files(&doc.studio.graph),
+            tools: known_tools(&spec),
+            generator: None,
+        };
+        let mut found: Scans = Scans::new();
+        for file in params.positive.iter().chain(&params.negative) {
+            if let Some(bytes) = doc.file.data.get(file) {
+                found.insert(file.clone(), (bytes.len(), DatasetEditor::scan_titles(file, bytes, &cx)));
+            }
+        }
+        ui.data_mut(|d| d.insert_temp(scans_id, std::sync::Arc::new(found)));
+    }
     connections(ui, doc, node_id);
     open
+}
+
+/// Every tool MacroMagi knows, and whether the model has it on: its own tools,
+/// the native tools and the AI Agent's.
+pub fn known_tools(spec: &TextSpec) -> Vec<(ToolSpec, bool)> {
+    let mut tools: Vec<(ToolSpec, bool)> = spec.tools.iter().map(|t| (t.clone(), true)).collect();
+    let mut add = |tool: ToolSpec| {
+        if !tools.iter().any(|(t, _)| t.name == tool.name) {
+            tools.push((tool, false));
+        }
+    };
+    for tool in magi_core::native_tools::built_in() {
+        add(tool.spec());
+    }
+    for (name, about) in AGENT_TOOLS {
+        add(crate::magic::agent_tool(name, about));
+    }
+    tools
+}
+
+// ---- training stages ----------------------------------------------------------------
+
+/// A stage's saved weights, and training from it: from here (after the stage
+/// before), or this stage again on the trained model.
+/// How many tokens a stage's datasets hold, in the model's tokens – counted again only when
+/// the files or the tokens change.
+fn stage_tokens(ui: &Ui, doc: &MagicDoc, files: &[String]) -> usize {
+    let spec = doc.file.model.text.clone().unwrap_or_default();
+    let key = format!(
+        "{:?}|{}|{}",
+        files.iter().map(|f| (f, doc.file.data.get(f).map_or(0, Vec::len))).collect::<Vec<_>>(),
+        spec.tokenizer.merges.len(),
+        spec.tokenizer.learned()
+    );
+    let id = egui::Id::new(("magic-stage-tokens", &key));
+    if let Some(count) = ui.data(|d| d.get_temp::<usize>(id)) {
+        return count;
+    }
+    // Each file's first 256 KB, read and counted, stands for the whole file: the window stays
+    // quick on big datasets.
+    const SAMPLE: usize = 256 * 1024;
+    let mut count = 0;
+    for file in files {
+        let Some(bytes) = doc.file.data.get(file) else { continue };
+        let mut end = bytes.len().min(SAMPLE);
+        while end < bytes.len() && (bytes[end] & 0xC0) == 0x80 {
+            end -= 1;
+        }
+        let content = String::from_utf8_lossy(&bytes[..end]);
+        let jsonl = studio::is_jsonl(file);
+        let mut part = 0;
+        for sample in studio::split_samples(file, &content) {
+            for text in magi_core::dataset::texts(&sample, jsonl) {
+                // Learned tokens not learned yet: about 3.3 bytes a token on English.
+                part += if spec.tokenizer.learned() && spec.tokenizer.merges.is_empty() {
+                    text.len() * 10 / 33
+                } else {
+                    spec.encode(&text).len()
+                };
+            }
+        }
+        count += (part as f64 * bytes.len() as f64 / end.max(1) as f64) as usize;
+    }
+    ui.data_mut(|d| d.insert_temp(id, count));
+    count
+}
+
+/// A count of tokens, short: 950, 12K, 1.5M, 2.1B.
+/// A length of time as people say it: "40 s", "12 min", "3 h 05 min".
+fn time_words(seconds: f64) -> String {
+    let seconds = seconds.max(0.0).round() as u64;
+    match seconds {
+        0..90 => format!("{seconds} s"),
+        90..5400 => format!("{} min", (seconds + 30) / 60),
+        _ => format!("{} h {:02} min", seconds / 3600, seconds % 3600 / 60),
+    }
+}
+
+fn amount(n: u64) -> String {
+    match n {
+        0..1_000 => n.to_string(),
+        1_000..1_000_000 => format!("{}K", n / 1_000),
+        1_000_000..1_000_000_000 => format!("{:.1}M", n as f64 / 1e6),
+        _ => format!("{:.1}B", n as f64 / 1e9),
+    }
+}
+
+/// How much a stage reads, and how many times over its data that is.
+fn passes_line(ui: &mut Ui, doc: &MagicDoc, node_id: NodeId) {
+    let Ok(pipeline) = studio::pipeline(&doc.studio.graph) else { return };
+    let Some(index) = pipeline.stages.iter().position(|s| s.node == node_id) else { return };
+    let stage = &pipeline.stages[index];
+    if stage.kind == kinds::RL {
+        return;
+    }
+    let files = studio::stage_files(&doc.studio.graph).get(index).map(|(_, f)| f.clone()).unwrap_or_default();
+    let data = stage_tokens(ui, doc, &files);
+    if data == 0 {
+        return;
+    }
+    let param = |key: &str, default: u64| stage.params.get(key).and_then(serde_json::Value::as_u64).unwrap_or(default);
+    let read = param("steps", 300) * param("batch", 16) * u64::from(pipeline.architecture.context.max(1));
+    let passes = read as f64 / data as f64;
+    let words = amount;
+    // Small models gain from many passes over fine-tuning data (33 did better than 13 on the 12M
+    // Magi); pretraining text read more than about 16 times adds little (Muennighoff et al., 2023).
+    let pretraining = stage.kind == kinds::PRETRAIN;
+    let (text, color) = if pretraining && passes > 16.0 {
+        (
+            format!(
+                "Reads about {} tokens: {passes:.0} passes over its {} – past about 16, more steps add little. More data helps more.",
+                words(read),
+                words(data as u64)
+            ),
+            theme::warning(),
+        )
+    } else if !pretraining && passes > 60.0 {
+        (
+            format!(
+                "Reads about {} tokens: {passes:.0} passes over its {} – it may learn them by heart. Fewer steps or more data.",
+                words(read),
+                words(data as u64)
+            ),
+            theme::warning(),
+        )
+    } else if passes < 0.5 {
+        (
+            format!(
+                "Reads about {} tokens: under half of its {} – more steps learn more of it.",
+                words(read),
+                words(data as u64)
+            ),
+            theme::warning(),
+        )
+    } else {
+        (
+            format!("Reads about {} tokens: about {passes:.1} passes over its {}.", words(read), words(data as u64)),
+            theme::text_dim(),
+        )
+    };
+    ui.add(egui::Label::new(RichText::new(format!("{}  {text}", icon::STACK)).size(11.5).color(color)).wrap());
+}
+
+fn stage_card(ui: &mut Ui, doc: &MagicDoc, node_id: NodeId, training: bool, events: &mut Vec<MagicEvent>) {
+    ui.add_space(6.0);
+    passes_line(ui, doc, node_id);
+    card(ui, "Training from here", |ui| {
+        match doc.checkpoints().into_iter().find(|c| c.stage == node_id) {
+            Some(saved) => {
+                let loss = saved.loss.map(|l| format!(" · loss {l:.3}")).unwrap_or_default();
+                widgets::notice(
+                    ui,
+                    icon::FLOPPY_DISK,
+                    format!("The weights after this stage are kept ({}{loss}).", crate::magic::ago(saved.saved)),
+                    theme::text_dim(),
+                );
+            }
+            None if doc.checkpoint_dir().is_some() => widgets::note(
+                ui,
+                "Each training keeps the weights after this stage, so a later one can start after it instead of \
+                 from zero.",
+            ),
+            None => widgets::note(ui, "Choose Compile Package's folder: the weights after each stage are kept there."),
+        }
+        widgets::button_row(ui, |ui| {
+            let from_here = doc.train_from_here(node_id);
+            let button = ui
+                .add_enabled(
+                    !training && from_here.is_ok(),
+                    egui::Button::new(format!("{}  Train from here", icon::PLAY)),
+                )
+                .on_hover_text(
+                    "Runs this stage and the ones after it, starting from the weights saved after the one before",
+                );
+            let button = match &from_here {
+                Err(why) => button.on_disabled_hover_text(why.as_str()),
+                Ok(_) => button.on_disabled_hover_text("Training is running"),
+            };
+            if button.clicked()
+                && let Ok(choice) = from_here
+            {
+                events.push(MagicEvent::Train(choice));
+            }
+            let again = ui
+                .add_enabled(
+                    !training && doc.trained_fits(),
+                    egui::Button::new(format!("{}  Only this, on the trained model", icon::ARROW_CLOCKWISE)),
+                )
+                .on_hover_text("Trains the finished model further with this stage alone – another fine-tune or more reinforcement learning")
+                .on_disabled_hover_text("Train the model first (with this architecture)");
+            if again.clicked() {
+                events.push(MagicEvent::Train(crate::magic::TrainChoice {
+                    from: crate::magic::TrainFrom::Trained,
+                    stages: vec![node_id],
+                }));
+            }
+        });
+        let kept = doc.checkpoints().iter().any(|c| c.stage == node_id);
+        let base = ui
+            .add_enabled(!training && kept, egui::Button::new(format!("{}  Save as base model…", icon::PACKAGE)))
+            .on_hover_text(
+                "A .szi model of the weights after this stage – after pretraining, a base that knows the language. \
+                 New text model from a base starts from it and only fine-tunes: minutes instead of the whole recipe.",
+            )
+            .on_disabled_hover_text("Train this stage first: its weights are kept, then they can be saved");
+        if base.clicked() {
+            events.push(MagicEvent::SaveBase(node_id));
+        }
+    });
 }
 
 // ---- packaging --------------------------------------------------------------------
@@ -2588,7 +2862,7 @@ fn compile_card(ui: &mut Ui, doc: &MagicDoc, compiled: &[PathBuf], events: &mut 
     ui.label(RichText::new("PACKAGE").size(10.5).color(theme::text_faint()));
     let params = doc.compile_settings().unwrap_or_default();
     let has_folder = !params.folder.trim().is_empty();
-    let ready = !doc.file.onnx.is_empty() || doc.file.model.gguf.is_some();
+    let ready = !doc.file.weights.is_empty() || !doc.file.onnx.is_empty();
     if !has_folder {
         widgets::notice(
             ui,
@@ -2596,67 +2870,6 @@ fn compile_card(ui: &mut Ui, doc: &MagicDoc, compiled: &[PathBuf], events: &mut 
             "Choose a folder above (Save into, then Browse): training saves the finished model there.",
             theme::warning(),
         );
-    }
-    let exportable = doc.file.model.architecture.as_ref().is_some_and(|a| a.gguf_compatible());
-    if params.gguf && doc.file.model.kind == ModelKind::Text && doc.file.model.architecture.is_some() && !exportable {
-        widgets::note(
-            ui,
-            "This architecture is not a GGUF one (only Transformer Layers are): the .szi model holds it, and runs in MacroMagi.",
-        );
-    }
-    if doc.file.model.kind == ModelKind::Text
-        && (params.gguf || params.lmstudio)
-        && let Some(arch) = doc.file.model.architecture.as_ref().and_then(|a| a.gguf_arch())
-    {
-        ui.label(
-            RichText::new(format!("{}  GGUF architecture: {arch}", icon::CHECK_CIRCLE))
-                .size(11.5)
-                .color(theme::text_dim()),
-        )
-        .on_hover_text(
-            "The layout llama.cpp and LM Studio know it by, so they can run it. LM Studio shows it as the model's \
-             architecture; the model is still yours.",
-        );
-    }
-    if doc.file.model.kind == ModelKind::Text && exportable {
-        // What LM Studio shows on the model: tool use comes from the chat template, vision from an image encoder.
-        if let Some(text) = &doc.file.model.text {
-            let mut badges = Vec::new();
-            if !text.tool_tag.is_empty() {
-                badges.push("Tool use");
-            }
-            if text.thinking.is_some() {
-                badges.push("Reasoning");
-            }
-            if !badges.is_empty() {
-                ui.label(
-                    RichText::new(format!("{}  LM Studio shows: {}", icon::CHECK_CIRCLE, badges.join(" · ")))
-                        .size(11.5)
-                        .color(theme::text_dim()),
-                )
-                .on_hover_text(
-                    "Tool use: the model has a tool tag (Text & Tools), and its chat template offers tools the way \
-                     LM Studio recognizes. Vision needs an image encoder beside the GGUF file, which Magi models do \
-                     not have: they see pictures through the Describe Image native tool, in MacroMagi.",
-                );
-            }
-        }
-        let trained = !doc.file.weights.is_empty();
-        widgets::button_row(ui, |ui| {
-            ui.add_enabled_ui(trained, |ui| {
-                if ui
-                    .button(format!("{}  Add to LM Studio now", icon::ARROW_SQUARE_OUT))
-                    .on_hover_text(
-                        "Puts a GGUF file of the model into LM Studio, with a model.yaml so LM Studio shows its \
-                         size, context, Enable Thinking and Reasoning Effort",
-                    )
-                    .on_disabled_hover_text("Train the model first")
-                    .clicked()
-                {
-                    events.push(MagicEvent::AddToLmStudio);
-                }
-            });
-        });
     }
     widgets::button_row(ui, |ui| {
         ui.add_enabled_ui(has_folder && ready, |ui| {

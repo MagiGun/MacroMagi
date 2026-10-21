@@ -1,0 +1,30 @@
+{
+  "name": "edit_document",
+  "description": "Changes parts of a document by their numbers and saves it in its own format. Asks the user first.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string",
+        "description": "the document's path"
+      },
+      "edits": {
+        "type": "array",
+        "description": "the changes: {\"at\": part, \"text\": new text}, or {\"insert_after\": part, \"text\": …}",
+        "items": {
+          "type": "object"
+        }
+      }
+    },
+    "required": [
+      "path",
+      "edits"
+    ]
+  },
+  "run": {
+    "kind": "python",
+    "entry": "run.py",
+    "timeout_ms": 60000
+  },
+  "confirm": true
+}

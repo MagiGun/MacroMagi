@@ -103,7 +103,7 @@ impl Default for AiAgentParams {
             effort: String::new(),
             context: 0,
             native_tools: true,
-            max_steps: 6,
+            max_steps: 100,
         }
     }
 }
@@ -156,7 +156,7 @@ pub const ACTED: &str = "acted";
 
 fn model_param() -> ParamDef {
     ParamDef::new("model", "Model", ParamKind::Model)
-        .help("A model from the Magic tab (“Use in Macro” there), or a .magic, .szi, .gguf or .onnx file.")
+        .help("A model from the Magic tab (“Use in Macro” there), or a .magic, .szi or .onnx file.")
 }
 
 fn settings_param() -> ParamDef {
@@ -283,7 +283,7 @@ pub(super) fn register(registry: &mut Registry) {
              their results, until it answers.",
         ))
         .param(
-            ParamDef::new("max_steps", "Tool calls per request", ParamKind::int(0, 64, ""))
+            ParamDef::new("max_steps", "Tool calls per request", ParamKind::int(0, 200, ""))
                 .help("At most this many native tool calls before it must answer.")
                 .show_if("native_tools", true),
         )
@@ -313,7 +313,7 @@ pub(super) fn register(registry: &mut Registry) {
             ids::AI_UNLOAD,
             "AI Unload Model",
             Category::Ai,
-            "Unloads a text model: frees its memory (and its graphics card's, for llama.cpp) until it is asked \
+            "Unloads a text model: frees its memory until it is asked \
              again or loaded again.",
         )
         .keywords(&["ai", "unload", "free", "model", "memory", "llm", "release"])

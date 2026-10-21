@@ -171,52 +171,32 @@ impl Program {
         };
         let native =
             file.model.architecture.as_ref().filter(|a| a.native_problem().is_none() && !file.weights.is_empty());
-        let runner = if let Some(path) = &file.model.gguf {
-            TextRunner::Gguf { path: path.into(), own: file.model.architecture.is_some() }
-        } else if let Some(architecture) = native {
-            // MacroMagi's own engine, with its cache: fast.
+        // MacroMagi's own engine, with its cache; the ONNX model for what it does not run.
+        let model = if let Some(architecture) = native {
             let memory = file.model.memory.clone().unwrap_or_default();
-            let model =
-                magi_ml::TextModel::load_native(architecture, &file.weights, &memory, &magi_ml::tools::cache_dir())
-                    .map_err(|e| EngineError::new(e.0))?;
-            TextRunner::Onnx(Mutex::new(model))
+            magi_ml::TextModel::load_native(architecture, &file.weights, &memory, &magi_ml::tools::cache_dir())
+                .map_err(|e| EngineError::new(e.0))?
         } else {
             if file.onnx.is_empty() {
                 return Err(EngineError::new("this .magic file does not include the model itself; train it first"));
             }
-            let model =
-                magi_ml::TextModel::load(&file.onnx, spec.context as usize).map_err(|e| EngineError::new(e.0))?;
-            TextRunner::Onnx(Mutex::new(model))
+            magi_ml::TextModel::load(&file.onnx, spec.context as usize).map_err(|e| EngineError::new(e.0))?
         };
-        let scaling = file.model.architecture.as_ref().and_then(|a| a.rope_scaling.clone());
-        let loaded = Arc::new(LoadedText { spec, runner, data: file.data, memory: file.model.memory, scaling });
+        let loaded = Arc::new(LoadedText { spec, model: Mutex::new(model), data: file.data });
         self.text_models.lock().unwrap_or_else(|p| p.into_inner()).insert(id.to_owned(), Arc::clone(&loaded));
         Ok(loaded)
     }
 
     /// Unloads a text model: it loads again on its next request.
     pub fn unload_text_model(&self, id: &str) {
-        let removed = self.text_models.lock().unwrap_or_else(|p| p.into_inner()).remove(id);
-        if let Some(loaded) = removed
-            && let TextRunner::Gguf { path, .. } = &loaded.runner
-        {
-            magi_ml::llama::stop_server(path);
-        }
+        self.text_models.lock().unwrap_or_else(|p| p.into_inner()).remove(id);
     }
 
-    /// Unloads every AI model the macro loaded – text models (stopping their
-    /// llama.cpp servers) and vision models – as when it stops. Returns how
-    /// many text models were loaded.
+    /// Unloads every AI model the macro loaded – text and vision models – as
+    /// when it stops. Returns how many text models were loaded.
     pub fn unload_models(&self) -> usize {
         self.models.lock().unwrap_or_else(|p| p.into_inner()).clear();
-        let removed: Vec<Arc<LoadedText>> =
-            std::mem::take(&mut *self.text_models.lock().unwrap_or_else(|p| p.into_inner())).into_values().collect();
-        for loaded in &removed {
-            if let TextRunner::Gguf { path, .. } = &loaded.runner {
-                magi_ml::llama::stop_server(path);
-            }
-        }
-        removed.len()
+        std::mem::take(&mut *self.text_models.lock().unwrap_or_else(|p| p.into_inner())).len()
     }
 
     /// Whether any enabled node can only be run by the Python engine.
@@ -263,63 +243,26 @@ impl Program {
 /// An AI model of the macro, loaded.
 pub struct LoadedText {
     pub spec: magi_core::magic::TextSpec,
-    pub runner: TextRunner,
+    /// The native engine (or the ONNX model).
+    pub model: Mutex<magi_ml::TextModel>,
     /// The model's own files (its native tools).
     pub data: std::collections::BTreeMap<String, Vec<u8>>,
-    pub memory: Option<magi_core::magic::MemorySpec>,
-    /// Its context scaling (llama.cpp gets it past the trained context).
-    pub scaling: Option<magi_core::magic::RopeScaling>,
-}
-
-/// How a text model runs: in MacroMagi (the native engine, or its ONNX
-/// model), or a GGUF file with llama.cpp.
-pub enum TextRunner {
-    Onnx(Mutex<magi_ml::TextModel>),
-    Gguf { path: std::path::PathBuf, own: bool },
 }
 
 impl LoadedText {
-    /// Asks the model; with `max_steps` above 0 its native tools run until it
-    /// answers (models from elsewhere only answer).
+    /// Asks the model; with `max_steps` above 0 its native tools run until it answers.
     pub fn ask(
         &self,
         request: &str,
         options: &magi_ml::AskOptions,
         max_steps: usize,
     ) -> Result<magi_ml::tools::AgentAnswer, magi_ml::MlError> {
-        let mut options = options.clone().with_memory(self.memory.as_ref());
-        options.scaling = self.scaling.clone();
         let mut run = |call: &magi_core::magic::ToolCall| magi_ml::tools::run_call(&self.spec, &self.data, call);
-        match &self.runner {
-            TextRunner::Onnx(model) => {
-                let mut generate = |prompt: &str| {
-                    let mut model = model.lock().unwrap_or_else(|p| p.into_inner());
-                    magi_ml::complete(&mut model, &self.spec, prompt, &options)
-                };
-                magi_ml::tools::agent(&self.spec, request, &options, max_steps, &mut generate, &mut run)
-            }
-            TextRunner::Gguf { path, own: true } => {
-                let mut generate = |prompt: &str| magi_ml::llama::complete_gguf(path, &self.spec, prompt, &options);
-                magi_ml::tools::agent(&self.spec, request, &options, max_steps, &mut generate, &mut run)
-            }
-            TextRunner::Gguf { path, own: false } => {
-                let answer = magi_ml::llama::ask_gguf_with(path, &self.spec, false, request, &options)?;
-                Ok(magi_ml::tools::AgentAnswer { answer, steps: Vec::new() })
-            }
-        }
-    }
-
-    /// Loads it now (llama.cpp: starts its server).
-    pub fn warm_up(&self) -> Result<(), magi_ml::MlError> {
-        match &self.runner {
-            TextRunner::Gguf { path, own } => magi_ml::llama::load_gguf(
-                path,
-                &self.spec,
-                *own,
-                &magi_ml::AskOptions::default().with_memory(self.memory.as_ref()),
-            ),
-            TextRunner::Onnx(_) => Ok(()),
-        }
+        let mut generate = |prompt: &str| {
+            let mut model = self.model.lock().unwrap_or_else(|p| p.into_inner());
+            magi_ml::complete(&mut model, &self.spec, prompt, options)
+        };
+        magi_ml::tools::agent(&self.spec, request, options, max_steps, &mut generate, &mut run)
     }
 }
 

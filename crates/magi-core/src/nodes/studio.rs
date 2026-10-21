@@ -62,6 +62,7 @@ pub mod kinds {
     pub const CONV: &str = "magic.conv";
 
     pub const TEXT_DATA: &str = "magic.text_data";
+    pub const CORPUS: &str = "magic.corpus";
     pub const IMAGE_DATA: &str = "magic.image_data";
 
     pub const PRETRAIN: &str = "magic.pretrain";
@@ -248,13 +249,11 @@ pub struct ContextParams {
     pub target: u32,
     /// `yarn`, `ntk` or `none` (attention that copes by itself: compressed attention).
     pub method: String,
-    /// Write the scaling into the exports as it is (see [`RopeScaling::static_in_exports`]).
-    pub static_in_exports: bool,
 }
 
 impl Default for ContextParams {
     fn default() -> Self {
-        Self { train: 0, target: 262_144, method: "yarn".into(), static_in_exports: false }
+        Self { train: 0, target: 262_144, method: "yarn".into() }
     }
 }
 
@@ -268,7 +267,6 @@ impl ContextParams {
             factor: if self.method == "none" { 1.0 } else { f64::from(target) / f64::from(original) },
             original,
             target,
-            static_in_exports: self.static_in_exports,
         }
     }
 }
@@ -291,7 +289,7 @@ pub fn tokens_label(tokens: u32) -> String {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PromptParams {
-    /// The context window, in tokens, for GGUF models (0: the model's own).
+    /// The context window, in tokens (0: the model's own).
     pub context: u32,
     /// The longest answer, in tokens (0: the model's own).
     pub max_tokens: u32,
@@ -301,8 +299,6 @@ pub struct PromptParams {
     pub thinking: String,
     /// Empty: the model's default.
     pub effort: String,
-    /// `auto`, `onnx` (the built-in engine) or `gguf` (llama.cpp).
-    pub engine: String,
     /// Run the model's native tools and give it their results, until it answers.
     pub native_tools: bool,
     /// How many native tool calls one request may make.
@@ -318,9 +314,8 @@ impl Default for PromptParams {
             temperature: -1.0,
             thinking: "model".into(),
             effort: String::new(),
-            engine: "auto".into(),
             native_tools: true,
-            max_steps: 6,
+            max_steps: 100,
             note: String::new(),
         }
     }
@@ -566,7 +561,8 @@ impl Default for FinetuneParams {
 #[serde(default)]
 pub struct RewardRule {
     /// `contains`, `not_contains`, `regex`, `exact`, `tool_valid`,
-    /// `tool_malformed`, `loop`, `short` or `ends`.
+    /// `tool_malformed`, `same_tool`, `unknown_tool`, `made_up_result`,
+    /// `loop`, `short` or `ends`.
     pub kind: String,
     pub text: String,
     pub score: f64,
@@ -583,13 +579,16 @@ impl Default for RewardRule {
 }
 
 impl RewardRule {
-    pub const KINDS: [(&'static str, &'static str); 9] = [
+    pub const KINDS: [(&'static str, &'static str); 12] = [
         ("contains", "Says…"),
         ("not_contains", "Does not say…"),
         ("regex", "Matches the pattern…"),
         ("exact", "Gives the dataset's answer"),
         ("tool_valid", "Calls tools correctly"),
         ("tool_malformed", "Writes a broken tool call"),
+        ("same_tool", "Calls the tool the dataset's answer calls first"),
+        ("unknown_tool", "Calls a tool it is not offered"),
+        ("made_up_result", "Writes a tool's result itself"),
         ("loop", "Repeats itself (a loop)"),
         ("short", "Is short (fast)"),
         ("ends", "Finishes its answer"),
@@ -625,14 +624,43 @@ impl Default for RlParams {
     }
 }
 
+/// A Hugging Face dataset read where training runs, too big to keep in the workspace.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CorpusParams {
+    /// The dataset on huggingface.co, as `owner/name`.
+    pub repo: String,
+    /// Which of its parquet files, as a pattern.
+    pub files: String,
+    /// The column with the text.
+    pub field: String,
+    /// How many tokens of it to read, at most.
+    pub tokens: u64,
+}
+
+impl Default for CorpusParams {
+    fn default() -> Self {
+        Self {
+            repo: "HuggingFaceFW/fineweb-edu".into(),
+            files: "sample/10BT/*.parquet".into(),
+            field: "text".into(),
+            tokens: 3_000_000_000,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OptimizerParams {
     /// `adamw`, `muon` or `sgd`.
     pub name: String,
+    /// AdamW's or SGD's learning rate, for every weight.
     pub lr: f64,
-    /// Muon's own learning rate, for the layers' weight matrices.
+    /// Muon's own learning rate, for the layers' weight matrices. Muon's updates are rescaled to
+    /// AdamW's size, so its rate is of AdamW's order.
     pub muon_lr: f64,
+    /// With Muon, AdamW's rate for the rest: embeddings (and the tied output head), norms, biases.
+    pub embed_lr: f64,
     pub weight_decay: f64,
     /// `constant` or `cosine`.
     pub schedule: String,
@@ -647,9 +675,12 @@ pub struct OptimizerParams {
 impl Default for OptimizerParams {
     fn default() -> Self {
         Self {
+            // Tuned on the Magi presets (300 steps of pretraining, 12M: loss 2.25 at 0.02 and 0.002;
+            // 1.93 here).
             name: "muon".into(),
             lr: 0.002,
-            muon_lr: 0.02,
+            muon_lr: 0.004,
+            embed_lr: 0.02,
             weight_decay: 0.01,
             schedule: "cosine".into(),
             warmup: 20,
@@ -659,15 +690,6 @@ impl Default for OptimizerParams {
             offload: false,
         }
     }
-}
-
-/// The precisions a GGUF file can have.
-fn quant_choice() -> ParamKind {
-    ParamKind::choice(&[
-        ("F16", "F16 – exact, the largest"),
-        ("Q8_0", "Q8_0 – half the size, nearly exact"),
-        ("Q4_0", "Q4_0 – a quarter of the size, loses some quality"),
-    ])
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -683,17 +705,7 @@ pub struct CompileParams {
     pub datasets: bool,
     pub pictures: bool,
     pub blocks: bool,
-    /// Also a `.gguf` file, for llama.cpp, LM Studio and others.
-    pub gguf: bool,
-    /// Also a Hugging Face folder (`config.json`, `model.safetensors`, tokenizer).
-    pub huggingface: bool,
-    /// How the GGUF file keeps its matrices: `F16`, `Q8_0` or `Q4_0`.
-    pub quant: String,
-    /// Also put a GGUF file into LM Studio, with its `model.yaml`.
-    pub lmstudio: bool,
-    /// The precision of LM Studio's GGUF file, as `quant`.
-    pub lmstudio_quant: String,
-    /// The Magi package (`szi/`): the model, its weights and native tools.
+    /// The Magi model: one `.szi` file with its weights and native tools.
     pub szi: bool,
     /// Also an ONNX file (`onnx/`), for ONNX runtimes.
     pub onnx: bool,
@@ -709,11 +721,6 @@ impl Default for CompileParams {
             datasets: true,
             pictures: true,
             blocks: true,
-            gguf: true,
-            huggingface: false,
-            quant: "F16".into(),
-            lmstudio: false,
-            lmstudio_quant: "F16".into(),
             szi: true,
             onnx: false,
         }
@@ -882,7 +889,7 @@ pub fn registry() -> Registry {
         "Thinking",
         "Text models: the model can be asked to think before answering, or not. Chained in, training teaches \
          both (reasoning in the datasets is learned with and without), the Prompt Model block gets a Thinking \
-         switch and LM Studio an Enable Thinking toggle. Without it, the model does not think: the datasets' \
+         switch. Without it, the model does not think: the datasets' \
          reasoning is left out.",
         &["thinking", "reasoning", "think", "toggle", "enable_thinking", "chain of thought"],
     );
@@ -892,8 +899,8 @@ pub fn registry() -> Registry {
         "Reasoning Effort",
         "Text models: levels of how hard the model reasons, such as standard and superior. Every request starts \
          by naming its level (\"Reasoning effort: superior\"), and the model learns each level from the samples \
-         given it in the dataset editor. The Prompt Model block, AI Agent and LM Studio get a Reasoning Effort \
-         choice.",
+         given it in the dataset editor. The Prompt Model block and the AI Agent window get a \
+         Reasoning Effort choice.",
         &["effort", "reasoning", "levels", "low", "high", "reasoning_effort"],
     );
     setup_block(
@@ -903,8 +910,7 @@ pub fn registry() -> Registry {
         "Text models: where the model keeps the memory of what it has read while it runs. A hot tier (the first \
          block and the latest ones, at full precision), a warm tier in system memory (f16 or 8-bit), and a cold \
          tier in files on a disk (an NVMe SSD is best) – so long contexts never run out of memory. The system \
-         text's memory can be kept on disk and found again by its SHA-256, so it is never read twice. llama.cpp \
-         gets the cache precision and flash attention.",
+         text's memory can be kept on disk and found again by its SHA-256, so it is never read twice.",
         &["memory", "cache", "kv", "ssd", "offload", "context", "long", "quantized cache"],
     );
     setup_block(
@@ -969,10 +975,9 @@ pub fn registry() -> Registry {
                 .help("Heads must divide by it. Equal to the heads: plain attention."),
         )
         .param(ParamDef::new("context", "Context window", int(8, 32768, "")).help(
-            "Text models: the longest text the model reads at once, in tokens (here a token is a byte of \
-                     text or a tag, so 1024 is about a page). Training and the exports use it; the Prompt Model \
-                     block can run GGUF models with a different one. Vision models: the side of the pictures, in \
-                     pixels.",
+            "Text models: the longest text the model reads in training, in tokens (a piece of a word or a \
+                     tag; 8,192 is about twenty pages). A Context Scaler stretches it when the model runs. Vision \
+                     models: the side of the pictures, in pixels.",
         ))
         .param(
             ParamDef::new(
@@ -980,7 +985,7 @@ pub fn registry() -> Registry {
                 "Positions",
                 ParamKind::choice(&[("rope", "Rotary (RoPE)"), ("learned", "Learned")]),
             )
-            .help("Rotary is what Llama and DeepSeek use, and what GGUF needs."),
+            .help("Rotary is what Llama and DeepSeek use, and what the Context Scaler stretches."),
         )
         .param(ParamDef::new("rope_theta", "Rotary base", float(100.0, 10_000_000.0, "")).show_if("positions", "rope"))
         .param(
@@ -1008,7 +1013,7 @@ pub fn registry() -> Registry {
             "Trains at a short context and runs at a long one: training stays fast and fits in a graphics card, \
              and the finished model reads up to the target. YaRN stretches the slow rotary channels and keeps the \
              fast ones, and sharpens attention so it stays focused over long texts; NTK raises the rotary base. \
-             The exports carry it (GGUF, Hugging Face), and MacroMagi's native engine runs it. Put it after Model Size.",
+             MacroMagi's native engine runs it. Put it after Model Size.",
         ))
         .keywords(&["context", "yarn", "rope", "ntk", "long", "extend", "scaling", "256k", "window"])
         .param(
@@ -1032,13 +1037,8 @@ pub fn registry() -> Registry {
             "Scaling",
             ParamKind::choice(&[("yarn", "YaRN"), ("ntk", "NTK (raise the rotary base)"), ("none", "None (compressed attention)")]),
         ).help("MacroMagi stretches positions only when a text is longer than the trained context, so short texts stay exactly as learned."))
-        .param(
-            ParamDef::new("static_in_exports", "Always on in GGUF and Hugging Face", ParamKind::Bool).help(
-                "Off: the exports keep plain positions (MacroMagi passes llama.cpp the scaling when a longer context is asked for). On: other programs always stretch – long texts work anywhere, but short ones answer worse unless the model was fine-tuned with it.",
-            ),
-        )
         .param(note_param())
-        .defaults(&json!({ "train": "0", "target": "262144", "method": "yarn", "static_in_exports": false, "note": "" }))
+        .defaults(&json!({ "train": "0", "target": "262144", "method": "yarn", "note": "" }))
         .summarize(|node, _| {
             let p: ContextParams = node.params_or_default();
             let mut lines = vec![format!(
@@ -1063,8 +1063,7 @@ pub fn registry() -> Registry {
             "Transformer Layers",
             Category::Architecture,
             "Standard layers (the Llama layout): every token looks at every earlier token (attention with rotary \
-             positions), then a SwiGLU feed-forward layer – or the experts wired into Feed-forward. Models made \
-             only of these export to GGUF for LM Studio and llama.cpp.",
+             positions), then a SwiGLU feed-forward layer – or the experts wired into Feed-forward.",
         )))
         .keywords(&["transformer", "attention", "layers", "llama", "backbone", "dense", "gqa"])
         .param(ParamDef::new("layers", "Layers", int(1, 256, "")))
@@ -1100,8 +1099,9 @@ pub fn registry() -> Registry {
         .param(
             ParamDef::new("window", "Local window", int(0, 32768, "tokens"))
                 .help(
-                    "0: every layer sees the whole text. Otherwise most layers look only at this many recent \
-                     tokens – cheaper for long texts – and every few layers see everything (Gemma 3).",
+                    "0: every layer sees the whole text. Otherwise most layers look only at their own block of \
+                     this many tokens and the block before – cheaper for long texts – and every few layers see \
+                     everything.",
                 )
                 .show_if("more", true),
         )
@@ -1426,6 +1426,43 @@ pub fn registry() -> Registry {
     );
     r.register(
         NodeDef::new(
+            CORPUS,
+            "Hugging Face Dataset",
+            Category::Data,
+            "A big corpus of text on huggingface.co to pretrain on – billions of tokens, too many to keep in the \
+             workspace. It is read where the training runs (best a GPU server: File › Export as Python), cut into \
+             the model's tokens once and kept there; a model whose tokens are not learned yet learns them from its \
+             start. FineWeb-Edu (educational web pages, ODC-By licence) is the default. Wire it into Pretraining; \
+             a Text Dataset wired into its With input is read along with it.",
+        )
+        .keywords(&["hugging face", "corpus", "fineweb", "pretraining", "dataset", "web", "big", "stream", "parquet"])
+        .data_in("with", "With", DataType::Any)
+        .data_out("positive", "Text", DataType::Any)
+        .param(
+            ParamDef::new("repo", "Dataset", ParamKind::Text { multiline: false })
+                .help("On huggingface.co, as owner/name."),
+        )
+        .param(ParamDef::new("files", "Files", ParamKind::Text { multiline: false }).help(
+            "Which of its parquet files, as a pattern: sample/10BT/*.parquet is FineWeb-Edu's 10-billion-token sample.",
+        ))
+        .param(ParamDef::new("field", "Text column", ParamKind::Text { multiline: false }))
+        .param(
+            ParamDef::new("tokens", "Read at most", int(1_000_000, 1_000_000_000_000, "tokens"))
+                .help("About 20 tokens a parameter is plenty; a few billion make a capable small model."),
+        )
+        .param(note_param())
+        .defaults(&{
+            let mut v = serde_json::to_value(CorpusParams::default()).expect("serializable");
+            v["note"] = json!("");
+            v
+        })
+        .summarize(|node, _| {
+            let p: CorpusParams = node.params_or_default();
+            with_note(node, vec![p.repo.clone(), format!("{:.1}B tokens", p.tokens as f64 / 1e9)])
+        }),
+    );
+    r.register(
+        NodeDef::new(
             IMAGE_DATA,
             "Vision Dataset",
             Category::Data,
@@ -1590,9 +1627,19 @@ pub fn registry() -> Registry {
         ))
         .param(
             ParamDef::new("lr", "Learning rate", float(0.000_001, 1.0, ""))
-                .help("How big each step is. Too high: the loss jumps around; too low: it barely moves."),
+                .help("How big each step is. Too high: the loss jumps around; too low: it barely moves.")
+                .show_unless("name", "muon"),
         )
-        .param(ParamDef::new("muon_lr", "Muon learning rate", float(0.000_01, 1.0, "")).show_if("name", "muon"))
+        .param(
+            ParamDef::new("muon_lr", "Learning rate (layers)", float(0.000_01, 1.0, ""))
+                .help("Muon's, for the layers' weight matrices. Too high: the loss jumps around; too low: it barely moves.")
+                .show_if("name", "muon"),
+        )
+        .param(
+            ParamDef::new("embed_lr", "Learning rate (embeddings)", float(0.000_001, 1.0, ""))
+                .help("AdamW's, for the rest: the embeddings (and the output head when tied), norms and biases.")
+                .show_if("name", "muon"),
+        )
         .param(ParamDef::new("weight_decay", "Weight decay", float(0.0, 1.0, "")))
         .param(ParamDef::new(
             "schedule",
@@ -1623,7 +1670,8 @@ pub fn registry() -> Registry {
                 "sgd" => "SGD",
                 _ => "AdamW",
             };
-            with_note(node, vec![format!("{name} · {}", p.lr), format!("{} schedule", p.schedule)])
+            let rate = if p.name == "muon" { format!("{} / {}", p.muon_lr, p.embed_lr) } else { p.lr.to_string() };
+            with_note(node, vec![format!("{name} · {rate}"), format!("{} schedule", p.schedule)])
         }),
     );
 
@@ -1634,22 +1682,10 @@ pub fn registry() -> Registry {
             "Compile Package",
             Category::Package,
             "Saves the finished model after training into a folder of its own in the folder you choose: the \
-             .magic workspace (canvas, setup, datasets), the Magi model (.szi: its weights and native tools), \
-             and if you like a .gguf for llama.cpp, a copy in LM Studio, a Hugging Face folder and an ONNX \
-             file. Training needs a folder here.",
+             .magic workspace (canvas, setup, datasets) and the Magi model (.szi: its weights and native \
+             tools), and an ONNX file if you like. Training needs a folder here.",
         ))
-        .keywords(&[
-            "compile",
-            "package",
-            "export",
-            "save",
-            "magic",
-            "szi",
-            "gguf",
-            "huggingface",
-            "lm studio",
-            "folder",
-        ])
+        .keywords(&["compile", "package", "export", "save", "magic", "szi", "onnx", "folder"])
         .param(ParamDef::new("folder", "Save into", ParamKind::Path { folder: true }))
         .param(
             ParamDef::new("file", "Project name", ParamKind::Text { multiline: false })
@@ -1668,30 +1704,8 @@ pub fn registry() -> Registry {
                 .help("The model itself, with its weights and native tools: what MacroMagi and CodeMagi run."),
         )
         .param(
-            ParamDef::new("gguf", "GGUF file (llama.cpp and others)", ParamKind::Bool)
-                .help("For models of Transformer Layers in the Llama, Qwen3 or Gemma 3 layout. Saved in gguf/."),
-        )
-        .param(
-            ParamDef::new("quant", "GGUF precision", quant_choice())
-                .help("How the .gguf keeps its weights.")
-                .show_if("gguf", true),
-        )
-        .param(ParamDef::new("lmstudio", "Add to LM Studio", ParamKind::Bool).help(
-            "Puts a GGUF file of its own into LM Studio, with a model.yaml for its controls (Enable Thinking, \
-                 Reasoning Effort). LM Studio lists it once, as the model.",
-        ))
-        .param(
-            ParamDef::new("lmstudio_quant", "LM Studio precision", quant_choice())
-                .help("LM Studio shows it as the quantization.")
-                .show_if("lmstudio", true),
-        )
-        .param(
-            ParamDef::new("huggingface", "Hugging Face folder", ParamKind::Bool)
-                .help("config.json, model.safetensors and the tokenizer (Llama and Qwen3 layouts)."),
-        )
-        .param(
             ParamDef::new("onnx", "ONNX file", ParamKind::Bool)
-                .help("For ONNX runtimes, and models GGUF has no architecture for (DeepSeek-style, GLM)."),
+                .help("For ONNX runtimes. Vision models run from it; Magi models do not need it."),
         )
         .param(note_param())
         .defaults(&{
@@ -1712,15 +1726,6 @@ pub fn registry() -> Registry {
             }
             if p.szi {
                 formats.push(".szi".to_owned());
-            }
-            if p.gguf {
-                formats.push(format!(".gguf {}", p.quant));
-            }
-            if p.lmstudio {
-                formats.push("LM Studio".to_owned());
-            }
-            if p.huggingface {
-                formats.push("Hugging Face".to_owned());
             }
             if p.onnx {
                 formats.push("ONNX".to_owned());
@@ -1745,9 +1750,8 @@ pub fn registry() -> Registry {
         .param(ParamDef::new("temperature", "Temperature", float(-1.0, 2.0, "")).hidden())
         .param(ParamDef::new("thinking", "Thinking", ParamKind::Text { multiline: false }).hidden())
         .param(ParamDef::new("effort", "Reasoning effort", ParamKind::Text { multiline: false }).hidden())
-        .param(ParamDef::new("engine", "Run with", ParamKind::Text { multiline: false }).hidden())
         .param(ParamDef::new("native_tools", "Run its native tools", ParamKind::Bool).hidden())
-        .param(ParamDef::new("max_steps", "Tool calls per request", int(0, 64, "")).hidden())
+        .param(ParamDef::new("max_steps", "Tool calls per request", int(0, 200, "")).hidden())
         .param(note_param())
         .defaults(&PromptParams::default())
         .summarize(|node, _| {
@@ -1944,7 +1948,7 @@ pub fn setup_lines(kind: &str, value: &Value) -> Vec<String> {
             let thinking: ThinkingSpec = if value.is_null() { ThinkingSpec::default() } else { parse(value) };
             vec![
                 if thinking.on_by_default { "Thinks unless asked not to" } else { "Thinks only when asked" }.into(),
-                "A toggle in LM Studio".into(),
+                "A switch where it runs".into(),
             ]
         }
         kinds::EFFORT => {
@@ -2005,9 +2009,36 @@ fn active(graph: &Graph, node: &Node) -> bool {
     node.enabled && graph.is_active(node.id)
 }
 
-/// Brings a canvas from an earlier version up to date: a Tools block that
-/// holds native tools hands them to a Native Tools block, chained in after it.
+/// Brings a canvas from an earlier version up to date.
 pub fn upgrade(graph: &mut Graph) {
+    upgrade_native_tools(graph);
+    upgrade_optimizers(graph);
+}
+
+/// Optimizer blocks from before 0.1.7.2 still holding the Muon defaults of then (0.02 for the layers,
+/// no rate of their own for the embeddings) take the tuned ones; changed rates are kept.
+fn upgrade_optimizers(graph: &mut Graph) {
+    let untouched = |n: &Node| {
+        let number = |key: &str| n.params.get(key).and_then(Value::as_f64);
+        n.kind == kinds::OPTIMIZER
+            && !n.params.contains_key("embed_lr")
+            && n.params.get("name").and_then(Value::as_str) == Some("muon")
+            && number("muon_lr") == Some(0.02)
+            && number("lr") == Some(0.002)
+    };
+    let old: Vec<NodeId> = graph.nodes().filter(|n| untouched(n)).map(|n| n.id).collect();
+    let tuned = OptimizerParams::default();
+    for id in old {
+        if let Some(node) = graph.node_mut(id) {
+            node.set_param("muon_lr", json!(tuned.muon_lr));
+            node.set_param("embed_lr", json!(tuned.embed_lr));
+        }
+    }
+}
+
+/// A Tools block that holds native tools (before 0.1.7) hands them to a Native Tools block,
+/// chained in after it.
+fn upgrade_native_tools(graph: &mut Graph) {
     if graph.nodes().any(|n| n.kind == kinds::NATIVE_TOOLS) {
         return;
     }
@@ -2606,7 +2637,7 @@ pub fn default_canvas(model: &MagicModel, has_weights: bool, has_onnx: bool, dat
     };
 
     if has_weights || !has_onnx {
-        // The architecture: the model's own, or a small one that trains in a few minutes.
+        // The architecture: the model's own, Magi for text, a small one for vision.
         let blocks: Vec<ArchBlock> = match &model.architecture {
             Some(a) if !a.blocks.is_empty() => a.blocks.clone(),
             _ if text => magi_blocks(),
@@ -2635,63 +2666,88 @@ pub fn default_canvas(model: &MagicModel, has_weights: bool, has_onnx: bool, dat
                 b.wire(provider, FFN, id, FFN);
             }
         }
-        // Muon for training from zero and further, as DeepSeek-V4 trains; AdamW for the gentler stages.
-        let optimizer = b.add(OPTIMIZER, [x + STEP * 0.5, row - 210.0], json!({ "name": "muon" }));
-        if text && !has_weights {
-            // Magi-F1's recipe: plain language and reasoning to pretrain on, every kind of request to
-            // fine-tune on, then a short reinforcement stage for well-formed, finished answers.
-            let pretrain_files =
-                |(f, n): &&(String, bool)| !n && (!is_jsonl(f) || f.contains("chat") || f.contains("reasoning"));
-            let language: Vec<String> = datasets.iter().filter(pretrain_files).map(|(f, _)| f.clone()).collect();
-            let tasks: Vec<String> =
+        if text {
+            // Magi's recipe. Pretraining (from zero): language and code from the web, read where it
+            // trains. Then fine-tuning on agent work and conversations, rewriting long contexts short
+            // (compaction), and reinforcement for good tool use.
+            let jsonl: Vec<String> =
                 datasets.iter().filter(|(f, n)| !n && is_jsonl(f)).map(|(f, _)| f.clone()).collect();
             let negative: Vec<String> = datasets.iter().filter(|(_, n)| *n).map(|(f, _)| f.clone()).collect();
-            let language = b.add(TEXT_DATA, [x, row + 230.0], json!({ "positive": language, "negative": [] }));
-            b.nodes.last_mut().expect("added").label = "Language (pretraining)".into();
-            let pretrain = place(&mut b, PRETRAIN, json!({ "steps": 400 }), &mut last, &mut x);
-            b.wire(language, "positive", pretrain, "data");
-            b.wire(optimizer, OPTIMIZER, pretrain, OPTIMIZER);
-            let instructions = b.add(TEXT_DATA, [x, row + 230.0], json!({ "positive": tasks, "negative": negative }));
-            b.nodes.last_mut().expect("added").label = "Instructions (fine-tuning)".into();
-            let finetune = place(&mut b, FINETUNE, json!({ "steps": 1200 }), &mut last, &mut x);
-            b.wire(instructions, "positive", finetune, "data");
-            b.wire(instructions, "negative", finetune, "negative");
-            b.wire(optimizer, OPTIMIZER, finetune, OPTIMIZER);
-            let rules = json!([
-                { "kind": "ends", "score": 1.0 },
-                { "kind": "exact", "score": 2.0 },
-                { "kind": "tool_valid", "score": 1.0 },
-                { "kind": "tool_malformed", "score": -2.0 },
-                { "kind": "loop", "score": -3.0, "tokens": 4 },
-            ]);
+            if !has_weights {
+                let language: Vec<String> =
+                    datasets.iter().filter(|(f, n)| !n && !is_jsonl(f)).map(|(f, _)| f.clone()).collect();
+                let files = b.add(TEXT_DATA, [x, row + 670.0], json!({ "positive": language, "negative": [] }));
+                b.nodes.last_mut().expect("added").label = "Language (example files)".into();
+                let code = b.add(
+                    CORPUS,
+                    [x, row + 450.0],
+                    json!({ "repo": "OpenCoder-LLM/opc-fineweb-code-corpus", "files": "data/train-*.parquet",
+                            "field": "text", "tokens": 750_000_000u64 }),
+                );
+                b.nodes.last_mut().expect("added").label = "Code on the web (pretraining)".into();
+                b.wire(files, "positive", code, "with");
+                let web = b.add(CORPUS, [x, row + 230.0], json!({ "tokens": 2_250_000_000u64 }));
+                b.nodes.last_mut().expect("added").label = "FineWeb-Edu (pretraining)".into();
+                b.wire(code, "positive", web, "with");
+                // Muon, as DeepSeek-V4 trains: 16 rows of 8,192 tokens a step, four steps a weight update.
+                let optimizer = b.add(
+                    OPTIMIZER,
+                    [x + STEP * 0.5, row - 210.0],
+                    json!({ "name": "muon", "muon_lr": 0.002, "embed_lr": 0.006, "warmup": 1000, "accumulate": 4 }),
+                );
+                b.nodes.last_mut().expect("added").label = "Optimizer (pretraining)".into();
+                // Three billion tokens.
+                let pretrain = place(&mut b, PRETRAIN, json!({ "steps": 22_900, "batch": 16 }), &mut last, &mut x);
+                b.wire(web, "positive", pretrain, "data");
+                b.wire(optimizer, OPTIMIZER, pretrain, OPTIMIZER);
+            }
+            let work = b.add(TEXT_DATA, [x, row + 450.0], json!({ "positive": jsonl, "negative": negative }));
+            b.nodes.last_mut().expect("added").label = "Agent work (fine-tuning)".into();
+            let chats = b.add(
+                CORPUS,
+                [x, row + 230.0],
+                json!({ "repo": "HuggingFaceTB/smol-smoltalk", "files": "data/train-*.parquet", "field": "messages",
+                        "tokens": 200_000_000u64 }),
+            );
+            b.nodes.last_mut().expect("added").label = "Conversations (fine-tuning)".into();
+            b.wire(work, "positive", chats, "with");
+            let tuning = b.add(
+                OPTIMIZER,
+                [x + STEP, row - 210.0],
+                json!({ "name": "muon", "muon_lr": 0.001, "embed_lr": 0.003, "warmup": 100 }),
+            );
+            b.nodes.last_mut().expect("added").label = "Optimizer (fine-tuning)".into();
+            let finetune = place(&mut b, FINETUNE, json!({ "steps": 4_000, "batch": 8 }), &mut last, &mut x);
+            b.wire(chats, "positive", finetune, "data");
+            b.wire(work, "negative", finetune, "negative");
+            b.wire(tuning, OPTIMIZER, finetune, OPTIMIZER);
+            let compaction = place(&mut b, COMPACTION, json!({ "steps": 400, "batch": 8 }), &mut last, &mut x);
+            b.wire(work, "positive", compaction, "data");
+            b.wire(tuning, OPTIMIZER, compaction, OPTIMIZER);
             let rl = place(
                 &mut b,
                 RL,
-                json!({ "steps": 60, "group": 4, "max_new": 96, "temperature": 0.8, "rules": rules }),
+                json!({ "steps": 300, "group": 8, "max_new": 384, "temperature": 0.8, "rules": agent_rules() }),
                 &mut last,
                 &mut x,
             );
-            b.wire(instructions, "positive", rl, "data");
-            let gentle =
-                b.add(OPTIMIZER, [x - STEP * 0.5, row - 210.0], json!({ "name": "adamw", "lr": 0.0002, "warmup": 5 }));
+            b.wire(work, "positive", rl, "data");
+            let gentle = b.add(
+                OPTIMIZER,
+                [x - STEP * 0.5, row - 210.0],
+                json!({ "name": "adamw", "lr": 0.00002, "warmup": 10 }),
+            );
             b.nodes.last_mut().expect("added").label = "Optimizer (gentle)".into();
             b.wire(gentle, OPTIMIZER, rl, OPTIMIZER);
-        } else if text {
-            let positive: Vec<String> = datasets.iter().filter(|(_, n)| !n).map(|(f, _)| f.clone()).collect();
-            let negative: Vec<String> = datasets.iter().filter(|(_, n)| *n).map(|(f, _)| f.clone()).collect();
-            let data = b.add(TEXT_DATA, [x, row + 230.0], json!({ "positive": positive, "negative": negative }));
-            let id = place(&mut b, FINETUNE, json!({}), &mut last, &mut x);
-            b.wire(data, "positive", id, "data");
-            b.wire(data, "negative", id, "negative");
-            b.wire(optimizer, OPTIMIZER, id, OPTIMIZER);
         } else {
+            let optimizer = b.add(OPTIMIZER, [x + STEP * 0.5, row - 210.0], json!({ "name": "muon" }));
             let data = b.add(IMAGE_DATA, [x, row + 230.0], json!({}));
             let id = place(&mut b, VISION_TRAIN, json!({}), &mut last, &mut x);
             b.wire(data, "pictures", id, "pictures");
             b.wire(optimizer, OPTIMIZER, id, OPTIMIZER);
         }
     }
-    let compile = place(&mut b, COMPILE, json!({ "gguf": text }), &mut last, &mut x);
+    let compile = place(&mut b, COMPILE, json!({}), &mut last, &mut x);
     let try_kind = if text { PROMPT } else { TEST };
     let try_it = b.add(try_kind, [x, row], json!({}));
     b.wire(compile, MODEL, try_it, MODEL);
@@ -2720,41 +2776,46 @@ pub struct Common {
     pub setup: Vec<(&'static str, Value)>,
 }
 
-/// Magi-F1's reasoning effort: standard, or superior.
+/// Magi's thinking: on – it plans before it acts, and thinks again between tool calls.
+pub fn magi_thinking() -> Value {
+    json!({ "on_by_default": true })
+}
+
+/// Magi's reasoning effort: standard, or superior.
 pub fn magi_effort() -> EffortSpec {
     EffortSpec { levels: vec!["standard".into(), "superior".into()], default: "standard".into() }
 }
 
-/// The Magi layout: MacroMagi's own recipe for small agents. Deep and narrow
-/// (more layers than its width would suggest), grouped key/value heads,
-/// queries and keys normalized for steady training, a tied output head to
-/// save weights, a long rotary base, and a 2048-token context window: tokens
-/// are bytes, and four tools in the system text take about 900. It exports
-/// as Qwen3 in GGUF.
+/// Magi: MacroMagi's one text architecture – an agent that knows how to work, not facts, and
+/// looks up what it needs with its tools. About 418 million parameters, 148 million of them at
+/// work for each token:
+///
+/// - 768 wide and 32 layers deep (deep and narrow is best at this size), twelve heads of 64
+///   sharing four key/value heads, queries and keys normalized, a tied output head;
+/// - three of every four layers look only at their block of 1,024 tokens and the block before, the fourth
+///   at everything:
+///   long tool transcripts stay cheap to read and to keep in memory (Gemma 3, gpt-oss);
+/// - after three plain layers, every feed-forward part is DeepSeekMoE: a shared expert and
+///   sixteen small routed ones, two chosen per token by √Softplus affinities and balanced by a
+///   bias (DeepSeek-V3/V4) – the knowledge of a 418M model at the cost of a 148M one;
+/// - DeepSeek-V3's multi-token prediction while training (it predicts the token after next too);
+/// - 8,192 tokens while training, stretched by YaRN to 128K when it runs.
 pub fn magi_blocks() -> Vec<ArchBlock> {
     use kinds::*;
+    let layers = |count: u32| json!({ "layers": count, "mult": 2.75, "more": true, "qk_norm": true, "window": 1024, "global_every": 4 });
+    let experts = block(
+        MOE,
+        json!({ "experts": 16, "shared": 1, "top_k": 2, "mult": 0.375, "gating": "sqrt_softplus", "balance": "bias" }),
+    );
     vec![
         block(
             SIZE,
-            json!({ "width": 192, "heads": 6, "kv_heads": 2, "context": 2048, "rope_theta": 100000.0, "tied": true }),
+            json!({ "width": 768, "heads": 12, "kv_heads": 4, "context": 8192, "rope_theta": 500000.0, "tied": true }),
         ),
-        block(LAYERS, json!({ "layers": 8, "mult": 3.0, "more": true, "qk_norm": true })),
-        // Trained at 2048 tokens, run at up to 32K: its exports and the native engine stretch positions (YaRN).
-        block(CONTEXT, json!({ "train": "0", "target": "32768", "method": "yarn" })),
-    ]
-}
-
-/// The Magi layout at about 12 million parameters: wider and deeper (288 wide,
-/// 12 layers, three key/value heads), for learning more from bigger datasets.
-pub fn magi_12m_blocks() -> Vec<ArchBlock> {
-    use kinds::*;
-    vec![
-        block(
-            SIZE,
-            json!({ "width": 288, "heads": 9, "kv_heads": 3, "context": 2048, "rope_theta": 100000.0, "tied": true }),
-        ),
-        block(LAYERS, json!({ "layers": 12, "mult": 3.0, "more": true, "qk_norm": true })),
-        block(CONTEXT, json!({ "train": "0", "target": "32768", "method": "yarn" })),
+        block(MTP, json!({ "weight": 0.3 })),
+        block(LAYERS, layers(3)),
+        with_ffn(block(LAYERS, layers(29)), experts),
+        block(CONTEXT, json!({ "train": "0", "target": "131072", "method": "yarn" })),
     ]
 }
 
@@ -2767,155 +2828,36 @@ fn with_ffn(mut b: ArchBlock, ffn: ArchBlock) -> ArchBlock {
     b
 }
 
-/// Well-known architectures, scaled down to train on a desktop computer.
+/// The architectures Presets › Commons offers: Magi.
 pub fn commons() -> Vec<Common> {
-    use kinds::*;
-    let v4_moe = block(
-        MOE,
-        json!({ "experts": 16, "shared": 1, "top_k": 2, "mult": 0.5, "gating": "sqrt_softplus", "balance": "bias" }),
-    );
-    let v4_hash = block(
-        MOE,
-        json!({ "experts": 16, "shared": 1, "top_k": 2, "mult": 0.5, "gating": "sqrt_softplus", "balance": "bias", "hash": true }),
-    );
-    let v3_moe = block(
-        MOE,
-        json!({ "experts": 16, "shared": 1, "top_k": 2, "mult": 0.5, "gating": "sigmoid", "balance": "bias" }),
-    );
-    vec![
-        Common {
-            name: "Magi (small)",
-            description: "MacroMagi's own recipe for small agents: deep and narrow, grouped key/value heads, queries and \
-                          keys normalized, a tied output head, and Thinking and Reasoning Effort set up. Exports to GGUF \
-                          (as Qwen3) with LM Studio's Enable Thinking and Reasoning Effort controls. To make your own, \
-                          change the blocks, select them and use Presets › Save selected blocks.",
-            blocks: magi_blocks(),
-            setup: vec![(THINKING, Value::Null), (EFFORT, json!(magi_effort())), (MEMORY, Value::Null)],
-        },
-        Common {
-            name: "Magi (12M)",
-            description: "The Magi recipe at about 12 million parameters: 288 wide and 12 layers deep instead of 192 \
-                          and 8. It learns more from the example datasets (knowledge, not only formats) and trains \
-                          about three times longer. Exports to GGUF (as Qwen3) like the small one.",
-            blocks: magi_12m_blocks(),
-            setup: vec![(THINKING, Value::Null), (EFFORT, json!(magi_effort())), (MEMORY, Value::Null)],
-        },
-        Common {
-            name: "Qwen3 (small)",
-            description: "Qwen3's layout at desktop size: grouped key/value heads, queries and keys normalized \
-                          (QK-norm), SwiGLU, a tied output head like Qwen3's small models. Exports to GGUF as qwen3 \
-                          and to Hugging Face.",
-            blocks: vec![
-                block(
-                    SIZE,
-                    json!({ "width": 256, "heads": 8, "kv_heads": 4, "context": 1024, "rope_theta": 1000000.0, "tied": true }),
-                ),
-                block(LAYERS, json!({ "layers": 6, "mult": 3.0, "more": true, "qk_norm": true })),
-            ],
-            setup: Vec::new(),
-        },
-        Common {
-            name: "Qwen3 Thinking (small)",
-            description: "Qwen3's layout with reasoning set up: Thinking (on unless switched off) and Reasoning Effort \
-                          (low, medium, high). Train it on datasets with \"thinking\" and \"effort\" – the example \
-                          reasoning.jsonl has both. In LM Studio it shows the Enable Thinking toggle and a Reasoning \
-                          Effort choice.",
-            blocks: vec![
-                block(
-                    SIZE,
-                    json!({ "width": 256, "heads": 8, "kv_heads": 4, "context": 1024, "rope_theta": 1000000.0, "tied": true }),
-                ),
-                block(LAYERS, json!({ "layers": 6, "mult": 3.0, "more": true, "qk_norm": true })),
-            ],
-            setup: vec![(THINKING, Value::Null), (EFFORT, Value::Null)],
-        },
-        Common {
-            name: "Gemma 3 (small)",
-            description: "Gemma 3's layout at desktop size: GeGLU, norms before and after each part, queries and keys \
-                          normalized, scaled and tied embeddings, and five local layers (a 256-token window) for each \
-                          global one. Exports to GGUF as gemma3.",
-            blocks: vec![
-                block(
-                    SIZE,
-                    json!({ "width": 256, "heads": 4, "kv_heads": 1, "context": 1024, "rope_theta": 10000.0,
-                                    "tied": true, "embed_scale": true }),
-                ),
-                block(
-                    LAYERS,
-                    json!({ "layers": 6, "mult": 4.0, "more": true, "qk_norm": true, "activation": "geglu",
-                                      "norm": "sandwich", "window": 256, "global_every": 6 }),
-                ),
-            ],
-            setup: Vec::new(),
-        },
-        Common {
-            name: "Mistral (small)",
-            description: "Mistral's layout at desktop size: the Llama layout with four query heads per key/value head and \
-                          a large rotary base for long texts. Exports to GGUF (as llama) and to Hugging Face.",
-            blocks: vec![
-                block(
-                    SIZE,
-                    json!({ "width": 256, "heads": 8, "kv_heads": 2, "context": 1024, "rope_theta": 1000000.0 }),
-                ),
-                block(LAYERS, json!({ "layers": 6, "mult": 3.5 })),
-            ],
-            setup: Vec::new(),
-        },
-        Common {
-            name: "GLM-4 (small)",
-            description: "GLM-4's layout at desktop size: biases on queries, keys and values, rotary positions on half \
-                          of each head, and norms before and after each part. Runs in MacroMagi; not exported to GGUF.",
-            blocks: vec![
-                block(SIZE, json!({ "width": 256, "heads": 8, "kv_heads": 2, "context": 1024 })),
-                block(
-                    LAYERS,
-                    json!({ "layers": 6, "mult": 3.0, "more": true, "norm": "sandwich", "rotary": 0.5, "bias": true }),
-                ),
-            ],
-            setup: Vec::new(),
-        },
-        Common {
-            name: "DeepSeek-V4 (small)",
-            description: "DeepSeek-V4's design at desktop size: hyper-connections, sliding-window attention first, then \
-                          compressed sparse and heavily compressed attention in turn, DeepSeekMoE with √Softplus gating \
-                          (hash-routed in the first layer) and multi-token prediction. Train it with Muon. Runs in \
-                          MacroMagi; not a GGUF architecture.",
-            blocks: vec![
-                block(SIZE, json!({ "width": 192, "heads": 4, "kv_heads": 4, "context": 512 })),
-                block(HYPER, json!({ "streams": 4, "sinkhorn": 20 })),
-                block(MTP, json!({ "weight": 0.3 })),
-                with_ffn(block(WINDOW, json!({ "layers": 1, "window": 64 })), v4_hash),
-                with_ffn(block(CSA, json!({ "layers": 1, "compress": 4, "top_k": 16, "window": 64 })), v4_moe.clone()),
-                with_ffn(block(HCA, json!({ "layers": 1, "compress": 32, "window": 64 })), v4_moe.clone()),
-                with_ffn(block(CSA, json!({ "layers": 1, "compress": 4, "top_k": 16, "window": 64 })), v4_moe.clone()),
-                with_ffn(block(HCA, json!({ "layers": 1, "compress": 32, "window": 64 })), v4_moe),
-            ],
-            setup: Vec::new(),
-        },
-        Common {
-            name: "DeepSeek-V3 (small)",
-            description: "DeepSeek-V3's design at desktop size: multi-head latent attention, a dense first layer, then \
-                          DeepSeekMoE layers with sigmoid gating and bias balancing, and multi-token prediction. Runs \
-                          in MacroMagi; not a GGUF architecture.",
-            blocks: vec![
-                block(SIZE, json!({ "width": 192, "heads": 4, "kv_heads": 4, "context": 512 })),
-                block(MTP, json!({ "weight": 0.3 })),
-                block(MLA, json!({ "layers": 1, "kv_rank": 64, "q_rank": 96, "rope_dim": 16 })),
-                with_ffn(block(MLA, json!({ "layers": 3, "kv_rank": 64, "q_rank": 96, "rope_dim": 16 })), v3_moe),
-            ],
-            setup: Vec::new(),
-        },
-        Common {
-            name: "Llama (small)",
-            description: "The Llama layout: rotary positions, grouped key/value heads and SwiGLU feed-forward layers. \
-                          Exports to GGUF for LM Studio and llama.cpp, and to Hugging Face.",
-            blocks: vec![
-                block(SIZE, json!({ "width": 256, "heads": 8, "kv_heads": 4, "context": 512 })),
-                block(LAYERS, json!({ "layers": 6, "mult": 2.75 })),
-            ],
-            setup: Vec::new(),
-        },
-    ]
+    vec![Common {
+        name: "Magi",
+        description: "MacroMagi's text architecture: about 418M parameters, 148M at work per token. 32 layers, \
+                      three in four looking at the last 1,024–2,048 tokens, DeepSeekMoE experts, multi-token prediction \
+                      while training, 8K tokens in training and 128K when it runs. It trains on a GPU server \
+                      (File › Export as Python) and runs in MacroMagi.",
+        blocks: magi_blocks(),
+        setup: vec![
+            (kinds::THINKING, magi_thinking()),
+            (kinds::EFFORT, json!(magi_effort())),
+            (kinds::MEMORY, Value::Null),
+        ],
+    }]
+}
+
+/// What reinforcement learning rewards in an agent: finishing, calling tools well – the tool the
+/// dataset's answer calls first, one that is offered, in a well-formed call – and never writing a
+/// tool's result itself or going round in circles.
+pub fn agent_rules() -> Value {
+    json!([
+        { "kind": "ends", "score": 1.0 },
+        { "kind": "same_tool", "score": 2.0 },
+        { "kind": "tool_valid", "score": 1.0 },
+        { "kind": "tool_malformed", "score": -2.0 },
+        { "kind": "unknown_tool", "score": -2.0 },
+        { "kind": "made_up_result", "score": -3.0 },
+        { "kind": "loop", "score": -3.0, "tokens": 4 },
+    ])
 }
 
 /// Puts a common architecture on the canvas in place of its architecture
@@ -3028,6 +2970,33 @@ pub struct PlanFiles<'a> {
     pub devices: Vec<u32>,
 }
 
+/// A Hugging Face Dataset block's entries in the plan: its corpus, then what is wired into its
+/// With input – a Text Dataset's files, or another Hugging Face Dataset with its own.
+fn corpus_entries(graph: &Graph, node: NodeId, files: &PlanFiles<'_>, depth: usize) -> Result<Vec<Value>, String> {
+    let block = graph.node(node).ok_or("a dataset block is missing")?;
+    let corpus: CorpusParams = block.params_or_default();
+    if corpus.repo.trim().is_empty() {
+        return Err("The Hugging Face Dataset block needs a dataset (owner/name).".into());
+    }
+    let mut entries = vec![json!({ "corpus": corpus })];
+    let Some(with) = graph.data_source(node, "with") else { return Ok(entries) };
+    let Some(source) = graph.node(with.node) else { return Ok(entries) };
+    if source.kind == kinds::CORPUS {
+        if depth > 16 {
+            return Err("Hugging Face Dataset blocks are wired in a circle.".into());
+        }
+        entries.extend(corpus_entries(graph, with.node, files, depth + 1)?);
+        return Ok(entries);
+    }
+    let params: TextDataParams = source.params_or_default();
+    let list = if with.port == "negative" { &params.negative } else { &params.positive };
+    for file in list {
+        entries
+            .push(Value::from((files.dataset)(file).ok_or_else(|| format!("The dataset file “{file}” is missing."))?));
+    }
+    Ok(entries)
+}
+
 /// The training plan the trainer (`runtime/python/magi_train`) reads.
 pub fn plan(pipeline: &Pipeline, graph: &Graph, model: &MagicModel, files: &PlanFiles<'_>) -> Result<Value, String> {
     let kind = pipeline.kind(model);
@@ -3035,6 +3004,12 @@ pub fn plan(pipeline: &Pipeline, graph: &Graph, model: &MagicModel, files: &Plan
     // A dataset output with no files adds nothing.
     let mut key_of = |(node, port): &(NodeId, String)| -> Result<Option<String>, String> {
         let block = graph.node(*node).ok_or("a dataset block is missing")?;
+        if block.kind == kinds::CORPUS {
+            // Read where the training runs: the plan names it, the trainer fetches it.
+            let key = format!("{node}.{port}");
+            datasets.insert(key.clone(), Value::Array(corpus_entries(graph, *node, files, 0)?));
+            return Ok(Some(key));
+        }
         let params: TextDataParams = block.params_or_default();
         let list = if port == "negative" { &params.negative } else { &params.positive };
         if list.is_empty() {
@@ -3094,6 +3069,11 @@ pub fn plan(pipeline: &Pipeline, graph: &Graph, model: &MagicModel, files: &Plan
             o.remove("note");
         }
         entry.insert("type".into(), Value::from(ty));
+        entry.insert("node".into(), Value::from(stage.node));
+        // The block's own name, for the console's lines about it.
+        if let Some(label) = graph.node(stage.node).map(|n| n.label.trim()).filter(|l| !l.is_empty()) {
+            entry.insert("name".into(), Value::from(label));
+        }
         entry.insert("data".into(), json!(data));
         entry.insert("negatives".into(), json!(negatives));
         entry.insert("optimizer".into(), optimizer);
@@ -3124,6 +3104,10 @@ pub fn plan(pipeline: &Pipeline, graph: &Graph, model: &MagicModel, files: &Plan
             text.context = pipeline.architecture.context;
             text.ensure_specials();
             plan["text"] = serde_json::to_value(text).map_err(|e| e.to_string())?;
+            // The native engine runs most text models from their weights: an ONNX model is made only
+            // when it cannot, or when Compile Package asks for an ONNX file.
+            let asked = pipeline.compile.as_ref().is_some_and(|(_, c)| c.onnx);
+            plan["onnx"] = json!(asked || pipeline.architecture.native_problem().is_some());
         }
         ModelKind::Vision => {
             let pictures = files
@@ -3237,10 +3221,19 @@ pub fn check_sample(jsonl: bool, sample: &str, text: &TextSpec) -> Result<&'stat
             {
                 return Err("“thinking” is text.".into());
             }
+            // A turn marked "learn": false is read, not learned: a wrong call the model then recovers
+            // from may name a tool it does not have.
+            let learned = message.get("learn").and_then(Value::as_bool) != Some(false);
             if let Some(calls) = message.get("tool_calls") {
                 let Value::Array(calls) = calls else { return Err("“tool_calls” must be a list.".into()) };
+                let any_tool = TextSpec::default();
                 for call in calls {
-                    check_call(call.get("function").unwrap_or(call), text, offered.as_deref())?;
+                    let call = call.get("function").unwrap_or(call);
+                    if learned {
+                        check_call(call, text, offered.as_deref())?;
+                    } else {
+                        check_call(call, &any_tool, None)?;
+                    }
                 }
             }
         }
@@ -3320,48 +3313,62 @@ fn check_tools(text: &str, spec: &TextSpec, offered: Option<&[String]>) -> Resul
 // ---- the example workspace ------------------------------------------------------
 
 /// The system prompt of the example text model.
-pub const EXAMPLE_SYSTEM: &str = "You are Magi, a small assistant made in MacroMagi. Answer clearly and briefly, and use a tool when you need facts you do not have.";
+pub const EXAMPLE_SYSTEM: &str = "You are Magi, an agent made in MacroMagi. You know how to work, not facts or exact code: \
+think, plan in steps, look up what you need in MagiDB (db_search, db_read) or on the web, act with your tools, check the \
+results, and answer briefly.";
 
-/// The tools the example text model offers: general ones, as its datasets
-/// use them (`examples/make_examples.py`). MacroMagi's own tools (press,
-/// type…) are added in the Tools block.
+/// The tools a Magi model has, in the order its datasets list them (examples/make_work_data.py):
+/// MacroMagi's native tools for an agent's work.
+pub const MAGI_TOOLS: [&str; 16] = [
+    "db_search",
+    "db_read",
+    "web_search",
+    "fetch_page",
+    "list_files",
+    "read_file",
+    "search_files",
+    "write_file",
+    "edit_file",
+    "run_command",
+    "open_document",
+    "edit_document",
+    "view_image",
+    "calculator",
+    "get_time",
+    "get_weather",
+];
+
+/// A Magi model's tools: [`MAGI_TOOLS`], as the native tools describe themselves.
 pub fn example_tools() -> Vec<ToolSpec> {
-    let tool = |name: &str, description: &str, argument: &str| ToolSpec {
-        name: name.into(),
-        description: description.into(),
-        parameters: json!({ "type": "object", "properties": { argument: { "type": "string" } }, "required": [argument] }),
-        // MacroMagi runs these itself (its native tools of the same names).
-        native: true,
-    };
-    vec![
-        tool("web_search", "Searches the web and returns short results.", "query"),
-        tool("calculator", "Works out a math expression.", "expression"),
-        tool("get_weather", "Gets the current weather for a place.", "location"),
-        tool("get_time", "Gets the current date and time for a place.", "location"),
-    ]
+    let all = crate::native_tools::built_in();
+    MAGI_TOOLS.iter().filter_map(|name| all.iter().find(|t| t.name == *name)).map(|t| t.spec()).collect()
 }
 
-/// The example datasets a new text model starts with: written for MacroMagi
-/// by `examples/make_examples.py` (plain English, everyday conversation,
-/// reasoning at both efforts, using tools, naming conversations, answers not
-/// to give), and taken from open datasets by `examples/open_data.py` (simple
-/// texts, conversations, math step by step, Python, tool calls; credits in
-/// `examples/SOURCES.md`). Paths are inside the `.magic` file; `true` marks
-/// “what not to do”.
+/// The example datasets a new Magi model starts with: written for MacroMagi by
+/// `examples/make_examples.py`, `make_agent_data.py` and `make_work_data.py` (plain English,
+/// conversation, tools one at a time and many in a row, long pieces of work – code, research,
+/// documents, pictures – with MagiDB, compaction, answers not to give), and taken from open
+/// datasets by `examples/open_data.py` (conversations, tool calls; credits in
+/// `examples/SOURCES.md`). Paths are inside the `.magic` file; `true` marks “what not to do”.
 pub fn example_datasets() -> Vec<(String, String, bool)> {
     let file = |name: &str, content: &str, negative: bool| (format!("data/text/{name}"), content.to_owned(), negative);
     vec![
         file("language.md", include_str!("examples/language.md"), false),
-        file("facts.md", include_str!("examples/facts.md"), false),
+        // Long pieces of work: tens of tool calls, MagiDB first (examples/make_work_data.py).
+        file("work.jsonl", include_str!("examples/work.jsonl"), false),
         file("chat.jsonl", include_str!("examples/chat.jsonl"), false),
-        file("reasoning.jsonl", include_str!("examples/reasoning.jsonl"), false),
         file("tools.jsonl", include_str!("examples/tools.jsonl"), false),
         file("titles.jsonl", include_str!("examples/titles.jsonl"), false),
+        file("knowing.jsonl", include_str!("examples/knowing.jsonl"), false),
+        file("simple_qa.jsonl", include_str!("examples/simple_qa.jsonl"), false),
+        file("compaction.jsonl", include_str!("examples/compaction.jsonl"), false),
+        // Written by examples/make_agent_data.py: a router's habits.
+        file("thinking.jsonl", include_str!("examples/thinking.jsonl"), false),
+        file("agent.jsonl", include_str!("examples/agent.jsonl"), false),
+        file("small_talk.jsonl", include_str!("examples/small_talk.jsonl"), false),
+        file("explain.jsonl", include_str!("examples/explain.jsonl"), false),
         // Taken from open datasets by examples/open_data.py (credits in examples/SOURCES.md).
-        file("basics.md", include_str!("examples/basics.md"), false),
         file("conversations.jsonl", include_str!("examples/conversations.jsonl"), false),
-        file("math.jsonl", include_str!("examples/math.jsonl"), false),
-        file("python.jsonl", include_str!("examples/python.jsonl"), false),
         file("functions.jsonl", include_str!("examples/functions.jsonl"), false),
         file("avoid.jsonl", include_str!("examples/avoid.jsonl"), true),
     ]
@@ -3374,11 +3381,32 @@ mod tests {
     fn every_kind() -> Vec<&'static str> {
         use kinds::*;
         let mut all: Vec<&str> =
-            vec![ZERO, BASE, CONFIG, MOE, PERSONA, TEXT_DATA, IMAGE_DATA, OPTIMIZER, COMPILE, PROMPT, TEST];
+            vec![ZERO, BASE, CONFIG, MOE, PERSONA, TEXT_DATA, CORPUS, IMAGE_DATA, OPTIMIZER, COMPILE, PROMPT, TEST];
         all.extend(SETUP_BLOCKS);
         all.extend(ARCHITECTURE);
         all.extend(STAGES);
         all
+    }
+
+    #[test]
+    fn untouched_old_optimizers_take_the_tuned_rates() {
+        let registry = registry();
+        let mut graph = Graph::default();
+        let old = graph.add(&registry, kinds::OPTIMIZER, [0.0, 0.0]).unwrap();
+        let changed = graph.add(&registry, kinds::OPTIMIZER, [0.0, 100.0]).unwrap();
+        for (id, muon) in [(old, 0.02), (changed, 0.01)] {
+            let node = graph.node_mut(id).unwrap();
+            node.params.remove("embed_lr");
+            node.set_param("muon_lr", json!(muon));
+        }
+        upgrade(&mut graph);
+        let rates = |id| {
+            let p: OptimizerParams = graph.node(id).unwrap().params_or_default();
+            (p.muon_lr, p.embed_lr)
+        };
+        assert_eq!(rates(old), (0.004, 0.02));
+        assert_eq!(rates(changed), (0.01, 0.02));
+        assert!(!graph.node(changed).unwrap().params.contains_key("embed_lr"));
     }
 
     #[test]
@@ -3419,15 +3447,21 @@ mod tests {
         let found = pipeline(&graph).unwrap();
         assert_eq!(found.entry.kind, kinds::ZERO);
         let stages: Vec<&str> = found.stages.iter().map(|s| s.kind.as_str()).collect();
-        assert_eq!(stages, [kinds::PRETRAIN, kinds::FINETUNE, kinds::RL], "Magi-F1's recipe");
+        assert_eq!(stages, [kinds::PRETRAIN, kinds::FINETUNE, kinds::COMPACTION, kinds::RL], "Magi's recipe");
         assert!(found.stages.iter().all(|s| s.has_optimizer), "an optimizer is wired into every stage");
-        assert_eq!(found.stages[0].optimizer.name, "muon");
-        assert_eq!(found.stages[2].optimizer.name, "adamw", "reinforcement is gentler");
+        let optimizers: Vec<&str> = found.stages.iter().map(|s| s.optimizer.name.as_str()).collect();
+        assert_eq!(optimizers, ["muon", "muon", "muon", "adamw"], "reinforcement is gentler");
         let a = &found.architecture;
-        assert_eq!(a.rope_scaling.as_ref().map(|s| (s.original, s.target)), Some((2048, 32768)), "YaRN to 32K");
-        assert_eq!(found.architecture.layers.len(), 8);
-        assert_eq!(found.architecture.gguf_arch(), Some("qwen3"), "the Magi layout");
-        assert!(found.architecture.tied);
+        assert_eq!(a.rope_scaling.as_ref().map(|s| (s.original, s.target)), Some((8192, 131072)), "YaRN to 128K");
+        assert_eq!((a.width, a.heads, a.kv_heads, a.layers.len()), (768, 12, 4, 32));
+        assert!(a.tied && a.mtp.is_some());
+        // Three plain layers, then experts; three of four layers have a window of 1,024-token blocks.
+        let ffn: Vec<&str> = a.layers.iter().map(|l| l["ffn"]["kind"].as_str().unwrap_or("dense")).collect();
+        assert_eq!(&ffn[..4], ["dense", "dense", "dense", "moe"]);
+        assert!(ffn[3..].iter().all(|k| *k == "moe"));
+        assert_eq!(a.layers[3]["ffn"]["experts"], 16);
+        let windows: Vec<u64> = a.layers.iter().map(|l| l["attention"]["window"].as_u64().unwrap_or(0)).collect();
+        assert_eq!(&windows[..8], [1024, 1024, 1024, 0, 1024, 1024, 1024, 0]);
         assert!(found.compile.is_some());
 
         // The setup chain makes the model what it says.
@@ -3435,7 +3469,7 @@ mod tests {
         derive(&mut graph, &mut model, false);
         assert_eq!((model.kind, model.name.as_str()), (ModelKind::Text, "Helper"));
         let text = model.text.as_ref().unwrap();
-        assert_eq!(text.context, 2048, "room for the tools: a token is a byte");
+        assert_eq!(text.context, 8192);
         assert!(text.thinking.is_some() && text.effort.is_some(), "Thinking and Reasoning Effort are chained in");
         // Unchaining Thinking switches it off.
         let thinking = graph.nodes().find(|n| n.kind == kinds::THINKING).unwrap().id;
@@ -3455,27 +3489,25 @@ mod tests {
         let dataset = |file: &str| Some(format!("/tmp/{}", file.rsplit('/').next().unwrap()));
         let plan = plan(&found, &graph, &model, &plan_files(&dataset)).unwrap();
         assert_eq!(plan["kind"], "text");
-        assert_eq!(plan["stages"][0]["type"], "pretrain");
-        assert_eq!(plan["stages"][1]["type"], "sft");
-        assert_eq!(plan["stages"][1]["optimizer"]["name"], "muon");
-        assert_eq!(plan["stages"][2]["type"], "rl");
-        // Pretraining reads language and reasoning; fine-tuning, every kind of request.
-        let files_of = |stage: usize| {
-            let key = plan["stages"][stage]["data"][0].as_str().unwrap().to_owned();
-            plan["datasets"][&key]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|f| f.as_str().unwrap().to_owned())
-                .collect::<Vec<_>>()
-        };
-        assert!(
-            files_of(0).iter().any(|f| f.ends_with("language.md"))
-                && !files_of(0).iter().any(|f| f.ends_with("tools.jsonl"))
+        let types: Vec<&str> = plan["stages"].as_array().unwrap().iter().map(|s| s["type"].as_str().unwrap()).collect();
+        assert_eq!(types, ["pretrain", "sft", "compaction", "rl"]);
+        let entries = |stage: usize| plan["datasets"][plan["stages"][stage]["data"][0].as_str().unwrap()].clone();
+        // Pretraining: FineWeb-Edu, the code corpus, then the example files of plain text.
+        let pretraining = entries(0);
+        assert_eq!(pretraining[0]["corpus"]["repo"], "HuggingFaceFW/fineweb-edu");
+        assert_eq!(pretraining[1]["corpus"]["repo"], "OpenCoder-LLM/opc-fineweb-code-corpus");
+        assert!(pretraining.as_array().unwrap().iter().any(|f| f.as_str().is_some_and(|f| f.ends_with("language.md"))));
+        // Fine-tuning: smol-smoltalk's conversations, and the agent work.
+        let tuning = entries(1);
+        assert_eq!(tuning[0]["corpus"]["field"], "messages");
+        let tuned =
+            |name: &str| tuning.as_array().unwrap().iter().any(|f| f.as_str().is_some_and(|f| f.ends_with(name)));
+        assert!(tuned("work.jsonl") && tuned("tools.jsonl") && tuned("compaction.jsonl"));
+        assert_eq!(plan["stages"][3]["rules"].as_array().unwrap().len(), 7, "the agent's reward rules");
+        assert_eq!(
+            plan["architecture"]["layers"][0]["attention"],
+            json!({ "kind": "full", "qk_norm": true, "window": 1024 })
         );
-        assert!(files_of(1).iter().any(|f| f.ends_with("tools.jsonl")));
-        assert_eq!(plan["architecture"]["layers"].as_array().unwrap().len(), 8);
-        assert_eq!(plan["architecture"]["layers"][0]["attention"], json!({ "kind": "full", "qk_norm": true }));
         assert_eq!(plan["text"]["effort"]["default"], "standard");
         assert!(plan["architecture"].get("blocks").is_none());
         let key = plan["stages"][1]["negatives"][0].as_str().unwrap().to_owned();
@@ -3506,10 +3538,13 @@ mod tests {
         two.add_with(kinds::ZERO, [0.0, 0.0], Map::new());
         assert!(pipeline(&two).unwrap_err().contains("more than one"));
 
-        // A stage without its dataset.
+        // A stage without its datasets.
         let mut bare = Graph::from(default_canvas(&text_model(), false, false, &files()));
-        let data = bare.nodes().find(|n| n.kind == kinds::TEXT_DATA).unwrap().id;
-        bare.remove(data);
+        let data: Vec<NodeId> =
+            bare.nodes().filter(|n| n.kind == kinds::TEXT_DATA || n.kind == kinds::CORPUS).map(|n| n.id).collect();
+        for id in data {
+            bare.remove(id);
+        }
         let found = pipeline(&bare).unwrap();
         let none = |_: &str| None;
         assert!(plan(&found, &bare, &text_model(), &plan_files(&none)).unwrap_err().contains("nothing to learn from"));
@@ -3517,82 +3552,41 @@ mod tests {
         // Heads that do not divide the width.
         let mut odd = Graph::from(default_canvas(&text_model(), false, false, &files()));
         let size = odd.nodes().find(|n| n.kind == kinds::SIZE).unwrap().id;
-        odd.node_mut(size).unwrap().set_param("heads", 3);
+        odd.node_mut(size).unwrap().set_param("heads", 5);
         assert!(pipeline(&odd).unwrap_err().contains("divide"));
     }
 
     #[test]
-    fn a_common_architecture_replaces_the_canvas_architecture() {
+    fn commons_put_magi_back_in_place() {
+        assert_eq!(commons().iter().map(|c| c.name).collect::<Vec<_>>(), ["Magi"], "Magi only");
         let mut graph = Graph::from(default_canvas(&text_model(), false, false, &files()));
-        let deepseek = commons().into_iter().find(|c| c.name.starts_with("DeepSeek-V4")).unwrap();
-        apply_common(&mut graph, &deepseek, [0.0, 0.0]);
+        // Changed by hand…
+        let layers: Vec<NodeId> = graph.nodes().filter(|n| n.kind == kinds::LAYERS).map(|n| n.id).collect();
+        graph.node_mut(layers[1]).unwrap().set_param("layers", 2);
+        assert_eq!(pipeline(&graph).unwrap().architecture.layers.len(), 5);
+        // …and put back: the stages stay wired after it, and the experts block is not doubled.
+        apply_common(&mut graph, &commons()[0], [0.0, 0.0]);
         let found = pipeline(&graph).unwrap();
-        assert_eq!(found.stages.len(), 3, "the stages stay wired after it");
-        let a = &found.architecture;
-        assert!(a.hyper_connections.is_some() && a.mtp.is_some());
-        let kinds: Vec<&str> = a.layers.iter().map(|l| l["attention"]["kind"].as_str().unwrap()).collect();
-        assert_eq!(kinds, ["window", "csa", "hca", "csa", "hca"]);
-        assert_eq!(a.layers[0]["ffn"]["hash"], true);
-        assert_eq!(a.layers[1]["ffn"]["gating"], "sqrt_softplus");
-        assert!(!a.gguf_compatible());
-        // Applying another one replaces it, feed-forward blocks included.
-        let llama = commons().into_iter().find(|c| c.name.starts_with("Llama")).unwrap();
-        apply_common(&mut graph, &llama, [0.0, 0.0]);
-        assert!(!graph.nodes().any(|n| n.kind == kinds::MOE));
-        assert_eq!(pipeline(&graph).unwrap().architecture.gguf_arch(), Some("llama"));
-    }
-
-    #[test]
-    fn the_common_architectures_export_as_they_say() {
-        let expected = [
-            ("Magi (small)", Some("qwen3")),
-            ("Magi (12M)", Some("qwen3")),
-            ("Qwen3 (small)", Some("qwen3")),
-            ("Qwen3 Thinking (small)", Some("qwen3")),
-            ("Gemma 3 (small)", Some("gemma3")),
-            ("Mistral (small)", Some("llama")),
-            ("GLM-4 (small)", None),
-            ("DeepSeek-V4 (small)", None),
-            ("DeepSeek-V3 (small)", None),
-            ("Llama (small)", Some("llama")),
-        ];
-        let names: Vec<&str> = commons().iter().map(|c| c.name).collect();
-        assert_eq!(names, expected.map(|(n, _)| n));
-        for (name, arch) in expected {
-            let mut model = MagicModel { text: Some(TextSpec::default()), ..text_model() };
-            let mut graph = Graph::from(default_canvas(&model, false, false, &files()));
-            let common = commons().into_iter().find(|c| c.name == name).unwrap();
-            apply_common(&mut graph, &common, [0.0, 0.0]);
-            let found = pipeline(&graph).unwrap();
-            assert_eq!(found.architecture.gguf_arch(), arch, "{name}");
-            derive(&mut graph, &mut model, false);
-            let text = model.text.as_ref().unwrap();
-            let has = |kind: &str| common.setup.iter().any(|(k, _)| *k == kind);
-            assert_eq!(text.thinking.is_some(), has(kinds::THINKING), "{name}: Thinking is chained in");
-            assert_eq!(text.effort.is_some(), has(kinds::EFFORT), "{name}");
-        }
-        // Gemma 3: five local layers, then a global one.
-        let gemma = commons().into_iter().find(|c| c.name.starts_with("Gemma")).unwrap();
-        let mut graph = Graph::from(default_canvas(&text_model(), false, false, &files()));
-        apply_common(&mut graph, &gemma, [0.0, 0.0]);
-        let a = pipeline(&graph).unwrap().architecture;
-        let windows: Vec<u64> = a.layers.iter().map(|l| l["attention"]["window"].as_u64().unwrap_or(0)).collect();
-        assert_eq!(windows, [256, 256, 256, 256, 256, 0]);
-        assert_eq!(a.layers[0]["norm"], "sandwich");
-        assert_eq!(a.layers[0]["ffn"]["activation"], "geglu");
-        assert!(a.embed_scale && a.tied);
+        assert_eq!(found.stages.len(), 4);
+        assert_eq!(found.architecture.layers.len(), 32);
+        assert_eq!(graph.nodes().filter(|n| n.kind == kinds::MOE).count(), 1);
+        let mut model = MagicModel { text: Some(TextSpec::default()), ..text_model() };
+        derive(&mut graph, &mut model, false);
+        let text = model.text.as_ref().unwrap();
+        assert!(text.thinking.as_ref().is_some_and(|t| t.on_by_default), "Magi thinks before each step");
+        assert!(text.effort.is_some());
     }
 
     #[test]
     fn a_trained_model_opens_with_its_own_architecture() {
-        let mut graph = Graph::from(default_canvas(&text_model(), false, false, &files()));
-        apply_common(&mut graph, &commons()[1], [0.0, 0.0]);
+        let graph = Graph::from(default_canvas(&text_model(), false, false, &files()));
         let trained = MagicModel { architecture: Some(pipeline(&graph).unwrap().architecture), ..text_model() };
-        let reopened = Graph::from(default_canvas(&trained, true, true, &[]));
+        let reopened = Graph::from(default_canvas(&trained, true, true, &files()));
         let found = pipeline(&reopened).unwrap();
         assert_eq!(found.entry.kind, kinds::BASE);
         assert_eq!(found.architecture.layers, trained.architecture.as_ref().unwrap().layers);
-        assert_eq!(found.stages.len(), 1, "fine-tuning");
+        let stages: Vec<&str> = found.stages.iter().map(|s| s.kind.as_str()).collect();
+        assert_eq!(stages, [kinds::FINETUNE, kinds::COMPACTION, kinds::RL], "no pretraining from trained weights");
     }
 
     #[test]
@@ -3662,7 +3656,14 @@ mod tests {
             .collect();
         assert_eq!(
             kinds,
-            BTreeSet::from(["Conversation", "Not to answer", "Reasoning", "Request and answer", "Tool use"]),
+            BTreeSet::from([
+                "Compaction",
+                "Conversation",
+                "Not to answer",
+                "Reasoning",
+                "Request and answer",
+                "Tool use"
+            ]),
             "every kind of sample is shown"
         );
     }

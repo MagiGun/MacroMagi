@@ -4,6 +4,97 @@ Notable changes to MacroMagi. The format follows [Keep a Changelog](https://keep
 
 File-format changes are called out explicitly; see [docs/FILE_FORMAT.md](docs/FILE_FORMAT.md) for the compatibility rules.
 
+## 0.1.7.2 – Unreleased
+
+The second update of 0.1.7 (Cargo keeps 0.1.7).
+
+### Added
+
+- **Magi: one architecture, an agent.** File › New text model is **Magi** – about 418 million parameters, 148 million at work per token: 768 wide and 32 layers deep, twelve heads sharing four key/value heads, queries and keys normalized; three layers in four look at the last 1,024 tokens and the fourth at everything; after three plain layers, DeepSeekMoE (a shared and sixteen routed experts, two per token, √Softplus, bias balancing); multi-token prediction while training; 8K tokens in training and YaRN to 128K when it runs; 32K tokens learned where it trains; thinking on, efforts *standard* and *superior*. It knows how to work, not facts or exact code, and trains on a GPU server (File › Export as Python, Colab's G4: about a day).
+- **Magi's recipe**: pretraining on three billion tokens of FineWeb-Edu and OpenCoder's code corpus (two Hugging Face Dataset blocks, chained), fine-tuning on smol-smoltalk and the example datasets, a compaction stage, and reinforcement learning with the agent's reward rules.
+- **MagiDB**: Magi's library of how things are done – linked Markdown pages (how Magi works, Python, JavaScript, Rust, Git, the command line, SQL, documents, algorithms, error messages), started in the repository's `magidb/` with its search index and how to write pages. `db_search` and `db_read` read a chosen folder, the copy downloaded under Settings › Runtime, or the repository online, page by page and cached; searching ignores case and accents.
+- **Magi's tools**: `db_search`, `db_read`, `search_files`, `write_file`, `edit_file`, `run_command`, `open_document`, `edit_document` and `view_image` join `web_search`, `fetch_page`, `list_files`, `read_file` (now numbered lines, 200 at a time), `calculator`, `get_time` and `get_weather`. Documents (Word, Excel, PowerPoint, PDF, CSV) are opened as numbered parts of plain text and changed by part, saved in their own format with their styles and a backup. Pictures are described by a small vision model (SmolVLM-256M) and their text read by Windows' text recognition.
+- **Calls that change files or run programs ask first**: a window shows the command, the text or the change, with *Allow*, *Allow until MacroMagi closes* and *Don't allow*; a refused call tells the model so. **File format:** a native tool's `confirm`.
+- **Tools MacroMagi carries out itself** (`"run": {"kind": "host"}`), such as `view_image`. **File format.**
+- **Long work**: up to 100 tool calls a request by default (200 at most). When the work outgrows the context, earlier results are shortened and then the oldest steps left out, keeping the system text and the request – and the trainer learns every turn from exactly that text.
+- **`work.jsonl`**: 1,400 long pieces of work, up to 78 tool calls each, every result from the real tools run on real files (`make_work_data.py`): fixing tests, adding options, renaming across up to 30 files, docstrings everywhere, TODO lists, scripts from data (pseudocode, MagiDB, run, fixed), spreadsheets, Word files, PDFs, screenshots, receipts, MagiDB questions, error messages, Git.
+- **Attaching pictures and documents** in the AI Agent window: they are named by their path, and the model looks at them or opens them with its tools.
+- **Settings › Runtime › Magi's tools**: MagiDB (downloaded for offline use), Document tools (python-docx, openpyxl, python-pptx, pypdf) and Image descriptions (transformers and SmolVLM-256M-Instruct), with the address MagiDB is read from online and a folder of pages to read instead.
+- **Reward rules for agents**: *Calls the tool the dataset's answer calls first*, *Calls a tool it is not offered*, *Writes a tool's result itself*.
+- **Hugging Face Dataset block**: a dataset on huggingface.co read where training runs – a part at a time, cut into tokens once (about two million tokens a second), never kept in the workspace. A column of `messages` is conversations to fine-tune on; a Text Dataset or another Hugging Face Dataset wired into its *With* input is read along with it.
+- **Long runs go on where they stopped**: the trainer saves every 20 minutes and picks up from there when it runs again; the Colab notebook keeps the run and the corpora on Google Drive. Learned tokens it learns itself (from a corpus) come back into the model.
+- **Training is faster and leaner**, measured on Magi's layers: local windows as the fused causal kernel on overlapping chunks (about 4× faster than the masked window, also for packed fine-tuning rows), cuDNN's attention when the card has it (about 2×), norms handing on half precision and rotary positions keeping nothing for the backward pass (a window-and-experts layer: 48.8 ms → about 13 ms, 68 → 43 KB a token), a fused softmax in the output head's loss (37% faster), batches split before activations are recomputed, reinforcement learning writing with a key/value cache (14× faster at 3,000-token prompts), long samples prepared 13× faster. A run that stops goes on with the tokens it learned (it learned them again, and a corpus cut into other tokens could have been used).
+- **Notify when training ends** (Options, on by default): a sound and a desktop notification when a run of more than a minute finishes or fails. The training view says the time in minutes and hours.
+
+- **Learned tokens.** A text model can cut text into pieces of words learned from its datasets (byte pairs) instead of bytes: about a third as many tokens, so it reads three times the text at once and trains on three times the text in the same time. New models use them; the Text block chooses *Learned* or *Bytes*. The pieces are learned when training starts from zero, in MacroMagi; the trainer reads them as MacroMagi does (checked token for token). **File format:** `text.tokenizer`.
+- **The native engine runs DeepSeek's Mixture of Experts** (shared and routed experts, softmax, sigmoid or √Softplus gating, bias balancing, hash routing), so Magi-F1DS answers from its cache like the other Magi models instead of reading the whole conversation again for every token. Checked against PyTorch to within 0.000005.
+- **Training survives running out of memory**: it recomputes activations, then splits each batch into parts, and runs the step again.
+- **float16 on graphics cards without bfloat16** (Colab's T4, older cards), with a loss scale.
+- **A Magi model is one `.szi` file**: the description, the weights, the native tools (and an ONNX model only when asked for) in one zip archive – upload it, download it, open it. Compile Package writes `<project>/<name>.szi`; a workspace exported as Python writes it too, and the Colab notebook downloads it directly. `szi/` folders from before still open. **File format:** `.szi` version 2.
+- **The AI Agent window shows every tool call**: a row per call with the tool, its arguments in short and whether it worked, failed or did not run (and why); click it for the arguments and the result in full, with what the model thought before it. A call to a tool the model does not have comes back to it as an error it can read and answer from, instead of ending the answer empty.
+- **The console gives times**: after each stage, how long it took and how long the run has taken so far.
+- **New example datasets for a router model** (`make_agent_data.py`): `thinking.jsonl` (when to think, step-by-step working checked by code, and arithmetic given to the calculator whenever one is offered), `agent.jsonl` (tools in a row, errors and recovering, what no tool can do), `small_talk.jsonl` (short answers to small talk, so story problems no longer drown it) and `explain.jsonl` (longer answers laid out in steps and lists). Dataset messages can be marked `"learn": false`: read, not learned.
+- **Base models: pretrain once, fine-tune in minutes.** *Save as base model…* on a stage block writes the weights kept after it as a `.szi` file; a Load Base Model block pointing at it fine-tunes without pretraining again, taking the base's learned tokens and checking its architecture.
+- **The console estimates the time left** after a stage's first steps, and says when the whole run would take more than twenty minutes – better done on a GPU server (File › Export as Python) or from a base model.
+- **Hugging Face Dataset block**: a dataset on huggingface.co (FineWeb-Edu by default) read where training runs – a part at a time, cut into tokens once (about two million tokens a second), never kept in the workspace. A column of `messages` is conversations to fine-tune on; a Text Dataset wired into its *With* input is read along with it.
+- **Long runs go on where they stopped**: the trainer saves every 20 minutes and picks up from there when it runs again; the Colab notebook keeps the run and the corpus on Google Drive. Learned tokens it learns itself (from a corpus) come back into the model.
+- **Edit in bulk** in the dataset editor: find and replace (text or regular expressions) in chosen parts of the samples, delete or keep the ones that match, delete long ones, remove repeats, trim, set effort or tools, take out thinking – on the selected samples, the file or every file, with a preview, and Undo.
+- **Generate** in the dataset editor: another AI model – LM Studio, Ollama, llama.cpp, vLLM or any OpenAI-compatible endpoint – writes samples of the kind asked for, each checked before it is added; its thinking can be turned down to write faster.
+- **Stage blocks say how much they read**: the tokens, and how many passes over their data – with a warning at too many or too few.
+
+### Changed
+
+- **File › Export as Python (experimental)**: the trainer tries compiled layers (`torch.compile`, Linux only) and keeps them only when they are faster with the same loss. Routed experts run as grouped products when PyTorch has them (about 7% faster on a Magi layer); Muon's step is fused (30% faster, a third of the rounding error); multi-token prediction's attention is padded to take cuDNN (2× faster); a batch that leaves memory so full that every step waits for PyTorch to empty its cache is split in parts (the compiled run on Colab's G4: 8 rows at 92 of 96 GB, 3.89 s a step, slower than 4 rows plain); on Linux, memory grows in segments (`expandable_segments`); saving the run every 20 minutes no longer stops training while several GB are written to Google Drive.
+- **Local windows are block-aligned**: a token sees its own block of *window* tokens and the block before (between one and two windows back), in training and in the native engine alike – the window the fast kernel can run.
+- **Only Magi.** Presets › Commons offers Magi alone; the small, 12M, 30M and F1DS presets and the well-known layouts (Qwen3, Gemma 3, Mistral, GLM-4, DeepSeek-V3/V4, Llama) are gone. Their blocks are still in the block list.
+- **Tool results read exactly as the tools print them**, keys in the tool's order – as the training data writes them (they were re-sorted alphabetically). A tool's arguments are listed in the order it declares them (`read_file(path, from?: integer, lines?: integer)`).
+- **The example datasets are an agent's**: `math.jsonl`, `python.jsonl`, `basics.md`, `facts.md` and `reasoning.jsonl` are gone – arithmetic goes to the calculator, facts and exact code to MagiDB and the web.
+
+- **The AI Agent window** is laid out again, as chat apps are: the chat list and the settings keep their width and nothing slides under them; requests are bubbles on the right as wide as their text, answers are text in a column of reading width with code blocks, inline code, bold, headings and lists; the message box is one rounded bar that grows as you write. A narrow window hides the chat list rather than squeezing the messages.
+- **Compaction is learned with fine-tuning** (its samples mixed in like any file) instead of in a stage of its own after it, which made small models end every answer with `</compact>`. A Context Compaction stage mixes the other requests in too. The example recipe has no separate compaction stage; models note that they learned it (`trained.compacts`).
+- **Training lists the model's own tools** in samples without `"tools"` – as the model sees them whenever it runs; `"tools": []` lists none.
+- The example recipe pretrains on every file (requests and answers as plain text too) and fine-tunes for 600 steps.
+- **Models learn much faster from zero.** A tied embedding table starts small (as GPT-2's), and Muon gets two learning rates tuned on the Magi presets: 0.004 for the layers and 0.02 for the embeddings and norms (*Learning rate (layers)* and *(embeddings)* on the Optimizer block); Optimizer blocks still on the old defaults take them when opened. After 300 steps of pretraining the 12M Magi's loss is 1.93 instead of 2.77, and the small one's 2.02 instead of 2.41. **File format:** the optimizer's `embed_lr`.
+- **Less graphics memory**: the output head's loss is worked out a slice at a time, its gradients in the same pass – 7.5 GB instead of 9.7 GB for the 12M Magi at 16 rows of 2048 tokens, 3.7 GB instead of 6.0 for the small one, at the same speed.
+- **Fine-tuning is about 40% faster**: requests are packed into rows only as long as each step's longest one needs, and into the first row they fit in – 0.35 s a step instead of 0.46 on the 12M Magi, with a little more learned in each; the next step's rows are packed while the graphics card works.
+- **Less memory when idle**: training no longer writes an ONNX model of a text model the native engine runs (unless Compile Package asks for an ONNX file), an ONNX copy kept beside such a model's weights is dropped when it opens, and the AI Agent window keeps only what chatting needs of the Magic tab's model – and nothing once closed. A trained 21M-parameter model took about 450 MB with the AI Agent window opened once; the copies behind most of that are gone.
+- **Tools are listed a line each** (`web_search(query): Searches the web…`) in new models' system text, instead of with their JSON parameters: 207 tokens instead of 377 for the example model's seven tools, in every sample it trains on – about half as many again per fine-tuning step. Models made before keep the form they learned. **File format:** `text.tool_list`.
+- `conversations.jsonl` leaves out the conversations that name the assistant that wrote them, which taught small models to say they were Open Assistant.
+- The trainer says what mixed precision means (the math in bfloat16 or float16, the weights in float32).
+
+### Removed
+
+- **GGUF, LM Studio, llama.cpp and Hugging Face exports**: Compile Package writes the `.magic` workspace, the `.szi` Magi model and, if asked, an ONNX file; GGUF models no longer import or run, and llama.cpp is no longer offered under Settings › Runtime and Hardware. Old files open; the settings they had for these are ignored.
+- **New text model from a base** and **New large text model** in the File menu: New text model is Magi. A stage's *Save as base model…* and the Load Base Model block remain.
+
+### Fixed
+
+- Fine-tuning compaction samples on their own made a model start answers oddly and end them with `</compact>`.
+- Small settings such as learning rates showed as 0.00 and dragged in steps of 0.02; they show their digits now (0.004) and drag in proportion.
+- On Windows, training that needed more graphics memory than was free ran about ten times slower instead of saving memory: NVIDIA's driver lends system memory rather than failing. Training now keeps within the free memory, so it recomputes activations or splits batches instead.
+
+## 0.1.7.1 – Unreleased
+
+Cargo keeps the version 0.1.7 (a package version has three numbers); this is its first update.
+
+### Added
+
+- **Training from a stage.** Each training keeps the weights after every stage (in the project's `checkpoints/`). Train then offers: everything from the start, the rest from after any stage with kept weights, or one stage again on the trained model. Stage blocks have *Train from here* and *Only this, on the trained model*.
+- **The AI Agent window** (the robot button, top right): chats with the Magic tab's model or a `.szi`, `.magic` or `.gguf` file, in a window of its own – chats kept and named by the model, per-chat settings (system prompt, thinking, effort, sampling, context, native tools, compaction), text files attached to messages, sent messages edited, deleted or answered again. A preview of CodeMagi.
+- **Compaction in use**: a Context Compaction stage in the example recipe with its own data (`compaction.jsonl`), and the AI Agent window writes a long chat's earlier part short with it.
+- **`knowing.jsonl`**: greeting back, keeping small talk short, saying when it does not know, searching instead of guessing, asking when a request is unclear.
+- **Dataset editor**: undo and redo; *+ Tool call* lists the tools with their arguments (the ones not on for the model marked) and fills one field per argument; calls to tools the model does not have are marked; *Scan for issues* points out answers in a row; *Scan all files* in the Text Dataset block marks each file with issues.
+- **Magi-V4 (experts)** in Presets › Commons: Magi with DeepSeek-V4's Mixture of Experts in every layer.
+- **Colab**: File › Export as Python also writes `colab.ipynb`, which trains the model on Google Colab.
+
+### Changed
+
+- **Training is about five times faster** on a graphics card: bfloat16 with full-precision weights, fused norms and AdamW, Muon batched by shape. Fine-tuning packs requests into each row (a step learns from a few dozen), and datasets are mixed by the square root of their size. The 12M Magi: about 0.3 s a step instead of 1.5 s on an RTX 5070.
+- **With thinking on, answers without reasoning are learned after an empty thinking span**, so a model no longer works out a greeting like a math problem.
+- The Magi presets add DeepSeek-V4's multi-token prediction while training (the finished model and its GGUF are unchanged).
+- The dataset editor's *Model's view* is gone: hovering over a sample's kind shows the training text.
+- LM Studio's model.yaml adds a repeat penalty and an answer-length cap, so small models stop.
+
 ## 0.1.7 – Unreleased
 
 ### Added

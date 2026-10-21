@@ -392,11 +392,13 @@ impl ParamKind {
     }
 }
 
-/// Shows a parameter only while another parameter has a given value.
+/// Shows a parameter only while another parameter has a given value (or, `unless`, any other).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ShowIf {
     pub key: String,
     pub equals: Value,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unless: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -445,12 +447,19 @@ impl ParamDef {
     }
 
     pub fn show_if(mut self, key: &str, equals: impl Into<Value>) -> Self {
-        self.show_if = Some(ShowIf { key: key.into(), equals: equals.into() });
+        self.show_if = Some(ShowIf { key: key.into(), equals: equals.into(), unless: false });
+        self
+    }
+
+    /// Shows the setting except while `key` has the value `equals`.
+    pub fn show_unless(mut self, key: &str, equals: impl Into<Value>) -> Self {
+        self.show_if = Some(ShowIf { key: key.into(), equals: equals.into(), unless: true });
         self
     }
 
     pub fn is_visible(&self, params: &Map<String, Value>) -> bool {
-        !self.hidden && self.show_if.as_ref().is_none_or(|rule| params.get(&rule.key) == Some(&rule.equals))
+        !self.hidden
+            && self.show_if.as_ref().is_none_or(|rule| (params.get(&rule.key) == Some(&rule.equals)) != rule.unless)
     }
 }
 

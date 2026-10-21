@@ -1,0 +1,32 @@
+{
+  "name": "edit_file",
+  "description": "Changes a text file: replaces one exact piece of it with another. Asks the user first.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string",
+        "description": "the file's path"
+      },
+      "find": {
+        "type": "string",
+        "description": "the exact text to replace (it must be there once)"
+      },
+      "replace": {
+        "type": "string",
+        "description": "what goes in its place"
+      }
+    },
+    "required": [
+      "path",
+      "find",
+      "replace"
+    ]
+  },
+  "run": {
+    "kind": "python",
+    "entry": "run.py",
+    "timeout_ms": 60000
+  },
+  "confirm": true
+}

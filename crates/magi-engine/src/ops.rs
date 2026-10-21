@@ -1304,7 +1304,6 @@ impl RunCx {
                 _ => None,
             },
             effort: params.effort.trim().to_owned(),
-            ..Default::default()
         };
         let steps = if params.native_tools { params.max_steps as usize } else { 0 };
         let done = loaded.ask(&request, &options, steps).map_err(|e| EngineError::new(e.0))?;
@@ -1334,8 +1333,7 @@ impl RunCx {
 
     /// Loads a text model now (an **AI Load Model** block).
     pub fn ai_load(&mut self, model: &str) -> OpResult<()> {
-        let loaded = self.program.text_model(model)?;
-        loaded.warm_up().map_err(|e| EngineError::new(e.0))?;
+        self.program.text_model(model)?;
         Ok(())
     }
 

@@ -1,6 +1,6 @@
 //! The settings window: movable and resizable, one page per topic.
 
-use egui::{Color32, DragValue, RichText, Ui, vec2};
+use egui::{Color32, RichText, Ui, vec2};
 use egui_phosphor::regular as icon;
 use magi_core::graph::NodeId;
 use magi_core::hotkey::Hotkey;
@@ -54,7 +54,7 @@ pub struct SettingsEnv<'a> {
     pub python_downloaded: Option<std::path::PathBuf>,
     pub gpus: &'a [magi_platform::gpu::Gpu],
     pub machine: &'a magi_platform::system::Machine,
-    /// Where the optional parts stand, and what PyTorch and llama.cpp see (`None` until worked out).
+    /// Where the optional parts stand, and what PyTorch sees (`None` until worked out).
     pub runtime: Option<&'a crate::components::RuntimeReport>,
     pub checking_runtime: bool,
     /// The Python AI uses: the one macros use.
@@ -986,11 +986,10 @@ fn runtime(ui: &mut Ui, settings: &mut Settings, env: &SettingsEnv<'_>, events: 
     widgets::note(
         ui,
         "What trains and runs AI models. Install what you need; uninstall it any time. Everything comes from its \
-         publisher: PyTorch's and Python's package indexes, Microsoft, and llama.cpp's releases.",
+         publisher: PyTorch's and Python's package indexes, and Microsoft.",
     );
     ai_python_card(ui, settings, env, events);
     let nvidia = env.gpus.iter().find(|g| g.name.to_lowercase().contains("nvidia")).map(|g| g.name.clone());
-    let rtx50 = nvidia.as_ref().is_some_and(|n| n.contains("RTX 50"));
 
     section(ui, "Training models");
     for component in Component::TRAINING {
@@ -1013,21 +1012,39 @@ fn runtime(ui: &mut Ui, settings: &mut Settings, env: &SettingsEnv<'_>, events: 
         );
     }
 
-    section(ui, "Running GGUF models (llama.cpp)");
+    section(ui, "Magi's tools");
     widgets::note(
         ui,
-        "GGUF is the format of LM Studio and Ollama models, and of text models trained here from Transformer Layers. \
-         One build is enough; Settings › Hardware chooses which one runs and on which cards.",
+        "What Magi models' native tools use: MagiDB on this computer, documents, pictures. Tools that change files or          run programs always ask you first.",
     );
-    for component in Component::LLAMA {
-        let recommended = match component {
-            Component::LlamaCuda13 => rtx50,
-            Component::LlamaCuda12 => nvidia.is_some() && !rtx50,
-            Component::LlamaVulkan => nvidia.is_none() && !env.gpus.is_empty(),
-            _ => env.gpus.is_empty(),
-        };
-        runtime_row(ui, component, env, recommended, events);
+    for component in Component::TOOLS {
+        runtime_row(ui, component, env, component == Component::DocumentTools, events);
     }
+    ui.horizontal(|ui| {
+        widgets::fixed_label(ui, RichText::new("MagiDB online").color(theme::text_dim()), 140.0)
+            .on_hover_text("Where MagiDB's pages are read from when they are not on this computer (raw files)");
+        ui.add(
+            egui::TextEdit::singleline(&mut settings.magidb_url)
+                .hint_text("github.com/MacroMagi/MagiDB")
+                .desired_width(240.0),
+        );
+    });
+    ui.horizontal(|ui| {
+        widgets::fixed_label(ui, RichText::new("MagiDB folder").color(theme::text_dim()), 140.0)
+            .on_hover_text("A folder of MagiDB pages to read instead of the downloaded copy – one you are writing");
+        let shown =
+            settings.magidb_dir.as_ref().map_or_else(|| "The downloaded copy".to_owned(), |d| d.display().to_string());
+        ui.label(RichText::new(shown).color(theme::text_dim()));
+        if ui.small_button(icon::FOLDER_OPEN).on_hover_text("Choose a folder").clicked()
+            && let Some(folder) = rfd::FileDialog::new().set_title("A folder of MagiDB pages").pick_folder()
+        {
+            settings.magidb_dir = Some(folder);
+        }
+        if settings.magidb_dir.is_some() && ui.small_button(icon::X).on_hover_text("Use the downloaded copy").clicked()
+        {
+            settings.magidb_dir = None;
+        }
+    });
 
     section(ui, "Running ONNX models");
     widgets::note(
@@ -1148,65 +1165,6 @@ fn hardware(ui: &mut Ui, settings: &mut Settings, env: &SettingsEnv<'_>, events:
                 widgets::note(ui, "Several cards share each batch (data parallel): bigger batches train faster.");
             }
         }
-    }
-
-    section(ui, "GGUF models (llama.cpp)");
-    let installed: Vec<Component> = Component::LLAMA
-        .into_iter()
-        .filter(|c| env.runtime.is_some_and(|r| r.statuses.iter().any(|(x, s)| x == c && s.present())))
-        .collect();
-    if installed.is_empty() {
-        widgets::notice(
-            ui,
-            icon::INFO,
-            "Install llama.cpp under Settings › Runtime to run GGUF models.",
-            theme::text_faint(),
-        );
-    } else {
-        ui.horizontal(|ui| {
-            widgets::fixed_label(ui, RichText::new("Run with").color(theme::text_dim()), 140.0);
-            let shown = settings.llama_build.map_or("The most capable installed", |c| c.name());
-            widgets::combo("llama-build").selected_text(shown).show_ui(ui, |ui| {
-                let needle = widgets::combo_search(ui);
-                if widgets::option(ui, &needle, settings.llama_build.is_none(), "The most capable installed") {
-                    settings.llama_build = None;
-                }
-                for component in &installed {
-                    if widgets::option(ui, &needle, settings.llama_build == Some(*component), component.name()) {
-                        settings.llama_build = Some(*component);
-                    }
-                }
-            });
-        });
-        ui.horizontal(|ui| {
-            widgets::fixed_label(ui, RichText::new("On graphics cards").color(theme::text_dim()), 140.0);
-            let mut all = settings.llama_gpu_layers >= 999;
-            if ui.checkbox(&mut all, "The whole model").changed() {
-                settings.llama_gpu_layers = if all { 999 } else { 20 };
-            }
-            if !all {
-                ui.add(DragValue::new(&mut settings.llama_gpu_layers).range(0..=998).suffix(" layers"))
-                    .on_hover_text("0 keeps the model in system memory, on the processor");
-            }
-        });
-        let devices = env.runtime.map(|r| r.llama_devices.clone()).unwrap_or_default();
-        if !devices.is_empty() {
-            widgets::caption(ui, "Graphics cards to use (none ticked: llama.cpp chooses)");
-            for (id, description) in &devices {
-                let mut on = settings.llama_devices.contains(id);
-                if ui.checkbox(&mut on, format!("{id}: {description}")).changed() {
-                    if on {
-                        settings.llama_devices.push(id.clone());
-                    } else {
-                        settings.llama_devices.retain(|d| d != id);
-                    }
-                }
-            }
-            if settings.llama_devices.len() > 1 {
-                widgets::note(ui, "The model is split between the ticked cards by their memory.");
-            }
-        }
-        widgets::note(ui, "Changes apply the next time a GGUF model is asked something.");
     }
 
     section(ui, "ONNX models");

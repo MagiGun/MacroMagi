@@ -11,17 +11,17 @@ use super::{MagicDoc, file_stem};
 
 const RUN_PY: &str = r#""""{name} – trains the model of a MacroMagi Magic workspace, as MacroMagi does.
 
-    python run.py              train it, then write the Magi package (szi/)
-    python run.py --package    only write the package (after training)
+    python run.py              train it, then write the Magi model ({stem}.szi)
+    python run.py --package    only write the model file (after training)
 
-Needs Python 3.10+ with PyTorch and onnx (pip install -r requirements.txt; for an
-NVIDIA graphics card, PyTorch's CUDA build from pytorch.org). It prints its
-progress as one JSON object per line, as MacroMagi reads it.
+Needs Python 3.10+ with PyTorch (pip install -r requirements.txt; for an NVIDIA
+graphics card, PyTorch's CUDA build from pytorch.org). It prints its progress as
+one JSON object per line, as MacroMagi reads it.
 """
 import json
 import os
-import shutil
 import sys
+import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 os.chdir(HERE)
@@ -38,27 +38,39 @@ def family(parameters):
 
 
 def package():
-    """The Magi package: the .szi description, the weights, the ONNX model and the native tools."""
+    """The Magi model as one .szi file – a zip archive, as MacroMagi writes it: model.json (the
+    description), the weights (stored as they are), the ONNX model if one was made, and the
+    native tools."""
     model = json.load(open("model.json", encoding="utf-8"))
     report = json.load(open(os.path.join("out", "report.json"), encoding="utf-8"))
-    model["trained"] = {k: report.get(k) for k in ("stages", "steps", "loss", "parameters")}
-    target = os.path.join(HERE, "szi")
-    os.makedirs(target, exist_ok=True)
+    model["trained"] = {k: report.get(k) for k in ("stages", "steps", "loss", "parameters", "compacts")}
+    # Tokens the trainer learned where it ran, from a corpus.
+    learned = os.path.join("out", "tokenizer.json")
+    if os.path.isfile(learned) and model.get("text"):
+        model["text"]["tokenizer"] = json.load(open(learned, encoding="utf-8"))
     files = {}
     for name in ("weights.safetensors", "model.onnx"):
-        source = os.path.join("out", name)
-        if os.path.isfile(source):
-            shutil.copy(source, os.path.join(target, name))
+        if os.path.isfile(os.path.join("out", name)):
             files["weights" if name.endswith("safetensors") else "onnx"] = name
     if os.path.isdir("nt"):
-        shutil.copytree("nt", os.path.join(target, "nt"), dirs_exist_ok=True)
         files["native_tools"] = "nt"
-    manifest = {"format": "magi.szi", "version": 1, "app": "MacroMagi {version} (Python export)",
+    manifest = {"format": "magi.szi", "version": 2, "app": "MacroMagi {version} (Python export)",
                 "family": family(report.get("parameters") or 0), "files": files}
     manifest.update(model)
-    path = os.path.join(target, "{stem}.szi")
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(manifest, handle, indent=2, ensure_ascii=False)
+    path = os.path.join(HERE, "{stem}.szi")
+    with zipfile.ZipFile(path + ".part", "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("model.json", json.dumps(manifest, indent=2, ensure_ascii=False))
+        for name in ("weights.safetensors", "model.onnx"):
+            if name in files.values():
+                archive.write(os.path.join("out", name), name, compress_type=zipfile.ZIP_STORED)
+        for root, _, names in os.walk("nt"):
+            for name in names:
+                source = os.path.join(root, name)
+                archive.write(source, os.path.relpath(source, HERE).replace(os.sep, "/"))
+        archive.writestr("README.md", '# ' + model.get("name", "{stem}") + "\n\nA Magi model in the .szi format "
+                         "(a zip archive), trained by a workspace MacroMagi exported as Python. Open it in MacroMagi "
+                         "(File › Open, or the AI Agent window).\n")
+    os.replace(path + ".part", path)
     print(json.dumps({{"event": "log", "message": "Wrote " + path}}))
 
 
@@ -70,8 +82,9 @@ if __name__ == "__main__":
     package()
 "#;
 
-/// Writes the workspace as Python into a new folder in `into`; returns the folder.
-pub fn export(doc: &MagicDoc, runtime: &Path, into: &Path) -> Result<PathBuf, String> {
+/// Writes the workspace as Python into a new folder in `into`; returns the folder. `compile` asks the
+/// trainer to try compiled layers (experimental: Linux only, kept only when faster with the same loss).
+pub fn export(doc: &MagicDoc, runtime: &Path, into: &Path, compile: bool) -> Result<PathBuf, String> {
     let pipeline = studio::pipeline(&doc.studio.graph)?;
     if !pipeline.trains() {
         return Err("The canvas does not train a model: add training stages first.".into());
@@ -128,7 +141,16 @@ pub fn export(doc: &MagicDoc, runtime: &Path, into: &Path) -> Result<PathBuf, St
     let mut plan = studio::plan(&pipeline, &doc.studio.graph, &doc.file.model, &files)?;
     // Whatever graphics cards the computer it runs on has.
     plan["devices"] = serde_json::json!("auto");
+    if compile {
+        plan["compile"] = serde_json::json!(true);
+    }
     write(&dir.join("plan.json"), &serde_json::to_vec_pretty(&plan).unwrap_or_default())?;
+    // onnx only for a model that is written as ONNX: a vision model, or one the native engine cannot run.
+    let needs_onnx = kind == ModelKind::Vision || plan["onnx"].as_bool().unwrap_or(true);
+    // A corpus read where it trains needs Hugging Face's tools to fetch it and cut it into tokens.
+    let reads_corpus = plan["datasets"]
+        .as_object()
+        .is_some_and(|d| d.values().filter_map(|v| v.as_array()).flatten().any(|f| f.get("corpus").is_some()));
 
     // The model's description, as the package will carry it.
     let mut model = doc.file.model.clone();
@@ -156,7 +178,15 @@ pub fn export(doc: &MagicDoc, runtime: &Path, into: &Path) -> Result<PathBuf, St
         .replace("{{", "{")
         .replace("}}", "}");
     write(&dir.join("run.py"), run.as_bytes())?;
-    write(&dir.join("requirements.txt"), b"torch\nonnx\n")?;
+    let mut requirements = "torch\n".to_owned();
+    if needs_onnx {
+        requirements.push_str("onnx\n");
+    }
+    if reads_corpus {
+        requirements.push_str("huggingface_hub\npyarrow\ntokenizers\nnumpy\n");
+    }
+    write(&dir.join("requirements.txt"), requirements.as_bytes())?;
+    write(&dir.join("colab.ipynb"), colab_notebook(&format!("{stem} (Python)"), &stem, &requirements).as_bytes())?;
     let stages: Vec<String> =
         pipeline.stages.iter().map(|s| s.kind.trim_start_matches("magic.").replace('_', " ")).collect();
     let readme = format!(
@@ -168,15 +198,21 @@ pub fn export(doc: &MagicDoc, runtime: &Path, into: &Path) -> Result<PathBuf, St
          as one JSON object per line.\n\n\
          ## What is here\n\n\
          | | |\n| --- | --- |\n\
-         | `run.py` | Runs the training, then writes `szi/` – the model in Magi's `.szi` format, with its weights, \
-         its ONNX model and its native tools. Open `szi/{stem}.szi` in MacroMagi to use it, or to export GGUF. |\n\
+         | `run.py` | Runs the training, then writes `{stem}.szi` – the model in Magi's format, one file with its \
+         weights and its native tools. Open it in MacroMagi to use it. |\n\
          | `plan.json` | The canvas as the trainer reads it: the architecture ({layers} layers, {width} wide, {context} \
          tokens of context), the stages ({stages}), their datasets and optimizers. |\n\
          | `model.json` | The model's description: how it reads and writes, its tools, thinking and effort. |\n\
          | `data/` | The datasets{pictures}. |\n\
          | `nt/` | The model's native tools, when it has some. |\n\
          | `runtime/magi_train/` | MacroMagi's trainer, unchanged. |\n\n\
-         Change `plan.json` to change the training: the steps, the batch, the optimizer, the layers.\n",
+         Change `plan.json` to change the training: the steps, the batch, the optimizer, the layers.\n\n\
+         ## Training in the cloud\n\n\
+         Any computer with Python and an NVIDIA graphics card can run it – a rented GPU server too: copy this \
+         folder there, run the two lines above, and copy `{stem}.szi` back.\n\n\
+         On **Google Colab**: zip this folder, open `colab.ipynb` in Colab (File › Upload notebook), choose a GPU \
+         (Runtime › Change runtime type), and run its cells. It asks for the zip, trains, and downloads \
+         `{stem}.szi`; open it in MacroMagi.\n",
         name = doc.title(),
         layers = pipeline.architecture.layers.len(),
         width = pipeline.architecture.width,
@@ -186,6 +222,73 @@ pub fn export(doc: &MagicDoc, runtime: &Path, into: &Path) -> Result<PathBuf, St
     );
     write(&dir.join("README.md"), readme.as_bytes())?;
     Ok(dir)
+}
+
+/// A Colab notebook: upload the zipped folder, install, train, download the Magi model.
+fn colab_notebook(folder: &str, stem: &str, requirements: &str) -> String {
+    let cell = |kind: &str, lines: &[&str]| {
+        let source: Vec<String> = lines
+            .iter()
+            .enumerate()
+            .map(|(n, l)| if n + 1 < lines.len() { format!("{l}\n") } else { (*l).to_owned() })
+            .collect();
+        let mut cell = serde_json::json!({ "cell_type": kind, "metadata": {}, "source": source });
+        if kind == "code" {
+            cell["execution_count"] = serde_json::Value::Null;
+            cell["outputs"] = serde_json::json!([]);
+        }
+        cell
+    };
+    let upload = format!(
+        "from google.colab import files\nimport zipfile, os\nuploaded = files.upload()\nzipfile.ZipFile(next(iter(uploaded))).extractall('.')\nos.chdir('{}')\nprint(os.listdir('.'))",
+        folder.replace('\'', "\\'")
+    );
+    let download = format!("files.download('{stem}.szi')", stem = stem.replace('\'', "\\'"));
+    // Colab has PyTorch already (its CUDA build): only the rest is installed.
+    let rest: Vec<&str> = requirements.split_whitespace().filter(|r| *r != "torch").collect();
+    let mut setup = vec!["!nvidia-smi -L".to_owned()];
+    if !rest.is_empty() {
+        setup.push(format!("!pip install -q {}", rest.join(" ")));
+    }
+    // The run's folder and the corpora on Google Drive, so a run outlives a session.
+    let keep = format!(
+        "from google.colab import drive\nimport os, shutil\ndrive.mount('/content/drive')\n\
+         keep = '/content/drive/MyDrive/MacroMagi/{stem}'\nos.makedirs(keep + '/out', exist_ok=True)\n\
+         if os.path.isdir('out') and not os.path.islink('out'):\n    shutil.rmtree('out')\n\
+         if not os.path.exists('out'):\n    os.symlink(keep + '/out', 'out')\n\
+         os.environ['MAGI_CORPUS_DIR'] = keep + '/corpus'\nprint('Saving into', keep)",
+        stem = stem.replace('\'', "\\'")
+    );
+    let notebook = serde_json::json!({
+        "nbformat": 4,
+        "nbformat_minor": 5,
+        "metadata": {
+            "accelerator": "GPU",
+            "colab": { "provenance": [] },
+            "kernelspec": { "name": "python3", "display_name": "Python 3" },
+            "language_info": { "name": "python" }
+        },
+        "cells": [
+            cell("markdown", &[
+                &format!("# Training {stem} on Colab"),
+                "",
+                "1. Runtime › Change runtime type › a **GPU**.",
+                &format!("2. Zip the folder *{folder}* on your computer."),
+                "3. Run the cells in order: the first asks for the zip.",
+            ]),
+            cell("code", &upload.lines().collect::<Vec<_>>()),
+            cell("code", &setup.iter().map(String::as_str).collect::<Vec<_>>()),
+            cell("markdown", &[
+                "**Long runs:** run the next cell to keep the run on Google Drive. It saves every 20 minutes, so when a \
+                 session ends you run the cells again and it goes on from there; a corpus is cut into tokens once and \
+                 kept there too.",
+            ]),
+            cell("code", &keep.lines().collect::<Vec<_>>()),
+            cell("code", &["!python run.py"]),
+            cell("code", &download.lines().collect::<Vec<_>>()),
+        ]
+    });
+    serde_json::to_string_pretty(&notebook).unwrap_or_default()
 }
 
 fn copy_dir(from: &Path, to: &Path) -> Result<(), String> {

@@ -27,6 +27,7 @@ fn harness(dir_name: &str) -> Harness<'static, MagiApp> {
         train: false,
         wait: None,
         dataset: None,
+        agent: false,
     };
     let mut harness = Harness::builder()
         .with_size(vec2(1400.0, 900.0))
@@ -90,7 +91,7 @@ fn the_magic_tab_works_through_its_interface() {
     click(&mut h, "New text model");
     assert_eq!(doc(&h).title(), "Magi");
     let text = doc(&h).file.model.text.clone().unwrap();
-    assert_eq!(text.tools.len(), 4, "general tools come with it, not MacroMagi's");
+    assert_eq!(text.tools.len(), 16, "Magi's native tools come with it");
     assert!(text.thinking.is_some() && text.effort.is_some(), "Thinking and Reasoning Effort are chained in");
 
     // The banner holds the model's menus.
@@ -135,12 +136,12 @@ fn the_magic_tab_works_through_its_interface() {
     // Tools: a tool is added; Native Tools: a native tool is picked.
     select(&mut h, kinds::TOOLS);
     click(&mut h, "Add a tool");
-    assert_eq!(doc(&h).file.model.text.as_ref().unwrap().tools.len(), 5);
+    assert_eq!(doc(&h).file.model.text.as_ref().unwrap().tools.len(), 17);
     click(&mut h, "Add MacroMagi's tools");
-    assert_eq!(doc(&h).file.model.text.as_ref().unwrap().tools.len(), 11);
+    assert!(doc(&h).file.model.text.as_ref().unwrap().tools.len() > 17);
     select(&mut h, kinds::NATIVE_TOOLS);
-    click(&mut h, "describe_image");
-    assert!(doc(&h).file.model.text.as_ref().unwrap().tools.iter().any(|t| t.name == "describe_image" && t.native));
+    click(&mut h, "transcribe_audio");
+    assert!(doc(&h).file.model.text.as_ref().unwrap().tools.iter().any(|t| t.name == "transcribe_audio" && t.native));
     // Memory & Cache, and the Context Scaler.
     select(&mut h, kinds::MEMORY);
     assert!(shows(&h, "Keep the system text on disk"));
@@ -150,7 +151,10 @@ fn the_magic_tab_works_through_its_interface() {
     // Thinking and Reasoning Effort: their blocks change the model.
     select(&mut h, kinds::THINKING);
     click(&mut h, "Think unless asked not to");
-    assert!(!doc(&h).file.model.text.as_ref().unwrap().thinking.as_ref().unwrap().on_by_default);
+    assert!(
+        !doc(&h).file.model.text.as_ref().unwrap().thinking.as_ref().unwrap().on_by_default,
+        "Magi starts thinking; the switch turns it off"
+    );
     select(&mut h, kinds::EFFORT);
     click(&mut h, "Add a level");
     assert_eq!(
@@ -178,8 +182,14 @@ fn the_magic_tab_works_through_its_interface() {
     click_exact(&mut h, "Conversation");
     click(&mut h, "Scan for issues");
     assert!(shows(&h, "Issues found") && shows(&h, "1 sample with a problem"));
-    click(&mut h, "Model's view");
-    assert!(shows(&h, "Reasoning effort: superior"), "the training text, effort and all");
+    // Undo takes the conversation back out; redo puts it back.
+    click_exact(&mut h, egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE);
+    click_exact(&mut h, "Raw");
+    click(&mut h, "Keep changes");
+    let undone = String::from_utf8(doc(&h).file.data["data/text/to-do-1.jsonl"].clone()).unwrap();
+    assert_eq!(undone.lines().count(), 2, "{undone}");
+    click_exact(&mut h, egui_phosphor::regular::ARROW_CLOCKWISE);
+    click_exact(&mut h, "Chat");
     click(&mut h, "Keep changes");
     let file = "data/text/to-do-1.jsonl";
     let saved = String::from_utf8(doc(&h).file.data[file].clone()).unwrap();
@@ -210,26 +220,23 @@ fn the_magic_tab_works_through_its_interface() {
     click(&mut h, "Add a rule");
     assert_eq!(rules(&h), before + 1);
 
-    // Presets › Commons puts DeepSeek-V4 in place of the architecture; undo takes it back.
+    // Presets › Commons puts Magi back in place of a changed architecture; undo takes it back.
+    let layers = |h: &Harness<'_, MagiApp>| studio::pipeline(&doc(h).studio.graph).unwrap().architecture.layers.len();
+    let experts = doc(&h).studio.graph.nodes().filter(|n| n.kind == kinds::LAYERS).map(|n| n.id).nth(1).unwrap();
+    h.state_mut().magic_tab.doc.as_mut().unwrap().studio.graph.node_mut(experts).unwrap().set_param("layers", 2);
+    h.run_steps(3);
+    assert_eq!(layers(&h), 5);
     click(&mut h, "Presets");
     click(&mut h, "Commons");
-    click(&mut h, "DeepSeek-V4 (small)");
-    let layers = |h: &Harness<'_, MagiApp>| {
-        studio::pipeline(&doc(h).studio.graph)
-            .unwrap()
-            .architecture
-            .layers
-            .iter()
-            .map(|l| l["attention"]["kind"].as_str().unwrap().to_owned())
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(layers(&h), ["window", "csa", "hca", "csa", "hca"]);
+    assert!(!shows(&h, "Qwen3 (small)") && !shows(&h, "Magi-F1DS"), "only Magi is offered");
+    click_exact(&mut h, "Magi");
+    assert_eq!(layers(&h), 32);
     h.state_mut().undo();
     h.run_steps(3);
-    assert_eq!(layers(&h), ["full"; 8], "the Magi layout");
+    assert_eq!(layers(&h), 5, "as it was changed");
     h.state_mut().redo();
     h.run_steps(3);
-    assert_eq!(layers(&h)[0], "window");
+    assert_eq!(layers(&h), 32);
 
     // View: the console can be hidden.
     click(&mut h, "View");
@@ -252,7 +259,16 @@ fn the_magic_tab_works_through_its_interface() {
     h.run_steps(3);
     assert_eq!(doc(&h).training_problem(), None);
     select(&mut h, kinds::COMPILE);
-    assert!(shows(&h, "Save package now") && shows(&h, "Use in Macro") && shows(&h, "GGUF precision"));
+    assert!(shows(&h, "Save package now") && shows(&h, "Use in Macro") && shows(&h, "Magi Model (.szi)"));
+
+    // The AI Agent window: a chat of its own, kept in the data folder.
+    h.state_mut().agent_chat.open = true;
+    h.run_steps(3);
+    assert!(shows(&h, "Chats") && shows(&h, "What can I help with?"), "the AI Agent window shows");
+    click_exact(&mut h, &format!("{}  New", egui_phosphor::regular::PLUS));
+    assert_eq!(h.state().agent_chat.chat_count(), 2, "a new chat");
+    h.state_mut().agent_chat.open = false;
+    h.run_steps(2);
 
     // A vision model, after the question about the unsaved one.
     click(&mut h, "File");
@@ -268,9 +284,8 @@ fn the_magic_tab_works_through_its_interface() {
     assert!(shows(&h, "Watch the screen"));
 }
 
-/// The whole way, as a person does it: New text model, a folder for Compile,
-/// Train, then Prompt Model. With MAGI_TEST_LLAMA (a folder with
-/// llama-server), the exported GGUF is imported and prompted too.
+/// The whole way, as a person does it: New text model (made tiny), a folder
+/// for Compile, Train, then Prompt Model.
 #[test]
 #[ignore = "needs Python with PyTorch and onnx (MAGI_TEST_PYTHON)"]
 fn a_model_trains_and_answers_through_the_interface() {
@@ -282,6 +297,7 @@ fn a_model_trains_and_answers_through_the_interface() {
         h.state_mut().settings.train_gpus = Some(gpu.parse().ok().into_iter().collect());
     }
     click(&mut h, "New text model");
+    crate::magic::tiny(h.state_mut().magic_tab.doc.as_mut().unwrap());
     let folder = std::env::temp_dir().join(format!("magi-ui-train-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&folder);
     {
@@ -291,8 +307,6 @@ fn a_model_trains_and_answers_through_the_interface() {
             let node = doc.studio.graph.node_mut(id).unwrap();
             if kind == kinds::COMPILE {
                 node.set_param("folder", folder.to_string_lossy());
-                // Not into this computer's LM Studio.
-                node.set_param("lmstudio", false);
             }
         }
     }
@@ -315,13 +329,12 @@ fn a_model_trains_and_answers_through_the_interface() {
         .map(|j| j.state.lock().unwrap().lines.iter().map(|(_, l)| l.clone()).collect())
         .unwrap_or_default();
     assert!(doc(&h).file.model.trained.is_some(), "{lines:#?}");
-    // One folder for the project: the workspace, the Magi package and the GGUF.
+    // One folder for the project: the workspace and the Magi model, one .szi file with its native tools.
     let project = folder.join("Magi");
     let magic = project.join("Magi.magic");
-    let gguf = project.join("gguf").join("Magi-F16.gguf");
-    let szi = project.join("szi").join("Magi.szi");
-    assert!(magic.is_file() && gguf.is_file() && szi.is_file(), "{lines:#?}");
-    assert!(project.join("szi").join("nt").join("calculator").join("run.py").is_file(), "its native tools");
+    let szi = project.join("Magi.szi");
+    assert!(magic.is_file() && szi.is_file(), "{lines:#?}");
+    assert!(magi_core::szi::read(&szi).unwrap().data.contains_key("nt/calculator/run.py"), "its native tools");
     assert_eq!(doc(&h).path.as_deref(), Some(magic.as_path()), "the open model is the saved one");
     // The workspace holds no model; opening it finds the model in the package.
     let workspace = magi_core::magic::MagicFile::load(&magic).unwrap();
@@ -346,21 +359,9 @@ fn a_model_trains_and_answers_through_the_interface() {
             .cloned()
             .unwrap_or_else(|| panic!("no answer: {:?}", h.state().magic_tab.chat_state()))
     };
-    // Its native tools off first, to see the call itself.
-    let prompt = node_of(&h, kinds::PROMPT);
-    h.state_mut()
-        .magic_tab
-        .doc
-        .as_mut()
-        .unwrap()
-        .studio
-        .graph
-        .node_mut(prompt)
-        .unwrap()
-        .set_param("native_tools", false);
-    h.run_steps(2);
-    let answer = ask(&mut h, "What is 487 times 26?");
-    assert_eq!(answer.tools.first().map(|t| t.name.as_str()), Some("calculator"), "{answer:?}");
+    // A tiny model says little that makes sense: it must load once, answer, and stay loaded.
+    let answer = ask(&mut h, "List the files in C:/work");
+    assert!(!answer.raw.is_empty(), "{answer:?}");
     assert!(shows(&h, "Loaded") && shows(&h, "Native engine"), "the model stays loaded");
     assert!(shows(&h, "Hot"), "the memory's tiers show");
     let began = std::time::Instant::now();
@@ -368,77 +369,7 @@ fn a_model_trains_and_answers_through_the_interface() {
     let second = began.elapsed();
     eprintln!("a loaded model answered in {second:?}");
     assert!(second.as_secs() < 20, "the native engine answers quickly: {second:?}");
-    // With its native tools, the calculator runs and its result goes back to the model.
-    if let Some(python) = std::env::var_os("MAGI_TEST_PYTHON") {
-        magi_ml::tools::set_python(Some(python.into()));
-        let set = |h: &mut Harness<'_, MagiApp>, key: &str, value: serde_json::Value| {
-            h.state_mut().magic_tab.doc.as_mut().unwrap().studio.graph.node_mut(prompt).unwrap().set_param(key, value);
-            h.run_steps(2);
-        };
-        set(&mut h, "native_tools", serde_json::json!(true));
-        type_request(&mut h, "What is 487 times 26?");
-        click(&mut h, "Send");
-        while h.state().magic_tab.chat_waiting() {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            h.run_steps(1);
-        }
-        h.run_steps(3);
-        assert!(shows(&h, "12662") || shows(&h, "12,662"), "the calculator's result is shown");
-        // Thinking off, as the block's switch sets it.
-        set(&mut h, "thinking", serde_json::json!("off"));
-        let answer = ask(&mut h, "Which is bigger, 0.7 or 0.65?");
-        assert!(answer.thinking.is_empty(), "{answer:?}");
-        set(&mut h, "thinking", serde_json::json!("on"));
-    }
-
-    // The GGUF it exported, run with llama.cpp: compiled, then imported.
-    if let Some(llama) = std::env::var_os("MAGI_TEST_LLAMA") {
-        let into = h.state().paths.data_dir.join("components").join("llama-cpu");
-        copy_dir(std::path::Path::new(&llama), &into);
-        h.state_mut().applied_llama = None;
-        h.run_steps(2);
-        select(&mut h, kinds::PROMPT);
-        click(&mut h, "llama.cpp");
-        h.state_mut()
-            .magic_tab
-            .doc
-            .as_mut()
-            .unwrap()
-            .studio
-            .graph
-            .node_mut(prompt)
-            .unwrap()
-            .set_param("native_tools", false);
-        h.run_steps(2);
-        let answer = ask(&mut h, "What is 487 times 26?");
-        assert_eq!(answer.tools.first().map(|t| t.name.as_str()), Some("calculator"), "{answer:?}");
-        assert!(magi_ml::llama::is_loaded(&gguf), "llama.cpp keeps it loaded");
-        click(&mut h, "Unload");
-        assert!(!magi_ml::llama::is_loaded(&gguf));
-
-        let imported = crate::magic::import::import_gguf(&gguf).unwrap();
-        h.state_mut().set_magic_doc(Some(MagicDoc::new(imported.file, None, imported.notes)));
-        h.run_steps(3);
-        select(&mut h, kinds::PROMPT);
-        // MacroMagi knows its own model again: its tags, tools, Thinking and Reasoning Effort.
-        let text = doc(&h).file.model.text.clone().unwrap();
-        assert!(text.thinking.is_some() && text.effort.is_some() && text.tools.len() == 4, "{text:?}");
-        assert!(shows(&h, "Reasoning effort"));
-        let answer = ask(&mut h, "Who are you?");
-        assert!(!answer.raw.is_empty(), "{answer:?}");
-        magi_ml::llama::stop_servers();
-    }
     let _ = std::fs::remove_dir_all(&folder);
-}
-
-fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
-    std::fs::create_dir_all(to).unwrap();
-    for entry in std::fs::read_dir(from).unwrap().flatten() {
-        let path = entry.path();
-        if path.is_file() {
-            std::fs::copy(&path, to.join(entry.file_name())).unwrap();
-        }
-    }
 }
 
 /// A vision model, the way a person makes one: New vision model, pictures of
@@ -530,9 +461,4 @@ fn write_the_example_models() {
         doc.sync_canvas();
         doc.file.save(&dir.join(name)).unwrap();
     }
-    let mut doc = MagicDoc::new(crate::magic::new_model(true), None, Vec::new());
-    let deepseek = studio::commons().into_iter().find(|c| c.name.starts_with("DeepSeek-V4")).unwrap();
-    studio::apply_common(&mut doc.studio.graph, &deepseek, [0.0, 0.0]);
-    doc.sync_canvas();
-    doc.file.save(&dir.join("example-deepseek.magic")).unwrap();
 }

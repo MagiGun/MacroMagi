@@ -53,14 +53,13 @@ const MAGIC_FILTER: (&str, &[&str]) = ("MacroMagi workspace", &["magic"]);
 /// What File › Open takes on the Magic tab: workspaces and Magi models.
 const MAGIC_OPEN_FILTER: (&str, &[&str]) = ("MacroMagi workspace or Magi model", &["magic", "szi"]);
 /// Models a macro block can run.
-const MODEL_FILTER: (&str, &[&str]) = ("AI model", &["magic", "szi", "gguf", "onnx"]);
+const MODEL_FILTER: (&str, &[&str]) = ("AI model", &["magic", "szi", "onnx"]);
 
 /// A model file as a macro runs it: a `.magic` workspace or `.szi` Magi
-/// model, a `.gguf` file (run with llama.cpp, where it is) or an ONNX model.
+/// model, or an ONNX model.
 fn model_from_file(path: &std::path::Path) -> Result<magi_core::magic::MagicFile, String> {
     let extension = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
     match extension.as_str() {
-        "gguf" => crate::magic::import::import_gguf(path).map(|imported| imported.file),
         "onnx" => crate::magic::import::import(path).map(|imported| imported.file),
         _ => magi_core::szi::open(path).map_err(|e| e.to_string()),
     }
@@ -90,6 +89,9 @@ enum MagicPending {
     OpenModel(String),
     Quit,
 }
+
+/// What native tools run with: the Python for AI, MagiDB's folder and address, the vision model.
+type ToolSettings = (Option<PathBuf>, Option<PathBuf>, String, Option<PathBuf>);
 
 /// Something that was about to start when it turned out to have no hotkey.
 #[derive(Clone)]
@@ -167,11 +169,15 @@ pub struct StartupOptions {
     /// Open this dataset file of the Magic tab's model (a new example model when none
     /// is open) in the dataset editor, with a view after a colon (for screenshots).
     pub dataset: Option<String>,
+    /// Open the AI Agent window, drawn inside the main window (for screenshots).
+    pub agent: bool,
     /// Take the screenshot after this many seconds.
     pub wait: Option<f64>,
 }
 
 pub struct MagiApp {
+    /// The AI Agent window: chats with models (a preview of CodeMagi's).
+    pub(crate) agent_chat: crate::ui::agent_chat::AgentChat,
     paths: Paths,
     registry: Arc<Registry>,
     controller: Controller,
@@ -192,9 +198,6 @@ pub struct MagiApp {
     runtime: Option<RuntimeReport>,
     /// This computer, for Settings › Hardware.
     machine: magi_platform::system::Machine,
-    /// The llama.cpp settings last given to `magi_ml`.
-    applied_llama: Option<Option<magi_ml::LlamaConfig>>,
-    llama_key: Option<(Option<Component>, u32, Vec<String>)>,
     installing: Option<(Component, Progress)>,
     /// Python interpreters found on the system (`None`: not looked for yet).
     gpus: Vec<magi_platform::gpu::Gpu>,
@@ -228,6 +231,8 @@ pub struct MagiApp {
     toasts: Vec<Toast>,
     jobs: Vec<Receiver<Job>>,
     downloading: bool,
+    /// A training run was going on at the last frame, and whether it was stopped from here.
+    training_seen: Option<bool>,
     backgrounds: Vec<String>,
 
     logs: Vec<LogEntry>,
@@ -236,6 +241,8 @@ pub struct MagiApp {
     activity: HashMap<NodeId, magi_engine::Activity>,
 
     background: BackgroundLayer,
+    /// The native tools' settings as last given to `magi_ml`: the Python, MagiDB and the vision model.
+    applied_tools: Option<ToolSettings>,
     /// The About window, opened from the banner logo.
     about_open: bool,
     /// The banner logo, in the color it was made for.
@@ -271,6 +278,7 @@ impl MagiApp {
 
         let components = Components::new(&paths.data_dir, &paths.app_dir);
         let mut app = Self {
+            agent_chat: Default::default(),
             presets: PresetLibrary::load(paths.presets_dir()),
             backgrounds: background::list(&paths.backgrounds_dir()),
             paths,
@@ -288,8 +296,6 @@ impl MagiApp {
             components,
             runtime: None,
             machine: magi_platform::system::machine(),
-            applied_llama: None,
-            llama_key: None,
             installing: None,
             gpus: magi_platform::gpu::gpus(),
             applied_device: None,
@@ -315,11 +321,13 @@ impl MagiApp {
             toasts: Vec::new(),
             jobs: Vec::new(),
             downloading: false,
+            training_seen: None,
             logs: Vec::new(),
             next_log: 0,
             error_node: None,
             activity: HashMap::new(),
             background: BackgroundLayer::default(),
+            applied_tools: None,
             about_open: false,
             logo: None,
             applied_palette: None,
@@ -343,6 +351,10 @@ impl MagiApp {
         }
         // File blocks' relative paths lead into the data folder.
         magi_engine::set_files_dir(app.paths.data_dir.join("files"));
+        // Magi's tools: those MacroMagi carries out itself, and calls the user allows first.
+        crate::magic::host_tools::register();
+        let ctx = cc.egui_ctx.clone();
+        magi_ml::tools::show_approvals(Box::new(move || ctx.request_repaint()));
 
         let magic = options
             .open
@@ -370,6 +382,11 @@ impl MagiApp {
             && let Some(node) = doc.studio.graph.nodes().find(|n| n.kind == *kind).map(|n| n.id)
         {
             app.magic_tab.view.selection = [node].into();
+        }
+        if options.agent {
+            app.agent_chat.open = true;
+            app.agent_chat.show_settings = true;
+            cc.egui_ctx.set_embed_viewports(true);
         }
         if let Some(dataset) = &options.dataset {
             if app.magic_tab.doc.is_none() {
@@ -695,7 +712,8 @@ impl MagiApp {
                 let doc = MagicDoc::new(crate::magic::new_model(text), None, Vec::new());
                 self.set_magic_doc(Some(doc));
                 self.toast(if text {
-                    "A new text model: an example agent with its datasets. Choose where Compile saves it, then Train."
+                    "A new Magi model: an agent of about 400M parameters with its datasets. It trains on a GPU \
+                     server: File › Export as Python."
                 } else {
                     "A new vision model: give it answers and pictures, choose where Compile saves it, then Train."
                 });
@@ -711,17 +729,6 @@ impl MagiApp {
                         self.set_magic_doc(Some(MagicDoc::new(file, Some(path), Vec::new())));
                     }
                     Err(error) => self.toast_error(format!("Could not open the model: {error}")),
-                }
-            }
-            MagicPending::Import(ImportFrom::Gguf) => {
-                let Some(path) = rfd::FileDialog::new().add_filter("GGUF model", &["gguf"]).pick_file() else { return };
-                match crate::magic::import::import_gguf(&path) {
-                    Ok(imported) => {
-                        let name = imported.file.model.name.clone();
-                        self.set_magic_doc(Some(MagicDoc::new(imported.file, None, imported.notes)));
-                        self.toast(format!("Imported “{name}”. Select Prompt Model to try it."));
-                    }
-                    Err(error) => self.toast_error(format!("Could not import: {error}")),
                 }
             }
             MagicPending::Import(from) => {
@@ -1198,7 +1205,6 @@ impl MagiApp {
                 }
                 Job::Component(component, result) => {
                     self.installing = None;
-                    self.applied_llama = None;
                     match result {
                         Ok(message) => self.toast(message),
                         Err(error) => self.toast_error(error),
@@ -1211,7 +1217,6 @@ impl MagiApp {
                 Job::Runtime(report) => {
                     self.checking_components = false;
                     self.runtime = Some(*report);
-                    self.applied_llama = None;
                 }
                 Job::Pythons(found, auto) => {
                     self.looking_for_python = false;
@@ -1273,7 +1278,37 @@ impl MagiApp {
             }
         }
 
+        // A training run that ended by itself: it may have taken hours, so it says so.
+        if let Some(job) = &self.magic_tab.job {
+            let outcome = job.state.lock().unwrap_or_else(|p| p.into_inner()).outcome.clone();
+            match outcome {
+                None => {
+                    self.training_seen.get_or_insert(false);
+                }
+                Some(result) => {
+                    let long = job.started.elapsed() > Duration::from_secs(60);
+                    if self.training_seen.take() == Some(false) && long && self.settings.notify_after_training {
+                        let message = match result {
+                            Ok(()) => format!(
+                                "“{}” has finished training.",
+                                self.magic_tab.doc.as_ref().map_or_else(|| "The model".into(), |d| d.title())
+                            ),
+                            Err(error) => error.lines().next().unwrap_or("Training failed.").to_owned(),
+                        };
+                        let notification = magi_core::host::Notification {
+                            title: "MacroMagi".into(),
+                            message,
+                            sound: true,
+                            popup: true,
+                        };
+                        let _ = magi_platform::notify::notify(&notification);
+                    }
+                }
+            }
+        }
+
         self.apply_device();
+        self.apply_tools();
 
         // Settings are written a moment after they stop changing.
         if self.settings != self.saved_settings {
@@ -1300,8 +1335,94 @@ impl MagiApp {
         self.apply_device();
     }
 
+    /// Native tools run with the Python for AI; their files and the native engine's cache go in the
+    /// data folder; MagiDB is the chosen folder, the downloaded copy or the online one. Looked at
+    /// again when one of them changes.
+    fn apply_tools(&mut self) {
+        let magidb = self.settings.magidb_dir.clone().filter(|d| d.is_dir()).or_else(|| self.components.magidb());
+        let key = (
+            self.python_for_packages(),
+            magidb.clone(),
+            self.settings.magidb_url.trim().to_owned(),
+            self.components.vision_model(),
+        );
+        if self.applied_tools.as_ref() == Some(&key) {
+            return;
+        }
+        magi_ml::tools::set_python(key.0.clone());
+        magi_ml::tools::set_cache_dir(self.paths.data_dir.join("cache"));
+        let text = |p: &Option<PathBuf>| p.as_ref().map(|p| p.display().to_string());
+        magi_ml::tools::set_tool_env("MAGI_DB_DIR", text(&magidb));
+        magi_ml::tools::set_tool_env("MAGI_DB_URL", Some(key.2.clone()).filter(|u| !u.is_empty()));
+        magi_ml::tools::set_tool_env(
+            "MAGI_DB_CACHE",
+            Some(self.paths.data_dir.join("cache").join("magidb").display().to_string()),
+        );
+        magi_ml::tools::set_tool_env("MAGI_VISION_MODEL", text(&key.3));
+        self.applied_tools = Some(key);
+    }
+
+    /// A tool call the model wants to make that changes files or runs programs: the user allows it or not.
+    fn approvals(&mut self, ctx: &egui::Context) {
+        let pending = magi_ml::tools::pending_approvals();
+        let Some((id, call)) = pending.first().cloned() else { return };
+        let arg = |key: &str| call.args.get(key).and_then(|v| v.as_str()).unwrap_or_default().to_owned();
+        let what = match call.name.as_str() {
+            "write_file" => format!("write the file {}", arg("path")),
+            "edit_file" => format!("change the file {}", arg("path")),
+            "edit_document" => format!("change the document {}", arg("path")),
+            "run_command" => {
+                let folder = arg("folder");
+                if folder.is_empty() { "run a command".to_owned() } else { format!("run a command in {folder}") }
+            }
+            other => format!("use {other}"),
+        };
+        let mut answer: Option<(bool, bool)> = None;
+        egui::Window::new(format!("{}  Allow this?", icon::SHIELD_CHECK))
+            .id(egui::Id::new("tool-approval"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .default_width(420.0)
+            .show(ctx, |ui| {
+                ui.label(RichText::new(format!("The model wants to {what}.")).strong());
+                if pending.len() > 1 {
+                    ui.label(RichText::new(format!("{} more waiting.", pending.len() - 1)).color(theme::text_dim()));
+                }
+                let shown = match call.name.as_str() {
+                    "run_command" => arg("command"),
+                    "write_file" => arg("text"),
+                    "edit_file" => format!(
+                        "{}
+→
+{}",
+                        arg("find"),
+                        arg("replace")
+                    ),
+                    _ => serde_json::to_string_pretty(&call.args).unwrap_or_default(),
+                };
+                egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                    ui.add(egui::Label::new(RichText::new(shown).monospace().size(11.5)).wrap());
+                });
+                ui.add_space(6.0);
+                widgets::button_row(ui, |ui| {
+                    if widgets::accent_button(ui, "Allow", theme::accent(), vec2(0.0, 26.0)).clicked() {
+                        answer = Some((true, false));
+                    }
+                    if ui.button(format!("Allow {} until MacroMagi closes", call.name)).clicked() {
+                        answer = Some((true, true));
+                    }
+                    if ui.button("Don't allow").clicked() {
+                        answer = Some((false, false));
+                    }
+                });
+            });
+        if let Some((allow, always)) = answer {
+            magi_ml::tools::answer_approval(id, allow, always);
+        }
+    }
+
     fn apply_device(&mut self) {
-        self.apply_llama();
         // Called every frame too, so a changed setting takes effect at once.
         if self.applied_device != Some(self.settings.ai_device) {
             self.applied_device = Some(self.settings.ai_device);
@@ -1332,29 +1453,6 @@ impl MagiApp {
         let python = self.python_for_packages();
         self.checking_components = true;
         self.spawn_job(ctx, move || Job::Runtime(Box::new(components.report(python.as_deref()))));
-    }
-
-    /// Tells `magi_ml` where llama.cpp is and how to run it, when that changed.
-    fn apply_llama(&mut self) {
-        // Looked at again only when a setting or what is installed changed.
-        let key = (self.settings.llama_build, self.settings.llama_gpu_layers, self.settings.llama_devices.clone());
-        if self.applied_llama.is_some() && self.llama_key.as_ref() == Some(&key) {
-            return;
-        }
-        self.llama_key = Some(key);
-        // Native tools run with the Python for AI; their files and the native engine's cache go in the data folder.
-        magi_ml::tools::set_python(self.python_for_packages());
-        magi_ml::tools::set_cache_dir(self.paths.data_dir.join("cache"));
-        let config = self.components.llama_server(self.settings.llama_build).map(|(_, server)| magi_ml::LlamaConfig {
-            server,
-            gpu_layers: self.settings.llama_gpu_layers,
-            devices: self.settings.llama_devices.clone(),
-            split: None,
-        });
-        if self.applied_llama.as_ref() != Some(&config) {
-            magi_ml::set_llama(config.clone());
-            self.applied_llama = Some(config);
-        }
     }
 
     /// The graphics cards training uses (CUDA numbers; empty: the CPU).
@@ -1569,6 +1667,16 @@ impl MagiApp {
                 if widgets::icon_toggle(ui, icon::GEAR, self.settings_window.open, "Settings").clicked() {
                     self.settings_window.open = !self.settings_window.open;
                 }
+                if widgets::icon_toggle(
+                    ui,
+                    icon::ROBOT,
+                    self.agent_chat.open,
+                    "AI Agent: chat with your models in a window of their own",
+                )
+                .clicked()
+                {
+                    self.agent_chat.open = !self.agent_chat.open;
+                }
                 let pinned = self.settings.always_on_top;
                 if widgets::icon_toggle(ui, icon::PUSH_PIN, pinned, "Keep on top of other windows").clicked() {
                     self.settings.always_on_top = !pinned;
@@ -1638,6 +1746,9 @@ impl MagiApp {
                 ui.checkbox(&mut self.settings.optimize_training, "Optimize environment when training").on_hover_text(
                     "While a model trains, show only the training – no canvas, background picture or see-through \
                      panels – so the computer spends its time on training",
+                );
+                ui.checkbox(&mut self.settings.notify_after_training, "Notify when training ends").on_hover_text(
+                    "A sound and a desktop notification when a training run of more than a minute finishes or fails",
                 );
             }
         })
@@ -1722,12 +1833,31 @@ impl MagiApp {
                             } else {
                                 theme::text_faint()
                             }));
-                        let response = ui.add(train).on_hover_text(&hint);
-                        if response.clicked() {
-                            if problem.is_some() {
-                                self.toast_error(hint);
-                            } else {
-                                self.start_training(ctx);
+                        let choices = if problem.is_none() { doc.train_choices() } else { Vec::new() };
+                        if choices.len() > 1 {
+                            // Saved weights to start from: Train asks where to start.
+                            let mut chosen = None;
+                            let menu = egui::containers::menu::MenuButton::from_button(train).ui(ui, |ui| {
+                                ui.set_min_width(260.0);
+                                for (label, choice) in &choices {
+                                    if ui.button(label).clicked() {
+                                        chosen = Some(choice.clone());
+                                        ui.close();
+                                    }
+                                }
+                            });
+                            menu.0.on_hover_text("Train from the start, or from weights saved after a stage");
+                            if let Some(choice) = chosen {
+                                self.start_training(ctx, choice);
+                            }
+                        } else {
+                            let response = ui.add(train).on_hover_text(&hint);
+                            if response.clicked() {
+                                if problem.is_some() {
+                                    self.toast_error(hint);
+                                } else {
+                                    self.start_training(ctx, Default::default());
+                                }
                             }
                         }
                     }
@@ -1740,7 +1870,7 @@ impl MagiApp {
     fn magic_file_menu(&mut self, ui: &mut Ui, label: &str) {
         let mut chosen: Option<MagicPending> = None;
         let mut save: Option<bool> = None;
-        let mut export_python = false;
+        let mut export_python = None;
         let mut close = false;
         let recent = self.settings.recent_models.clone();
         let has_doc = self.magic_tab.doc.is_some();
@@ -1771,10 +1901,6 @@ impl MagiApp {
             });
             ui.menu_button(format!("{}  Import", icon::DOWNLOAD_SIMPLE), |ui| {
                 ui.set_min_width(250.0);
-                if ui.button(format!("{}  A GGUF model (LM Studio, llama.cpp)…", icon::CUBE)).clicked() {
-                    chosen = Some(MagicPending::Import(ImportFrom::Gguf));
-                    ui.close();
-                }
                 if ui.button(format!("{}  An ONNX project folder…", icon::FOLDER_OPEN)).clicked() {
                     chosen = Some(MagicPending::Import(ImportFrom::Folder));
                     ui.close();
@@ -1807,7 +1933,17 @@ impl MagiApp {
                 .on_hover_text("A folder with run.py that trains the model as the canvas does, and a README")
                 .clicked()
             {
-                export_python = true;
+                export_python = Some(false);
+                ui.close();
+            }
+            if ui
+                .add_enabled(has_doc, egui::Button::new(format!("{}  Export as Python (experimental)…", icon::FILE_PY)))
+                .on_hover_text(
+                    "The same, and the trainer tries compiled layers: on Linux, kept only when faster with the same loss",
+                )
+                .clicked()
+            {
+                export_python = Some(true);
                 ui.close();
             }
             ui.separator();
@@ -1822,8 +1958,8 @@ impl MagiApp {
         if let Some(choose) = save {
             self.save_magic(choose);
         }
-        if export_python {
-            self.export_magic_python();
+        if let Some(compile) = export_python {
+            self.export_magic_python(compile);
         }
         if close {
             self.magic_guarded(MagicPending::New);
@@ -1846,7 +1982,7 @@ impl MagiApp {
             ui.add_enabled_ui(has_doc, |ui| {
                 ui.menu_button(format!("{}  Commons", icon::STAR), |ui| {
                     ui.set_width(330.0);
-                    ui.label(RichText::new("Well-known architectures, at desktop size. They replace the architecture blocks on the canvas.").size(11.0).color(theme::text_faint()));
+                    ui.label(RichText::new("Magi's architectures, from 3.5M to 400M parameters. They replace the architecture blocks on the canvas.").size(11.0).color(theme::text_faint()));
                     // As tall as the window allows; the rest scrolls.
                     let tallest = (ui.ctx().content_rect().height() - 140.0).max(160.0);
                     egui::ScrollArea::vertical().max_height(tallest).auto_shrink([false, true]).show(ui, |ui| {
@@ -2325,9 +2461,10 @@ impl MagiApp {
             show_console: self.settings.magic_console,
             show_panel: self.settings.magic_panel,
             show_grid: self.settings.show_grid,
+            generator: self.settings.generator.clone(),
         };
         let events = self.magic_tab.show(ui, &env);
-        // Something needing PyTorch, onnx or llama.cpp failed: look at them again.
+        // Something needing PyTorch or onnx failed: look at them again.
         if std::mem::take(&mut self.magic_tab.runtime_failed) && !self.checking_components {
             self.refresh_components(ui.ctx());
         }
@@ -2340,14 +2477,21 @@ impl MagiApp {
         match event {
             MagicEvent::NewModel { text } => self.magic_guarded(MagicPending::NewModel { text }),
             MagicEvent::Toast(text) => self.toast(text),
-            MagicEvent::Train => self.start_training(ctx),
+            MagicEvent::Train(choice) => self.start_training(ctx, choice),
+            MagicEvent::SaveBase(stage) => self.save_base_model(stage),
+            MagicEvent::GeneratorSettings(settings) => {
+                self.settings.generator = settings;
+                self.save_settings();
+            }
             MagicEvent::StopTraining => {
+                if let Some(seen) = &mut self.training_seen {
+                    *seen = true;
+                }
                 if let Some(job) = &self.magic_tab.job {
                     job.stop();
                 }
             }
             MagicEvent::Compile => self.compile_magic(),
-            MagicEvent::AddToLmStudio => self.add_to_lmstudio(),
             MagicEvent::OpenFolder(folder) => {
                 let _ = std::fs::create_dir_all(&folder);
                 if let Err(error) = magi_platform::system::open_folder(&folder) {
@@ -2462,8 +2606,11 @@ impl MagiApp {
         }
     }
 
-    /// Trains the Magic tab's model as its canvas says, in the background.
-    fn start_training(&mut self, ctx: &egui::Context) {
+    /// Trains the Magic tab's model as its canvas says, in the background: from
+    /// where `choice` says (the start, a checkpoint, the trained model), and the
+    /// stages it names.
+    fn start_training(&mut self, ctx: &egui::Context, choice: crate::magic::TrainChoice) {
+        use crate::magic::TrainFrom;
         if self.magic_tab.training() {
             return;
         }
@@ -2471,7 +2618,67 @@ impl MagiApp {
         if let Some(problem) = doc.training_problem() {
             return self.toast_error(problem);
         }
-        let Ok(pipeline) = magi_core::nodes::studio::pipeline(&doc.studio.graph) else { return };
+        let Ok(mut pipeline) = magi_core::nodes::studio::pipeline(&doc.studio.graph) else { return };
+        // A learned tokenizer learns its pieces from the datasets when training starts from zero.
+        let from_zero = choice.from == TrainFrom::Start && pipeline.entry.kind == magi_core::nodes::studio::kinds::ZERO;
+        // With a corpus read where it trains, the trainer learns them there, from it.
+        if from_zero
+            && let Some(doc) = self.magic_tab.doc.as_mut()
+            && doc.reads_corpus()
+        {
+            doc.forget_tokens();
+        } else if from_zero
+            && let Some(doc) = self.magic_tab.doc.as_mut()
+            && let Some(count) = doc.learn_tokens()
+        {
+            use crate::magic::train::Level;
+            self.magic_tab.console_line(
+                Level::Info,
+                format!("Learned {count} pieces of words from the datasets for its tokens."),
+            );
+        }
+        // A base model file brings its tokens.
+        if let Some(doc) = self.magic_tab.doc.as_mut() {
+            match doc.take_base_tokens() {
+                Ok(Some(note)) => self.magic_tab.console_line(crate::magic::train::Level::Info, note),
+                Ok(None) => {}
+                Err(problem) => return self.toast_error(problem),
+            }
+        }
+        let Some(doc) = &self.magic_tab.doc else { return };
+        if !choice.stages.is_empty() {
+            pipeline.stages.retain(|s| choice.stages.contains(&s.node));
+        }
+        let from = match choice.from {
+            TrainFrom::Start => None,
+            TrainFrom::Checkpoint(stage) => match doc.checkpoints().into_iter().find(|c| c.stage == stage) {
+                Some(checkpoint) => Some(checkpoint.path),
+                None => return self.toast_error("Those saved weights are gone: train from the start."),
+            },
+            TrainFrom::Trained => {
+                // Outside the training folder, which each training empties first.
+                let path = self.paths.data_dir.join("training-start.safetensors");
+                if let Err(error) = std::fs::write(&path, &doc.file.weights) {
+                    return self.toast_error(format!("The trained weights could not be written: {error}"));
+                }
+                Some(path)
+            }
+        };
+        // The weights after every stage it runs, to start a later training from.
+        let key = crate::magic::MagicDoc::architecture_key(&pipeline.architecture, doc.file.model.text.as_ref());
+        let checkpoints = doc
+            .checkpoint_dir()
+            .map(|dir| {
+                pipeline
+                    .stages
+                    .iter()
+                    .map(|s| {
+                        let path = dir.join(format!("{}.safetensors", s.node));
+                        (s.node, (path, serde_json::json!({ "architecture": key })))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let python = self
             .python_for_packages()
             .or_else(|| magi_engine::python::resolve_interpreter(&self.python_config()).map(|(path, _)| path));
@@ -2502,13 +2709,48 @@ impl MagiApp {
             graph: doc.studio.graph.clone(),
             pipeline,
             devices: self.training_devices(),
+            from,
+            checkpoints,
         };
         let repaint = ctx.clone();
         self.magic_tab.job = Some(crate::magic::train::TrainJob::start(request, move || repaint.request_repaint()));
     }
 
-    /// File › Export as Python: the workspace as a folder of Python.
-    fn export_magic_python(&mut self) {
+    /// A stage's kept weights as a base model file, to fine-tune other models from.
+    fn save_base_model(&mut self, stage: magi_core::graph::NodeId) {
+        let Some(doc) = &self.magic_tab.doc else { return };
+        let name = format!("{} base", doc.title());
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Save the base model")
+            .add_filter("Magi model", &["szi"])
+            .set_file_name(format!("{}.szi", crate::magic::file_stem(&name)))
+            .save_file()
+        else {
+            return;
+        };
+        match doc.save_base(stage, &path, &name) {
+            Ok(()) => {
+                self.magic_tab.console_line(crate::magic::train::Level::Done, format!("Saved {}", path.display()));
+                self.toast(format!("Saved the base model {}", path.display()));
+            }
+            Err(error) => self.toast_error(error),
+        }
+    }
+
+    /// File › Export as Python: the workspace as a folder of Python (`compile`: the experimental one).
+    fn export_magic_python(&mut self, compile: bool) {
+        // A learned tokenizer's pieces go with it, learned now if they have not been yet.
+        if let Some(doc) = self.magic_tab.doc.as_mut()
+            && doc.file.model.text.as_ref().is_some_and(|t| t.tokenizer.learned() && t.tokenizer.merges.is_empty())
+            && !doc.reads_corpus()
+        {
+            doc.learn_tokens();
+        }
+        if let Some(doc) = self.magic_tab.doc.as_mut()
+            && let Err(problem) = doc.take_base_tokens()
+        {
+            return self.toast_error(problem);
+        }
         let Some(doc) = &self.magic_tab.doc else { return };
         let Some(folder) = rfd::FileDialog::new().set_title("Where the Python folder goes").pick_folder() else {
             return;
@@ -2517,7 +2759,7 @@ impl MagiApp {
             Ok(dir) => dir,
             Err(error) => return self.toast_error(format!("The trainer could not be unpacked: {error}")),
         };
-        match crate::magic::export_python::export(doc, &runtime, &folder) {
+        match crate::magic::export_python::export(doc, &runtime, &folder, compile) {
             Ok(dir) => {
                 let _ = magi_platform::system::open_folder(&dir);
                 self.toast(format!("Exported to {}", dir.display()));
@@ -2544,24 +2786,6 @@ impl MagiApp {
                     self.remember_model(&path);
                     self.toast(format!("Saved {}", path.display()));
                 }
-            }
-            Err(error) => {
-                self.magic_tab.console_line(Level::Error, error.clone());
-                self.toast_error(error);
-            }
-        }
-    }
-
-    /// Puts the Magic tab's model into LM Studio.
-    fn add_to_lmstudio(&mut self) {
-        let Some(doc) = &self.magic_tab.doc else { return };
-        use crate::magic::train::Level;
-        match doc.add_to_lmstudio() {
-            Ok(written) => {
-                for path in &written {
-                    self.magic_tab.console_line(Level::Done, format!("Added {}", path.display()));
-                }
-                self.toast("Added to LM Studio. It shows up in My Models (restart LM Studio if it was open).");
             }
             Err(error) => {
                 self.magic_tab.console_line(Level::Error, error.clone());
@@ -2722,6 +2946,13 @@ impl MagiApp {
         self.rules_window.show(ctx, &mut self.settings.options);
         self.recording_popout(ctx);
         self.rate_editor(ctx);
+        if self.agent_chat.open {
+            self.agent_chat.set_dir(self.paths.data_dir.join("chats"));
+            self.agent_chat.offer_magic_model(self.magic_tab.doc.as_ref().map(|d| &d.file));
+            self.agent_chat.show(ctx);
+        } else {
+            self.agent_chat.release();
+        }
         self.dialogs(ctx);
         self.toasts(ctx);
     }
@@ -3323,6 +3554,7 @@ impl eframe::App for MagiApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.apply_look(&ctx);
+        self.approvals(&ctx);
         self.shortcuts(&ctx);
 
         // Closing with unsaved changes asks first.
@@ -3389,7 +3621,7 @@ impl eframe::App for MagiApp {
 
         if self.train_at_start && self.magic_tab.doc.is_some() {
             self.train_at_start = false;
-            self.start_training(&ctx);
+            self.start_training(&ctx, Default::default());
         }
         egui::Panel::top("top-bar")
             .frame(egui::Frame::new().fill(theme::bg_app()).inner_margin(egui::Margin::symmetric(10, 7)))
@@ -3409,7 +3641,6 @@ impl eframe::App for MagiApp {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.controller.shut_down();
-        magi_ml::llama::stop_servers();
         if self.screenshot.is_none() {
             self.save_settings();
         }
@@ -3498,6 +3729,7 @@ mod tests {
             train: false,
             wait: None,
             dataset: None,
+            agent: false,
         };
         let mut harness = Harness::builder()
             .with_size(vec2(width, height))

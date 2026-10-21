@@ -1,0 +1,26 @@
+{
+  "name": "run_command",
+  "description": "Runs a command line in a folder and gives back what it printed. Asks the user first.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "command": {
+        "type": "string",
+        "description": "the command line"
+      },
+      "folder": {
+        "type": "string",
+        "description": "where to run it (the current folder by default)"
+      }
+    },
+    "required": [
+      "command"
+    ]
+  },
+  "run": {
+    "kind": "python",
+    "entry": "run.py",
+    "timeout_ms": 120000
+  },
+  "confirm": true
+}

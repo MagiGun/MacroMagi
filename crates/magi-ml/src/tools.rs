@@ -7,11 +7,18 @@
 //! gives back their results in tool turns, and asks again – until the model
 //! answers without calling one, or calls a tool that is not native (which is
 //! left to whoever asked), or the steps run out.
+//!
+//! A tool marked `confirm` (it writes files or runs programs) runs only when
+//! the user allows it: the call waits in [`pending_approvals`] until the
+//! program showing them answers with [`answer_approval`]. A tool run by the
+//! `host` is carried out by a function the program registered
+//! ([`set_host_tool`]): reading a picture's text, say, which needs the system.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock, mpsc};
 use std::time::{Duration, Instant};
 
 use magi_core::magic::{TextSpec, ToolCall};
@@ -22,6 +29,91 @@ use crate::{Answer, AskOptions, MlError};
 
 static PYTHON: RwLock<Option<PathBuf>> = RwLock::new(None);
 static CACHE: RwLock<Option<PathBuf>> = RwLock::new(None);
+static ENV: RwLock<BTreeMap<String, String>> = RwLock::new(BTreeMap::new());
+
+/// A tool the program running the model carries out itself (`"run": {"kind": "host"}`).
+pub type HostTool = Box<dyn Fn(&Value) -> Result<Value, String> + Send + Sync>;
+static HOST: RwLock<BTreeMap<String, HostTool>> = RwLock::new(BTreeMap::new());
+
+/// A call waiting for the user to allow it.
+pub struct Approval {
+    pub id: u64,
+    pub call: ToolCall,
+    answer: mpsc::Sender<bool>,
+}
+
+struct Approvals {
+    /// Whether anyone shows the calls to the user; without, they are refused.
+    shown: bool,
+    next: u64,
+    pending: Vec<Approval>,
+    /// Tools the user allowed for the rest of the session.
+    always: BTreeSet<String>,
+    notify: Option<Box<dyn Fn() + Send + Sync>>,
+}
+
+static APPROVALS: Mutex<Approvals> =
+    Mutex::new(Approvals { shown: false, next: 1, pending: Vec::new(), always: BTreeSet::new(), notify: None });
+
+/// Calls that ask first are shown to the user, who allows or refuses them; `notify` is called
+/// when one arrives (to redraw the window). Without this, such calls are refused.
+pub fn show_approvals(notify: Box<dyn Fn() + Send + Sync>) {
+    let mut approvals = APPROVALS.lock().unwrap_or_else(|p| p.into_inner());
+    approvals.shown = true;
+    approvals.notify = Some(notify);
+}
+
+/// The calls waiting for the user: their ids and the calls.
+pub fn pending_approvals() -> Vec<(u64, ToolCall)> {
+    APPROVALS.lock().unwrap_or_else(|p| p.into_inner()).pending.iter().map(|a| (a.id, a.call.clone())).collect()
+}
+
+/// The user's answer to a call; `always` allows its tool for the rest of the session.
+pub fn answer_approval(id: u64, allow: bool, always: bool) {
+    let mut approvals = APPROVALS.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(index) = approvals.pending.iter().position(|a| a.id == id) {
+        let approval = approvals.pending.remove(index);
+        if allow && always {
+            approvals.always.insert(approval.call.name.clone());
+        }
+        let _ = approval.answer.send(allow);
+    }
+}
+
+/// Asks the user about a call, waiting up to ten minutes for the answer.
+fn approved(call: &ToolCall) -> bool {
+    let (sender, receiver) = mpsc::channel();
+    {
+        let mut approvals = APPROVALS.lock().unwrap_or_else(|p| p.into_inner());
+        if approvals.always.contains(&call.name) {
+            return true;
+        }
+        if !approvals.shown {
+            return false;
+        }
+        let id = approvals.next;
+        approvals.next += 1;
+        approvals.pending.push(Approval { id, call: call.clone(), answer: sender });
+        if let Some(notify) = &approvals.notify {
+            notify();
+        }
+    }
+    receiver.recv_timeout(Duration::from_secs(600)).unwrap_or(false)
+}
+
+/// Registers a tool the program carries out itself.
+pub fn set_host_tool(name: &str, run: HostTool) {
+    HOST.write().unwrap_or_else(|p| p.into_inner()).insert(name.to_owned(), run);
+}
+
+/// Environment variables native tools run with (where MagiDB is, say).
+pub fn set_tool_env(key: &str, value: Option<String>) {
+    let mut env = ENV.write().unwrap_or_else(|p| p.into_inner());
+    match value {
+        Some(value) => env.insert(key.to_owned(), value),
+        None => env.remove(key),
+    };
+}
 
 /// The Python native tools run with (the Python for AI).
 pub fn set_python(python: Option<PathBuf>) {
@@ -60,6 +152,11 @@ pub fn run_native(tool: &NativeTool, files: &[(String, Vec<u8>)], args: &Value) 
 }
 
 fn run_in(dir: &Path, run: &RunSpec, args: &Value) -> Result<Value, String> {
+    if run.kind == "host" {
+        let host = HOST.read().unwrap_or_else(|p| p.into_inner());
+        let tool = host.get(&run.entry).ok_or_else(|| format!("this program cannot run the tool {}", run.entry))?;
+        return tool(args);
+    }
     let entry = dir.join(&run.entry);
     let mut command = if run.kind == "command" {
         Command::new(&entry)
@@ -73,6 +170,7 @@ fn run_in(dir: &Path, run: &RunSpec, args: &Value) -> Result<Value, String> {
         command.arg("-I").arg(&entry);
         command
     };
+    command.envs(ENV.read().unwrap_or_else(|p| p.into_inner()).iter());
     command
         .current_dir(dir)
         .env("PYTHONIOENCODING", "utf-8")
@@ -123,6 +221,8 @@ fn run_in(dir: &Path, run: &RunSpec, args: &Value) -> Result<Value, String> {
 /// One tool the agent loop ran.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Step {
+    /// What the model thought before it called the tool (its first call of a turn only).
+    pub thinking: String,
     pub call: ToolCall,
     pub result: Value,
 }
@@ -165,27 +265,98 @@ pub fn agent(
     generate: &mut dyn FnMut(&str) -> Result<String, MlError>,
     run: &mut dyn FnMut(&ToolCall) -> Option<Value>,
 ) -> Result<AgentAnswer, MlError> {
-    let mut prompt = spec.prompt_with(request, options.thinking, &options.effort);
+    let prompt = spec.prompt_with(request, options.thinking, &options.effort);
+    agent_from(spec, prompt, options, max_steps, generate, run)
+}
+
+/// Tool results the agent loop keeps whole when a long piece of work outgrows the context:
+/// the latest ones. Older ones are shortened, oldest first, until the text fits.
+pub const KEEP_WHOLE: usize = 6;
+/// What is left of a shortened result, in characters.
+const SHORTENED: usize = 240;
+/// Rounds (a call and its result) kept when even shortened results do not fit: the latest.
+pub const KEEP_ROUNDS: usize = 12;
+
+/// What stands for the rounds left out of a very long piece of work.
+pub fn left_out(rounds: usize) -> Value {
+    json!({ "note": format!("{rounds} earlier steps are left out to make room; your notes say where the work stands") })
+}
+
+/// A tool result as it is kept once the work has moved on: its start, and a note.
+pub fn shortened(result: &Value) -> Value {
+    let text = magi_core::magic::spaced_json(result);
+    if text.chars().count() <= SHORTENED {
+        return result.clone();
+    }
+    let start: String = text.chars().take(SHORTENED).collect();
+    json!({ "shortened": format!("{start}…"), "note": "an earlier result, shortened: call the tool again to see it all" })
+}
+
+/// The agent loop from a prompt of any length – a whole conversation, say
+/// ([`TextSpec::chat_prompt`]) – ending where the model answers. When the work
+/// outgrows the context (`options.context`, else the model's), the results of
+/// earlier calls are shortened, oldest first, keeping the latest [`KEEP_WHOLE`]
+/// whole; if even that is too long, the oldest rounds are left out (keeping the
+/// latest [`KEEP_ROUNDS`]), with a note – so the start (the system text and the
+/// request) is never lost. The model keeps track of the work in its thinking.
+pub fn agent_from(
+    spec: &TextSpec,
+    prompt: String,
+    options: &AskOptions,
+    max_steps: usize,
+    generate: &mut dyn FnMut(&str) -> Result<String, MlError>,
+    run: &mut dyn FnMut(&ToolCall) -> Option<Value>,
+) -> Result<AgentAnswer, MlError> {
+    let window = if options.context > 0 { options.context } else { spec.context as usize };
+    let room = if options.max_tokens > 0 { options.max_tokens } else { spec.max_tokens as usize };
+    let budget = window.saturating_sub(room).max(window / 2);
     let mut steps = Vec::new();
+    // Each round: what the model wrote, and the results it was given.
+    let mut rounds: Vec<(String, Vec<Value>)> = Vec::new();
+    let (mut short, mut dropped) = (0, 0);
+    let mut text = prompt.clone();
     for _ in 0..=max_steps {
-        let raw = generate(&prompt)?;
+        let raw = generate(&text)?;
         let answer =
             Answer { text: spec.visible(&raw), thinking: spec.thinking(&raw), tools: spec.tool_calls(&raw), raw };
         if answer.tools.is_empty() || steps.len() >= max_steps {
             return Ok(AgentAnswer { answer, steps });
         }
         let mut results = Vec::new();
-        for call in &answer.tools {
+        for (n, call) in answer.tools.iter().enumerate() {
             match run(call) {
                 Some(result) => {
                     results.push(result.clone());
-                    steps.push(Step { call: call.clone(), result });
+                    let thinking = if n == 0 { answer.thinking.clone() } else { String::new() };
+                    steps.push(Step { thinking, call: call.clone(), result });
                 }
                 // Not a native tool: the asker carries it out.
                 None => return Ok(AgentAnswer { answer, steps }),
             }
         }
-        prompt.push_str(&continue_with(spec, &answer.raw, &results, options.thinking));
+        rounds.push((answer.raw, results));
+        let build = |short: usize, dropped: usize| {
+            let mut text = prompt.clone();
+            if dropped > 0 {
+                text.push_str(&continue_with(spec, "", &[left_out(dropped)], options.thinking));
+            }
+            for (index, (raw, results)) in rounds.iter().enumerate().skip(dropped) {
+                let kept: Vec<Value> =
+                    if index < short { results.iter().map(shortened).collect() } else { results.clone() };
+                text.push_str(&continue_with(spec, raw, &kept, options.thinking));
+            }
+            text
+        };
+        text = build(short, dropped);
+        // Too long: shorten the oldest whole results until it fits, then leave out the oldest rounds.
+        while short + KEEP_WHOLE < rounds.len() && spec.encode(&text).len() > budget {
+            short += 1;
+            text = build(short, dropped);
+        }
+        while dropped + KEEP_ROUNDS < rounds.len() && spec.encode(&text).len() > budget {
+            dropped += 1;
+            text = build(short, dropped);
+        }
     }
     Err(MlError::new("the agent loop ended without an answer"))
 }
@@ -199,6 +370,9 @@ pub fn run_call(spec: &TextSpec, data: &std::collections::BTreeMap<String, Vec<u
     let Some(tool) = magi_core::native_tools::tool(&call.name, data) else {
         return Some(json!({ "error": format!("the native tool {} is missing", call.name) }));
     };
+    if tool.confirm && !approved(call) {
+        return Some(json!({ "error": "the user did not allow this call" }));
+    }
     let files = magi_core::native_tools::files(&call.name, data);
     Some(run_native(&tool, &files, &call.args).unwrap_or_else(|error| json!({ "error": error })))
 }
@@ -228,5 +402,54 @@ mod tests {
         assert_eq!(done.answer.text, "It is 4.");
         assert_eq!(done.steps.len(), 1);
         assert!(asked[1].ends_with("</tool_call><|end|><|tool|>{\"result\": 4}<|end|><|assistant|>"), "{}", asked[1]);
+    }
+
+    #[test]
+    fn long_work_shortens_old_results_and_keeps_the_start() {
+        let mut spec = TextSpec {
+            tools: vec![magi_core::magic::ToolSpec { name: "read_file".into(), native: true, ..Default::default() }],
+            context: 1200,
+            max_tokens: 100,
+            ..TextSpec::default()
+        };
+        spec.ensure_specials();
+        let mut asked: Vec<String> = Vec::new();
+        let mut generate = |prompt: &str| {
+            asked.push(prompt.to_owned());
+            Ok(if asked.len() <= 12 {
+                format!(
+                    r#"<tool_call>{{"name": "read_file", "arguments": {{"path": "f{}.txt"}}}}</tool_call>"#,
+                    asked.len()
+                )
+            } else {
+                "Done.".to_owned()
+            })
+        };
+        let mut run = |_: &ToolCall| Some(json!({ "text": "x".repeat(300) }));
+        let done = agent(&spec, "Read them all.", &AskOptions::default(), 20, &mut generate, &mut run).unwrap();
+        assert_eq!((done.answer.text.as_str(), done.steps.len()), ("Done.", 12));
+        let last = asked.last().unwrap();
+        assert!(last.contains("Read them all."), "the request stays");
+        assert!(last.contains("an earlier result, shortened"));
+        assert_eq!(last.matches(&"x".repeat(300)).count(), KEEP_WHOLE, "the latest results stay whole");
+
+        // Far longer work: the oldest rounds are left out, the latest kept.
+        let mut asked: Vec<String> = Vec::new();
+        let mut generate = |prompt: &str| {
+            asked.push(prompt.to_owned());
+            Ok(if asked.len() <= 40 {
+                format!(
+                    r#"<tool_call>{{"name": "read_file", "arguments": {{"path": "f{}.txt"}}}}</tool_call>"#,
+                    asked.len()
+                )
+            } else {
+                "Done.".to_owned()
+            })
+        };
+        let done = agent(&spec, "Read them all.", &AskOptions::default(), 50, &mut generate, &mut run).unwrap();
+        assert_eq!(done.steps.len(), 40);
+        let last = asked.last().unwrap();
+        assert!(last.contains("Read them all.") && last.contains("earlier steps are left out"));
+        assert!(last.contains("f40.txt") && !last.contains("\"f1.txt\""));
     }
 }

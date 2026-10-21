@@ -19,7 +19,7 @@ per token. The Magic tab's canvas describes it as JSON (`architecture`):
 Attention ("attention.kind"):
 
     full      causal attention with rotary positions and grouped key/value heads
-              (the Llama layout; models made only of these export to GGUF).
+              (the Llama layout).
               Options: "qk_norm" (RMSNorm on each head's queries and keys, as in
               Qwen3 and Gemma 3), "bias" (on queries, keys and values), "rotary"
               (the share of each head that turns, 1.0 by default; GLM uses 0.5)
@@ -42,8 +42,9 @@ and "persona" (an expert per persona of the reasoning, routed by its tags).
 
 A vision model is a stack of convolutions and a classifier.
 
-The forward pass returns a dictionary – logits, an auxiliary loss and the
-experts' loads – so that several graphics cards (DataParallel) can share it;
+The forward pass returns a dictionary – logits (or, asked for the loss, the
+loss alone), an auxiliary loss and the experts' loads – so that several
+graphics cards (DataParallel) can share it;
 `Exported` wraps a model as tokens -> logits for ONNX. Top-k choices are
 made by rank in exported models, so ONNX runtimes need no TopK operator.
 """
@@ -64,14 +65,93 @@ class RMSNorm(nn.Module):
         self.eps = eps
 
     def forward(self, x):
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps) * self.weight
+        # In full precision, also when the rest runs in bfloat16; PyTorch's fused kernel when training.
+        h = x.float()
+        if self.training and hasattr(F, "rms_norm"):
+            out = F.rms_norm(h, (h.shape[-1],), self.weight, self.eps)
+        else:
+            out = h * torch.rsqrt(h.pow(2).mean(-1, keepdim=True) + self.eps) * self.weight
+        # Under autocast, handed on in its half precision: what reads it would cast it anyway, and a
+        # float32 copy kept for the backward pass costs twice the memory.
+        if x.is_cuda and torch.is_autocast_enabled("cuda"):
+            return out.to(torch.get_autocast_dtype("cuda"))
+        return out.type_as(x)
+
+
+# Positions the output head's loss reads at once: 8192 x a 4K vocabulary is about 130 MB of scores.
+SLICE = 8192
+
+
+class SlicedLoss(torch.autograd.Function):
+    """Cross-entropy of the output head over hidden states [n, width], a slice of positions at a
+    time, with the gradients worked out in the same pass (as Liger's fused linear cross-entropy):
+    the scores of every position at once – several GB at 16 rows of 2048 tokens – are never kept,
+    and nothing is recomputed. Gradients are kept unscaled and scaled in the backward pass, so a
+    float16 loss scale reaches them."""
+
+    @staticmethod
+    def forward(ctx, h, weight, targets, dtype):
+        count = targets.numel()
+        grad_h = torch.empty_like(h)
+        grad_w = torch.zeros(weight.shape, dtype=torch.float32, device=weight.device)
+        total = torch.zeros((), dtype=torch.float32, device=h.device)
+        with torch.autocast(h.device.type, enabled=False):
+            w = weight.to(dtype)
+            for start in range(0, count, SLICE):
+                hs, ts = h[start : start + SLICE].to(dtype), targets[start : start + SLICE]
+                rows = torch.arange(ts.numel(), device=ts.device)
+                # One fused softmax, in float32, read straight from the half-precision scores (a third
+                # faster than logsumexp and exp over a float32 copy). A probability below 1e-30 counts
+                # as 1e-30 in the loss shown (69 at most); its gradient is exact.
+                probs = torch.softmax(hs @ w.t(), dim=-1, dtype=torch.float32)
+                picked = probs[rows, ts]
+                total -= torch.log(picked.clamp_min(1e-30)).sum()
+                # The gradient of the summed loss by the scores: the probabilities, less one at the target.
+                probs[rows, ts] = picked - 1.0
+                d = probs.to(dtype)
+                grad_h[start : start + SLICE] = (d @ w).to(h.dtype)
+                if dtype == torch.float16:
+                    grad_w.addmm_(d.t().float(), hs.float())  # float16 would overflow summing 8192 rows
+                else:
+                    grad_w += (d.t() @ hs).float()
+        ctx.save_for_backward(grad_h, grad_w)
+        ctx.count = count
+        ctx.weight_dtype = weight.dtype
+        return total / count
+
+    @staticmethod
+    def backward(ctx, grad):
+        grad_h, grad_w = ctx.saved_tensors
+        scale = grad.float() / ctx.count
+        return (grad_h.float() * scale).to(grad_h.dtype), (grad_w * scale).to(ctx.weight_dtype), None, None
+
+
+def _turn(x, cos, sin):
+    half = x.shape[-1] // 2
+    turned = torch.cat([-x[..., half:], x[..., :half]], dim=-1)
+    return x * cos + turned * sin
+
+
+class _Rotate(torch.autograd.Function):
+    """Rotary positions keeping nothing but the tables for the backward pass: the gradient of a
+    rotation is the rotation the other way (sin negated)."""
+
+    @staticmethod
+    def forward(ctx, x, cos, sin):
+        ctx.save_for_backward(cos, sin)
+        return _turn(x, cos.to(x.dtype), sin.to(x.dtype))
+
+    @staticmethod
+    def backward(ctx, grad):
+        cos, sin = ctx.saved_tensors
+        return _turn(grad, cos.to(grad.dtype), (-sin).to(grad.dtype)), None, None
 
 
 def rotate(x, cos, sin):
     """Rotary positions on the last dimension of x [..., n, dim] (halves layout)."""
-    half = x.shape[-1] // 2
-    turned = torch.cat([-x[..., half:], x[..., :half]], dim=-1)
-    return x * cos + turned * sin
+    if torch.is_grad_enabled() and x.requires_grad and not torch.onnx.is_in_onnx_export():
+        return _Rotate.apply(x, cos, sin)
+    return _turn(x, cos, sin)
 
 
 def rank_mask(scores, k):
@@ -86,10 +166,15 @@ def rank_mask(scores, k):
 class Context:
     """What every layer needs besides its input: tokens, the mask, rotary tables."""
 
-    def __init__(self, tokens, mask, theta, labels=None, rotary_on=True, causal=True):
+    def __init__(self, tokens, mask, theta, labels=None, rotary_on=True, causal=True, cache=None):
         self.tokens, self.mask, self.theta, self.labels = tokens, mask, theta, labels
         self.rotary_on = rotary_on
-        # Plain causal attention: no request read both ways (Encoder/Decoder Split).
+        # Writing with a cache (TextModel.forward's `cache`): the keys and values of the tokens before,
+        # and how many there are – the new tokens' first position.
+        self.cache = cache
+        self.offset = cache.get("length", 0) if cache is not None else 0
+        # Plain causal attention: no request read both ways (Encoder/Decoder Split), and
+        # no packed samples whose tokens must not see each other.
         self.causal = causal
         self._tables = {}
 
@@ -97,7 +182,7 @@ class Context:
         """cos and sin for `positions` (a 1-D tensor), each [len, dim]."""
         if dim not in self._tables:
             # Compressed entries sit at the end of their (padded) block: a little past the text.
-            span = self.mask.shape[-1] + 1024
+            span = self.offset + self.mask.shape[-1] + 1024
             inv = 1.0 / (self.theta ** (torch.arange(0, dim, 2, dtype=torch.float32, device=positions.device) / dim))
             angles = torch.outer(torch.arange(span, dtype=torch.float32, device=positions.device), inv)
             angles = torch.cat([angles, angles], dim=-1)
@@ -108,11 +193,83 @@ class Context:
         return cos[positions], sin[positions]
 
 
+try:
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+
+    # cuDNN's fused attention first (on an RTX 5070 about twice as fast as the memory-efficient kernel
+    # PyTorch picks by itself, with the same results to bfloat16's precision), then FlashAttention;
+    # PyTorch moves on to the next one when a kernel cannot take the inputs.
+    _PREFERRED = [SDPBackend.CUDNN_ATTENTION, SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION,
+                  SDPBackend.MATH]
+    sdpa_kernel(_PREFERRED, set_priority=True)
+except (ImportError, TypeError, AttributeError):  # older PyTorch: its own choice
+    _PREFERRED = None
+
+
+def attend(q, k, v, **options):
+    """PyTorch's fused attention, with the fastest kernel this graphics card has. cuDNN makes a plan for
+    each new length, so it is asked only for lengths that come again – multiples of 256: pretraining
+    rows, packed fine-tuning rows, window chunks; writing a token at a time and reinforcement learning's
+    answers (every length new) keep PyTorch's own choice."""
+    if _PREFERRED is None or not q.is_cuda or torch.onnx.is_in_onnx_export():
+        return F.scaled_dot_product_attention(q, k, v, **options)
+    n = q.shape[-2]
+    if (n % 256 and n >= 1024 and k.shape[-2] == n and options.get("is_causal")
+            and options.get("attn_mask") is None):
+        # Causal over a length that is not a multiple of 256 (multi-token prediction's layer, a long
+        # answer): padded at the end, which no earlier token sees – about twice as fast.
+        extra = -n % 256
+        q, k, v = (F.pad(t, (0, 0, 0, extra)) for t in (q, k, v))
+        return attend(q, k, v, **options)[..., :n, :]
+    if q.shape[-2] % 256 or k.shape[-2] % 256:
+        return F.scaled_dot_product_attention(q, k, v, **options)
+    with sdpa_kernel(_PREFERRED, set_priority=True):
+        return F.scaled_dot_product_attention(q, k, v, **options)
+
+
 def window_mask(mask, window):
+    """A local window: each token sees its own block of `window` tokens and the whole block before
+    (between `window` and twice as many tokens back). Block-aligned, so training runs it with the
+    fast causal kernel on overlapping chunks (window_attention); the native engine reads it the same."""
     s = mask.shape[-1]
     rows = torch.arange(s, device=mask.device).unsqueeze(1)
     cols = torch.arange(s, device=mask.device).unsqueeze(0)
-    return mask & ((rows - cols) < window)
+    return mask & (cols >= (rows // window - 1) * window)
+
+
+def window_attention(q, k, v, window, mask=None):
+    """Causal attention within window_mask's windows: the fused kernel on chunks of two blocks (stride
+    one block), each chunk's second half kept – the same result as attention over the whole text with
+    window_mask, about four times faster at 8,192 tokens and a window of 1,024. With `mask` [1 or b, 1,
+    s, s] (packed samples that must not see each other), each chunk takes its part of it; without, the
+    plain causal kernel. q, k, v: [b, h, s, d]."""
+    b, h, s, d = q.shape
+    w = window
+    n = -(-s // w)
+    pad = n * w - s
+    if pad:
+        q, k, v = (F.pad(t, (0, 0, 0, pad)) for t in (q, k, v))
+        if mask is not None:
+            mask = F.pad(mask, (0, pad, 0, pad))
+    if mask is None:
+        first = attend(q[:, :, :w], k[:, :, :w], v[:, :, :w], is_causal=True)
+    else:
+        first = attend(q[:, :, :w], k[:, :, :w], v[:, :, :w], attn_mask=mask[:, :, :w, :w])
+    if n == 1:
+        return first[:, :, :s]
+
+    def chunks(t):  # [b, h, n*w, d] -> [b * (n-1), h, 2w, d]
+        return t.unfold(2, 2 * w, w).permute(0, 2, 1, 4, 3).reshape(b * (n - 1), h, 2 * w, d)
+
+    if mask is None:
+        out = attend(chunks(q), chunks(k), chunks(v), is_causal=True)
+    else:
+        # Each chunk's square of the mask: rows and columns (i-1)w … (i+1)w.
+        m = mask.expand(b, 1, n * w, n * w)
+        parts = torch.stack([m[:, :, i * w:(i + 2) * w, i * w:(i + 2) * w] for i in range(n - 1)], dim=1)
+        out = attend(chunks(q), chunks(k), chunks(v), attn_mask=parts.reshape(b * (n - 1), 1, 2 * w, 2 * w))
+    rest = out[:, :, w:].reshape(b, n - 1, h, w, d).permute(0, 2, 1, 3, 4).reshape(b, h, (n - 1) * w, d)
+    return torch.cat([first, rest], dim=2)[:, :, :s]
 
 
 def even(n):
@@ -152,19 +309,43 @@ class FullAttention(nn.Module):
         v = self.v_proj(x).view(b, s, self.kv_heads, self.dim).transpose(1, 2)
         if self.q_norm is not None:
             q, k = self.q_norm(q), self.k_norm(k)
-        cos, sin = cx.rope(self.turned, torch.arange(s, device=x.device))
+        cos, sin = cx.rope(self.turned, torch.arange(cx.offset, cx.offset + s, device=x.device))
         q, k = self.turn(q, cos, sin), self.turn(k, cos, sin)
+        if cx.cache is not None:
+            return self.o_proj(self.cached(q, k, v, cx).transpose(1, 2).reshape(b, s, -1))
         if self.kv_heads != self.heads:
             repeat = self.heads // self.kv_heads
             k, v = k.repeat_interleave(repeat, dim=1), v.repeat_interleave(repeat, dim=1)
         # PyTorch's fused attention: the same softmax(qk/√d)v, without keeping the whole score matrix
         # (plainly causal attention uses the fastest kernel). It exports to ONNX as plain operators.
+        # (Sharing key/value heads in the kernel itself, enable_gqa, falls back to the slow one.)
         if not self.window and cx.causal:
-            y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+            y = attend(q, k, v, is_causal=True)
+        elif self.window and not torch.onnx.is_in_onnx_export():
+            y = window_attention(q, k, v, self.window, None if cx.causal else cx.mask)
         else:
             mask = window_mask(cx.mask, self.window) if self.window else cx.mask
-            y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+            y = attend(q, k, v, attn_mask=mask)
         return self.o_proj(y.transpose(1, 2).reshape(b, s, -1))
+
+
+    def cached(self, q, k, v, cx):
+        """Attention of the new tokens over the cached ones and themselves, adding theirs to the cache:
+        writing a token at a time without reading everything before again."""
+        store = cx.cache.setdefault(id(self), {})
+        if "k" in store:
+            k, v = torch.cat([store["k"], k], dim=2), torch.cat([store["v"], v], dim=2)
+        store["k"], store["v"] = k, v
+        total, s = k.shape[2], q.shape[2]
+        query = torch.arange(cx.offset, cx.offset + s, device=q.device).unsqueeze(1)
+        key = torch.arange(total, device=q.device).unsqueeze(0)
+        allowed = key <= query
+        if self.window:
+            allowed = allowed & (key >= (query // self.window - 1) * self.window)
+        if self.kv_heads != self.heads:
+            repeat = self.heads // self.kv_heads
+            k, v = k.repeat_interleave(repeat, dim=1), v.repeat_interleave(repeat, dim=1)
+        return F.scaled_dot_product_attention(q, k, v, attn_mask=allowed)
 
 
 class LatentAttention(nn.Module):
@@ -426,6 +607,31 @@ class MoE(nn.Module):
         self.aux = None
         self.load = None
         self.dense = False  # every expert for every token, choices by rank (for export)
+        # Grouped products need SwiGLU experts (and a PyTorch that has them): False until they fail.
+        self.geglu_experts = any(e.geglu for e in self.experts)
+
+    def grouped(self, gathered, expert_of):
+        """Every routed expert on its tokens (sorted by expert) in three grouped products – one kernel
+        each instead of three per expert (about three times faster), and no wait for how many tokens each
+        expert took. None when PyTorch or the device cannot (then a loop over the experts)."""
+        if (not gathered.is_cuda or not hasattr(torch, "_grouped_mm") or self.geglu_experts
+                or torch.onnx.is_in_onnx_export()):
+            return None
+        dtype = torch.get_autocast_dtype("cuda") if torch.is_autocast_enabled("cuda") else gathered.dtype
+        if dtype not in (torch.bfloat16,):
+            return None
+        try:
+            counts = torch.bincount(expert_of, minlength=self.n)
+            offs = torch.cumsum(counts, 0).to(torch.int32)
+            x = gathered.to(dtype)
+            gate = torch.stack([e.gate_proj.weight for e in self.experts]).to(dtype).transpose(1, 2)
+            up = torch.stack([e.up_proj.weight for e in self.experts]).to(dtype).transpose(1, 2)
+            down = torch.stack([e.down_proj.weight for e in self.experts]).to(dtype).transpose(1, 2)
+            hidden = F.silu(torch._grouped_mm(x, gate, offs=offs)) * torch._grouped_mm(x, up, offs=offs)
+            return torch._grouped_mm(hidden, down, offs=offs)
+        except (RuntimeError, TypeError, NotImplementedError):
+            self.geglu_experts = True  # not again: the loop from now on
+            return None
 
     def affinity(self, logits):
         if self.gating == "sigmoid":
@@ -453,12 +659,23 @@ class MoE(nn.Module):
             outs = torch.stack([expert(x) for expert in self.experts], dim=-2)
             y = y + (weights.unsqueeze(-1) * outs).sum(-2)
         else:
+            # Each token's chosen experts, sorted by expert: one wait for the graphics card per layer
+            # (how many tokens each expert takes), each expert on one contiguous slice, one sum back.
             flat, wflat = x.reshape(-1, w), weights.reshape(-1, self.n)
+            picked = chosen.reshape(-1, self.n)
+            token, expert_of = picked.nonzero(as_tuple=True)
+            order = torch.argsort(expert_of, stable=True)
+            token, expert_of = token[order], expert_of[order]
+            gathered = flat[token]
+            outs = self.grouped(gathered, expert_of)
+            if outs is None:
+                counts = torch.bincount(expert_of, minlength=self.n).tolist()
+                parts = [expert(part) for expert, part, c in zip(self.experts, torch.split(gathered, counts), counts) if c]
+                outs = torch.cat(parts) if parts else None
             routed = torch.zeros_like(flat)
-            for e, expert in enumerate(self.experts):
-                rows = (wflat[:, e] != 0).nonzero(as_tuple=True)[0]
-                if rows.numel():
-                    routed = routed.index_add(0, rows, expert(flat[rows]) * wflat[rows, e : e + 1])
+            if outs is not None:
+                scale = wflat[token, expert_of].unsqueeze(-1)
+                routed = routed.index_add(0, token, outs * scale.to(outs.dtype))
             y = y + routed.view(b, s, w)
         if self.training:
             share = chosen.float()
@@ -614,6 +831,10 @@ class TextModel(nn.Module):
         iterations = int(hc.get("sinkhorn", 20)) if hc else 20
         self.embed_tokens = nn.Embedding(vocab, width)
         self.tied = bool(a.get("tied"))
+        if self.tied:
+            # Also the output head: small, as GPT-2's, so the first scores are near even rather than
+            # spread by sqrt(width) – the first hundred steps learn instead of shrinking them.
+            nn.init.normal_(self.embed_tokens.weight, std=0.02)
         self.embed_scale = math.sqrt(width) if a.get("embed_scale") else 1.0
         self.learned_positions = a.get("positions", "rope") == "learned"
         if self.learned_positions:
@@ -635,18 +856,40 @@ class TextModel(nn.Module):
             self.mtp_layer = Layer(width, heads, kv_heads, {}, personas, vocab)
         self.checkpointing = False
 
+    def can_cache(self):
+        """Whether it can write with a cache: plain attention layers (with or without windows), rotary
+        positions, one residual stream."""
+        return (self.streams <= 1 and not self.learned_positions and not self.prefix_split
+                and all(isinstance(layer.self_attn, FullAttention) for layer in self.layers))
+
     def head(self, h):
         """Scores per token: the output head, or the embedding table when they are tied."""
         return F.linear(h, self.embed_tokens.weight) if self.tied else self.lm_head(h)
+
+    def token_loss(self, hidden, targets):
+        """The mean cross-entropy of the head over the positions with a target (not -100), without
+        keeping the scores of them all (`SlicedLoss`)."""
+        h, t = hidden.reshape(-1, hidden.shape[-1]), targets.reshape(-1)
+        keep = t != -100
+        h, t = h[keep], t[keep]
+        if not t.numel():
+            return hidden.sum() * 0.0
+        weight = self.embed_tokens.weight if self.tied else self.lm_head.weight
+        kind = h.device.type
+        dtype = torch.get_autocast_dtype(kind) if torch.is_autocast_enabled(kind) else h.dtype
+        return SlicedLoss.apply(h, weight, t, dtype)
 
     def embed(self, tokens):
         x = self.embed_tokens(tokens)
         return x * self.embed_scale if self.embed_scale != 1.0 else x
 
-    def base_mask(self, tokens):
+    def base_mask(self, tokens, segments=None):
         b, s = tokens.shape
         positions = torch.arange(s, device=tokens.device)
         mask = (positions.unsqueeze(0) <= positions.unsqueeze(1)).unsqueeze(0).unsqueeze(0)
+        if segments is not None:
+            # Samples packed into one row only see themselves.
+            mask = mask & (segments.unsqueeze(-1) == segments.unsqueeze(-2)).unsqueeze(1)
         if self.prefix_split and self.prefix_id is not None:
             marks = (tokens == self.prefix_id).long() * (positions + 1).unsqueeze(0)
             prefix = marks.max(dim=1).values.view(b, 1, 1, 1)
@@ -654,9 +897,10 @@ class TextModel(nn.Module):
             mask = mask | inside
         return mask
 
-    def forward(self, tokens, labels=None, targets=None):
-        """Logits for every position; when training, also the auxiliary loss
-        (balancing, the indexer, multi-token prediction) and the experts' loads."""
+    def forward(self, tokens, labels=None, targets=None, segments=None, loss=False, cache=None):
+        """Logits for every position – or with `loss` and targets, the loss alone, which needs far
+        less memory; when training, also the auxiliary loss (balancing, the indexer, multi-token
+        prediction) and the experts' loads."""
         for module in self.modules():
             if hasattr(module, "aux"):
                 module.aux = None
@@ -666,8 +910,9 @@ class TextModel(nn.Module):
         x = self.embed(tokens)
         if self.learned_positions:
             x = x + self.position(torch.arange(s, device=tokens.device)).unsqueeze(0)
-        causal = not (self.prefix_split and self.prefix_id is not None)
-        cx = Context(tokens, self.base_mask(tokens), self.theta, labels, not self.learned_positions, causal)
+        causal = not (self.prefix_split and self.prefix_id is not None) and segments is None
+        cx = Context(tokens, self.base_mask(tokens, segments), self.theta, labels, not self.learned_positions, causal,
+                     cache)
         if self.streams > 1:
             x = x.unsqueeze(2).expand(-1, -1, self.streams, -1).contiguous()
         for layer in self.layers:
@@ -677,7 +922,15 @@ class TextModel(nn.Module):
                 x = layer(x, cx)
         if self.streams > 1:
             x = x.mean(2)
-        logits = self.head(self.norm(x))
+        out = {}
+        if loss and targets is not None:
+            out["loss"] = self.token_loss(self.norm(x), targets).reshape(1)
+        elif cache is not None:
+            # Writing: the scores of the last token only, and the cache moves on.
+            cache["length"] = cx.offset + s
+            out["logits"] = self.head(self.norm(x[:, -1:]))
+        else:
+            out["logits"] = self.head(self.norm(x))
         aux = torch.zeros((), device=tokens.device)
         for module in self.modules():
             if getattr(module, "aux", None) is not None:
@@ -686,13 +939,11 @@ class TextModel(nn.Module):
             nxt = self.embed(tokens[:, 1:])
             h = self.mtp_proj(torch.cat([self.mtp_hidden_norm(x[:, :-1]), self.mtp_embed_norm(nxt)], dim=-1))
             cx2 = Context(tokens[:, 1:], cx.mask[..., : s - 1, : s - 1], self.theta, None, not self.learned_positions, causal)
-            later = self.head(self.norm(self.mtp_layer(h, cx2)))
-            aux = aux + self.mtp_weight * F.cross_entropy(
-                later.reshape(-1, later.shape[-1]), targets[:, 1:].reshape(-1), ignore_index=-100
-            )
+            later = self.norm(self.mtp_layer(h, cx2))
+            aux = aux + self.mtp_weight * self.token_loss(later, targets[:, 1:])
         loads = [m.load for m in self.modules() if isinstance(m, MoE) and m.load is not None]
         load = torch.cat(loads).unsqueeze(0) if loads else torch.zeros(1, 0, device=tokens.device)
-        return {"logits": logits, "aux": aux.reshape(1), "load": load}
+        return dict(out, aux=aux.reshape(1), load=load)
 
     def balance(self, load, rate=1e-3):
         """Auxiliary-loss-free balancing: experts chosen more than average get a lower bias."""
@@ -719,42 +970,6 @@ class Exported(nn.Module):
 
     def forward(self, tokens):
         return self.model(tokens)["logits"]
-
-
-def gguf_arch(architecture):
-    """The GGUF architecture a model exports as ("llama", "qwen3" or "gemma3"), or None
-    (the same rules as `Architecture::gguf_arch` in magic.rs)."""
-    a = architecture
-    layers = a.get("layers") or []
-    if not layers or a.get("conv") or a.get("positions", "rope") != "rope" or a.get("hyper_connections") \
-            or a.get("prefix_split"):
-        return None
-    shapes = set()
-    windows = []
-    for layer in layers:
-        att, ffn = layer.get("attention", {}) or {}, layer.get("ffn", {}) or {}
-        if att.get("kind", "full") != "full" or ffn.get("kind", "dense") != "dense":
-            return None
-        if att.get("bias") or float(att.get("rotary", 1.0) or 1.0) < 1.0:
-            return None
-        shapes.add((bool(att.get("qk_norm")), ffn.get("activation", "swiglu"), layer.get("norm", "pre")))
-        windows.append(int(att.get("window", 0) or 0))
-    if len(shapes) != 1:
-        return None
-    qk, activation, norm = shapes.pop()
-    plain = not any(windows) and not a.get("embed_scale") and activation == "swiglu" and norm == "pre"
-    if plain:
-        return "qwen3" if qk else "llama"
-    if qk and activation == "geglu" and norm == "sandwich" and a.get("embed_scale") and a.get("tied"):
-        local = [w for i, w in enumerate(windows) if i % 6 != 5]
-        if not any(windows) or (len(set(local)) == 1 and local[0] > 0 and all(w == 0 for i, w in enumerate(windows) if i % 6 == 5)):
-            return "gemma3"
-    return None
-
-
-def gguf_compatible(architecture):
-    """Whether GGUF runtimes (llama.cpp, LM Studio) run the model as it is."""
-    return gguf_arch(architecture) is not None
 
 
 class VisionModel(nn.Module):

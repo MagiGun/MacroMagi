@@ -146,6 +146,9 @@ def basics(cache, budget=3_000_000):
 
 # -- conversations: human-written chats ---------------------------------------------------
 
+IDENTITY = re.compile(r"open ?assistant|laion", re.I)
+
+
 def conversations(cache, budget=1_500_000):
     out, total = [], 0
     for row in parquet(cache, "OpenAssistant/oasst_top1_2023-08-25", "default", "train"):
@@ -155,6 +158,9 @@ def conversations(cache, budget=1_500_000):
             continue
         text = " ".join(m["content"] for m in messages)
         if not english(text) or len(text) > LONGEST or "```" in text and len(text) > 1200:
+            continue
+        # The model is Magi: answers naming the assistant that wrote them would teach it to be someone else.
+        if IDENTITY.search(text):
             continue
         item = {"prompt": messages[0]["content"], "response": messages[1]["content"]} if len(messages) == 2 \
             else {"messages": messages}
@@ -177,11 +183,10 @@ def math(cache, budget=2_000_000):
         if not answer or len(question) + len(steps) > LONGEST:
             continue
         lines = [l.strip() for l in steps.splitlines() if l.strip()]
-        # Superior: every step. Standard: the last step only.
-        out.append(line({"effort": "superior", "prompt": question, "thinking": "\n".join(lines),
-                         "response": answer + "."}))
-        out.append(line({"effort": "standard", "prompt": question, "thinking": lines[-1] if lines else "",
-                         "response": answer + "."}))
+        # A problem of several steps is worked out at both efforts: every step.
+        for effort in ("superior", "standard"):
+            out.append(line({"effort": effort, "prompt": question, "thinking": "\n".join(lines),
+                             "response": answer + "."}))
         total += len(out[-1]) + len(out[-2])
         if total > budget:
             break
@@ -299,15 +304,14 @@ taken, shortened and converted from open datasets by `open_data.py`:
 
 | File | Source | Licence | What was taken |
 | --- | --- | --- | --- |
-| `basics.md` | [Cosmopedia 100k](https://huggingface.co/datasets/HuggingFaceTB/cosmopedia-100k) by Hugging Face | [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0) | Texts for children, school and general readers, without headings or tables, cut to 4,000 characters. |
-| `conversations.jsonl` | [OpenAssistant oasst_top1 (2023-08-25)](https://huggingface.co/datasets/OpenAssistant/oasst_top1_2023-08-25) by OpenAssistant | [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0) | Short English conversations. |
-| `math.jsonl` | [GSM8K](https://huggingface.co/datasets/openai/gsm8k) by OpenAI (Cobbe et al., 2021) | [MIT](https://opensource.org/license/mit) | Training problems: the steps as reasoning at effort *superior*, the last step at *standard*, the answer as the response. |
-| `python.jsonl` | [MBPP](https://huggingface.co/datasets/google-research-datasets/mbpp) by Google Research (Austin et al., 2021) | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) | The training, validation and prompt problems with one test each, and their solutions. |
-| `python.jsonl` | [self-oss-instruct-sc2-exec-filter-50k](https://huggingface.co/datasets/bigcode/self-oss-instruct-sc2-exec-filter-50k) by BigCode | [ODC-By](https://opendatacommons.org/licenses/by/1-0/) | Short instructions and answers. |
+| `conversations.jsonl` | [OpenAssistant oasst_top1 (2023-08-25)](https://huggingface.co/datasets/OpenAssistant/oasst_top1_2023-08-25) by OpenAssistant | [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0) | Short English conversations, leaving out those that name the assistant that wrote them. |
 | `functions.jsonl` | [glaive-function-calling-v2](https://huggingface.co/datasets/glaiveai/glaive-function-calling-v2) by Glaive AI | [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0) | Short conversations with tool calls, in MacroMagi's format (`tools`, `tool_calls`, `tool` messages). |
 
 The samples are changed only in form: shortened, filtered for length and language,
 and written as MacroMagi's JSON lines. The licences above apply to them.
+
+`work.jsonl` is made by `make_work_data.py` from MacroMagi's own tools and MagiDB (the
+repository's `magidb/`, CC BY 4.0 for its text, MIT for its code).
 """
 
 
@@ -316,10 +320,9 @@ def main():
         raise SystemExit(__doc__)
     cache = sys.argv[1]
     os.makedirs(cache, exist_ok=True)
-    basics(cache)
+    # Magi learns how to work, not facts, math or code by heart: basics.md (Cosmopedia), math.jsonl
+    # (GSM8K) and python.jsonl (MBPP) are no longer made; their functions stay for other models.
     conversations(cache)
-    math(cache)
-    python(cache)
     functions(cache)
     with open(os.path.join(HERE, "SOURCES.md"), "w", encoding="utf-8", newline="\n") as handle:
         handle.write(SOURCES)

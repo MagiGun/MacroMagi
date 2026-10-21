@@ -349,7 +349,7 @@ Asks a text model made in the Magic tab and gives its answer, what it thought, a
 
 | Setting | Kind | Default | Notes |
 | --- | --- | --- | --- |
-| Model | AI model | none | A model from the Magic tab (“Use in Macro” there), or a .magic, .szi, .gguf or .onnx file. |
+| Model | AI model | none | A model from the Magic tab (“Use in Macro” there), or a .magic, .szi or .onnx file. |
 | Request | text | empty | Used when nothing is wired into “Request”. |
 | Carry out its tool calls | on/off | off | press {key}, type {text}, click {x, y, button}, move {x, y}, wait {ms} and log {text}. Off: the block only reports them. |
 | Longest answer | whole number | 0 tokens | 0: the model's own setting. |
@@ -358,7 +358,7 @@ Asks a text model made in the Magic tab and gives its answer, what it thought, a
 | Reasoning effort | text | empty | One of the model's levels, such as standard or superior. Empty: its default. |
 | Context window | whole number | 0 tokens | The most text the model reads at once. 0: the model's. Smaller keeps only the latest part, and uses less memory. |
 | Run its native tools | on/off | on | Magi models: run the tools in the model's native tools folder (calculator, web search…) and give it their results, until it answers. |
-| Tool calls per request | whole number | 6 | At most this many native tool calls before it must answer. |
+| Tool calls per request | whole number | 100 | At most this many native tool calls before it must answer. |
 
 ### AI Model
 
@@ -370,7 +370,7 @@ Shows part of the screen to an AI model once and gives its answer: the likeliest
 
 | Setting | Kind | Default | Notes |
 | --- | --- | --- | --- |
-| Model | AI model | none | A model from the Magic tab (“Use in Macro” there), or a .magic, .szi, .gguf or .onnx file. |
+| Model | AI model | none | A model from the Magic tab (“Use in Macro” there), or a .magic, .szi or .onnx file. |
 | Model settings | model settings | the model's own | The model's own adjustable settings, changed for this block only. |
 | Display | display | 1 (primary) | For models that look at the middle of the screen: which display. |
 
@@ -385,20 +385,20 @@ Loads a text model now, so the AI Agent blocks after it answer at once. It stays
 
 | Setting | Kind | Default | Notes |
 | --- | --- | --- | --- |
-| Model | AI model | none | A model from the Magic tab (“Use in Macro” there), or a .magic, .szi, .gguf or .onnx file. |
+| Model | AI model | none | A model from the Magic tab (“Use in Macro” there), or a .magic, .szi or .onnx file. |
 
 ### AI Unload Model
 
 `ai.unload`
 
-Unloads a text model: frees its memory (and its graphics card's, for llama.cpp) until it is asked again or loaded again.
+Unloads a text model: frees its memory until it is asked again or loaded again.
 
 - Flow in: yes
 - Flow out: **Then**
 
 | Setting | Kind | Default | Notes |
 | --- | --- | --- | --- |
-| Model | AI model | none | A model from the Magic tab (“Use in Macro” there), or a .magic, .szi, .gguf or .onnx file. |
+| Model | AI model | none | A model from the Magic tab (“Use in Macro” there), or a .magic, .szi or .onnx file. |
 
 ### AI Watch
 
@@ -412,7 +412,7 @@ Keeps showing part of the screen to an AI model and does what the model is set u
 
 | Setting | Kind | Default | Notes |
 | --- | --- | --- | --- |
-| Model | AI model | none | A model from the Magic tab (“Use in Macro” there), or a .magic, .szi, .gguf or .onnx file. |
+| Model | AI model | none | A model from the Magic tab (“Use in Macro” there), or a .magic, .szi or .onnx file. |
 | Model settings | model settings | the model's own | The model's own adjustable settings, changed for this block only. |
 | Display | display | 1 (primary) | For models that look at the middle of the screen: which display. |
 | Press the model's key | on/off | on | Off: the model only watches and runs the blocks under “Acted” – try it safely, or do something else than pressing the key. |

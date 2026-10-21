@@ -1,0 +1,25 @@
+{
+  "name": "db_read",
+  "description": "Reads a MagiDB page: its text, its parts and the pages it links to.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "page": {
+        "type": "string",
+        "description": "the page, as db_search gave it"
+      },
+      "part": {
+        "type": "string",
+        "description": "only this part (a heading) of a long page"
+      }
+    },
+    "required": [
+      "page"
+    ]
+  },
+  "run": {
+    "kind": "python",
+    "entry": "run.py",
+    "timeout_ms": 60000
+  }
+}
