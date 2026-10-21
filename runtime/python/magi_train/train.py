@@ -313,12 +313,13 @@ FULL = Precision(torch.device("cpu"))
 
 
 def run_steps(runner, settings, steps, stage_name, compute, counter, after_backward=None, precision=FULL,
-              shrink=None, resume=None):
+              shrink=None, resume=None, uncompile=None):
     """The training loop of a stage: `compute(step)` gives (loss, extra fields) for one batch.
     When the graphics card runs out of memory, `shrink()` makes the work smaller (splitting batches,
     then recomputing activations) and the step runs again; it gives False when it cannot. When memory is
     so nearly full that PyTorch has to empty its cache to fit a step (every step a lot slower), it
-    splits batches too (`shrink(True)`: never recomputing)."""
+    splits batches too (`shrink(True)`: never recomputing). `uncompile(error)` turns compiled layers off
+    when compiling them failed (it gives False when they were not the cause), and the step runs again."""
     optimizer = optim.make(runner.core, settings, steps)
     # Going on from a run that stopped: the optimizer as it was, from the step it reached.
     start = resume.restore(optimizer) if resume else 0
@@ -340,9 +341,16 @@ def run_steps(runner, settings, steps, stage_name, compute, counter, after_backw
             loss, extra = compute(step)
             if loss is not None and loss.requires_grad:
                 precision.backward(loss / accumulate)
-        except torch.cuda.OutOfMemoryError:
+        except Exception as error:  # noqa: BLE001 - compiling's failures, and memory; anything else is raised
             optimizer.zero_grad()
             loss = None
+            if uncompile and uncompile(error):
+                torch.cuda.empty_cache()
+                emit("warning", message="Compiling the layers failed during training (%s): it goes on without."
+                     % str(error).strip().splitlines()[-1][:200])
+                continue
+            if not isinstance(error, torch.cuda.OutOfMemoryError):
+                raise
             torch.cuda.empty_cache()
             how = shrink() if shrink else None
             if not how:
@@ -775,7 +783,25 @@ class TextTrainer:
         settings = self.settings(stage)
         self.accumulate = max(1, int(settings.get("accumulate", 1)))
         return run_steps(self.runner, settings, steps, name, compute, self.counter, self.balance,
-                         precision=self.precision, shrink=lambda split_only=False: self.shrink(rows, split_only), resume=self.resume)
+                         precision=self.precision, shrink=lambda split_only=False: self.shrink(rows, split_only),
+                         resume=self.resume, uncompile=self.uncompile)
+
+    def uncompile(self, error):
+        """Compiled layers off for good when compiling them failed mid-run (often out of memory while
+        compiling for a new batch size, which PyTorch reports as the compiler's failure)."""
+        if not (self.stage_compiles and self.compiled.kept):
+            return False
+        if not type(error).__module__.startswith(("torch._dynamo", "torch._inductor")):
+            return False
+        self.compiled.use(False)
+        self.compiled.kept = False
+        self.stage_compiles = False
+        try:
+            import torch._dynamo
+            torch._dynamo.reset()
+        except Exception:  # noqa: BLE001 - only frees what compiling kept
+            pass
+        return True
 
     def unlikelihood(self, x, y):
         """Makes the tokens of an answer not to give less likely: -log(1 - p)."""

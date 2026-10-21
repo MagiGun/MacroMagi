@@ -199,6 +199,8 @@ pub struct AgentChat {
     editing: Option<(usize, String)>,
     renaming: Option<(usize, String)>,
     pub(crate) show_settings: bool,
+    /// What the model thought, shown opened (for every chat; the app's settings keep it).
+    pub(crate) open_thoughts: bool,
     error: Option<String>,
     /// The Magic tab's model as last offered: its weights' and ONNX model's sizes, its text spec
     /// and name – to tell when it changed without keeping a second copy of it to compare.
@@ -817,12 +819,20 @@ impl AgentChat {
         if changed {
             self.save(index);
         }
+        ui.add_space(8.0);
+        ui.separator();
+        ui.label(RichText::new("Every chat").color(theme::text_dim()));
+        row(ui, "Thinking shown opened", &mut |ui| {
+            widgets::toggle(ui, &mut self.open_thoughts)
+                .on_hover_text("What the model thought, shown in full instead of folded under Thought");
+        });
     }
 
     // ---- the messages ----
 
     fn messages(&mut self, ui: &mut Ui) {
         let index = self.current;
+        let open_thoughts = self.open_thoughts;
         let pending = self.pending.as_ref().is_some_and(|(id, _)| self.chats.get(index).is_some_and(|c| &c.id == id));
         let model_name = self.models.get(self.model).map_or("Model".to_owned(), |m| m.name.clone());
         let mut action: Option<(usize, &'static str)> = None;
@@ -949,7 +959,7 @@ impl AgentChat {
                             let mut last_thought = String::new();
                             for (k, step) in message.tools.iter().enumerate() {
                                 if !step.thinking.trim().is_empty() {
-                                    thought(ui, ("step-thinking", n, k), "Thought", &step.thinking);
+                                    thought(ui, ("step-thinking", n, k), "Thought", &step.thinking, open_thoughts);
                                     last_thought = step.thinking.trim().to_owned();
                                 }
                                 tool_step(ui, (n, k), step);
@@ -961,7 +971,7 @@ impl AgentChat {
                                 tool_step(ui, (n, k), &ToolStep::from_old(call, result));
                             }
                             if !message.thinking.trim().is_empty() && message.thinking.trim() != last_thought {
-                                thought(ui, ("thinking", n), "Thought", &message.thinking);
+                                thought(ui, ("thinking", n), "Thought", &message.thinking, open_thoughts);
                             }
                             if !message.text.trim().is_empty() {
                                 answer_text(ui, &message.text);
@@ -1303,12 +1313,14 @@ impl AgentChat {
     }
 }
 
-/// A collapsible span of the model's reasoning.
-fn thought(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, label: &str, text: &str) {
+/// A collapsible span of the model's reasoning, opened to begin with when `open`. Turning `open` on
+/// or off opens or folds every one (each can still be folded or opened by hand).
+fn thought(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, label: &str, text: &str, open: bool) {
     egui::CollapsingHeader::new(
         RichText::new(format!("{}  {label}", icon::BRAIN)).size(12.5).color(theme::text_faint()),
     )
-    .id_salt(id)
+    .id_salt((id, open))
+    .default_open(open)
     .show(ui, |ui| {
         ui.add(
             egui::Label::new(RichText::new(text.trim()).size(13.0).color(theme::text_dim())).wrap().selectable(true),

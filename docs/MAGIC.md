@@ -281,7 +281,7 @@ Each training keeps the weights after every stage in `<project>/checkpoints/`. W
 
 The exported folder's `README.md` explains each file. `python run.py --package` only writes the model file (after training). `MAGI_CORPUS_DIR` says where the corpora are cut into tokens and kept.
 
-**File › Export as Python (experimental)** writes the same folder with `"compile": true` in `plan.json` (or set `MAGI_TRAIN_COMPILE=1`): before training, the trainer times one step as it is and with each layer compiled (`torch.compile`), and keeps the compiled layers only when they give the same loss and are faster. Compiling needs Linux (Colab is Linux) and takes a few minutes; on Windows, or if anything fails, it trains as it is. Only pretraining uses it (its rows all have one length; fine-tuning's change at every step).
+**File › Export as Python (experimental)** writes the same folder with `"compile": true` in `plan.json` (or set `MAGI_TRAIN_COMPILE=1`): before training, the trainer times one step as it is and with each layer compiled (`torch.compile`), and keeps the compiled layers only when they give the same loss and are faster. Compiling needs Linux (Colab is Linux) and takes a few minutes; on Windows, or if anything fails – also later in the run, such as running out of memory while compiling for a new batch size – it trains as it is. Only pretraining uses it (its rows all have one length; fine-tuning's change at every step).
 
 ## Packages: the project folder
 
@@ -315,7 +315,7 @@ The robot button at the top right opens a chat window – a preview of CodeMagi:
 
 - **Models**: the model open on the Magic tab (kept up to date as it trains), or a `.szi` or `.magic` file (*Load model file…*). *Load* and *Unload*.
 - **Chats**: kept in `data/chats/`, each named by the model after its first answer, renamed or deleted at will.
-- **Settings** per chat: the system prompt, thinking, reasoning effort, temperature, the longest answer, the context window, native tools and how many calls (100 by default), and compaction.
+- **Settings** per chat: the system prompt, thinking, reasoning effort, temperature, the longest answer, the context window, native tools and how many calls (100 by default), and compaction. Under *Every chat*, **Thinking shown opened** shows what the model thought in full instead of folded under *Thought* (each one can still be folded).
 - **Attachments** (the paperclip): a small text file goes into the message whole; **pictures** and **documents** (Word, Excel, PowerPoint, PDF, CSV) – and big text files – are named by their path (`Attached: D:/shots/error.png (picture)`), and the model looks at them with `view_image`, opens them with `open_document` or reads them with `read_file`, as its datasets teach it.
 - **Tool calls**: each call shows as a row – its name, its arguments in short, and whether it worked, failed or did not run. Click it for the arguments and the result in full; what the model thought before it shows above it. Calls that change files or run programs ask you first.
 - **Compaction**: a model that learned compaction writes the earlier part of a long chat short when it outgrows the context window.

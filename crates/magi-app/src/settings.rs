@@ -158,6 +158,8 @@ pub struct Settings {
     /// Keep MacroMagi's own window out of screen captures, so it can neither
     /// hide what a macro is looking for nor show up in template images.
     pub hide_from_capture: bool,
+    /// The AI Agent window shows what the model thought opened, not folded.
+    pub agent_open_thoughts: bool,
     /// Run macros without sending any input; the console shows what would be sent.
     pub dry_run: bool,
     /// What the export dialog offers by default.
@@ -223,6 +225,7 @@ impl Default for Settings {
             ui_scale: 1.0,
             always_on_top: false,
             hide_from_capture: true,
+            agent_open_thoughts: false,
             dry_run: false,
             export: ExportChoices::default(),
             show_console: false,

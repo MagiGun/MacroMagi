@@ -2949,7 +2949,9 @@ impl MagiApp {
         if self.agent_chat.open {
             self.agent_chat.set_dir(self.paths.data_dir.join("chats"));
             self.agent_chat.offer_magic_model(self.magic_tab.doc.as_ref().map(|d| &d.file));
+            self.agent_chat.open_thoughts = self.settings.agent_open_thoughts;
             self.agent_chat.show(ctx);
+            self.settings.agent_open_thoughts = self.agent_chat.open_thoughts;
         } else {
             self.agent_chat.release();
         }
