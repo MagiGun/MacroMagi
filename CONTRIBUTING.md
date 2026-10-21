@@ -85,7 +85,8 @@ crates/magi-ml/        preparing pictures for AI models, running them  (CPU or g
 crates/magi-platform/  input, listening, gamepads, capture, sound     (the only OS code)
 crates/magi-engine/    native interpreter, Python bridge, device operations
 crates/magi-app/       the application: UI, controller, command line, the Magic tab, downloads
-runtime/python/        the Python engine (standard library only)
+runtime/python/        the Python engine (standard library only) and the Magic tab's trainer (PyTorch)
+magidb/                MagiDB's pages, published as MagiGun/MagiDB
 docs/                  architecture, formats, guides
 tools/                 scripts that generate documentation
 ```
@@ -162,8 +163,8 @@ Releases are built and published by [`.github/workflows/release.yml`](.github/wo
 2. Tag the commit and push the tag:
 
    ```bash
-   git tag v0.2.0
-   git push origin v0.2.0
+   git tag v0.1.8
+   git push origin v0.1.8
    ```
 
    or run the workflow from *Actions → Release → Run workflow* with the tag name.

@@ -266,7 +266,7 @@ On **Colab**: zip the folder, open `colab.ipynb` (File › Upload notebook), pic
 
 | Colab runtime | What it is | For Magi |
 | --- | --- | --- |
-| *G4 GPU* | An RTX PRO 6000 (96 GB, Blackwell). | The one to use: Magi trains in about a day. |
+| *G4 GPU* | An RTX PRO 6000 (96 GB, Blackwell). | The one to use: Magi trains in about 20 hours. |
 | *A100 GPU* | 40 or 80 GB. | Works; slower than a G4 for its cost. |
 | *L4 GPU* | 24 GB. | Fits with smaller batches; days. |
 | *T4 GPU* | 16 GB, no bfloat16. | Too slow for Magi; fine for vision models and experiments. |
@@ -402,7 +402,7 @@ Not reproduced: DeepSeek's FP4/FP8 arithmetic and their exact sizes.
 
 ## Limits
 
-- **Magi trains on a GPU server**, not on a desktop: about a day on a G4.
+- **Magi trains on a GPU server**, not on a desktop: about 20 hours on a G4.
 - **What it knows of code is what it can read, and the exact way is in MagiDB.** The starter library is small; a page for each library, program and error message the model will meet makes it better at them.
 - **ONNX text models recompute the context for every token.** Models with latent or compressed attention, or hyper-connections, do not run on the native engine yet.
 - **Image descriptions** need PyTorch, transformers and the vision model (Settings › Runtime); without them `view_image` still gives a picture's text and size. Reading text in pictures uses Windows' text recognition.

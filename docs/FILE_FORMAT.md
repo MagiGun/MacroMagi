@@ -29,7 +29,7 @@ presets/<nn>-<name>.mp bundled presets (optional)
 {
   "format": "macromagi.project",
   "version": 1,
-  "app": "0.1.2",
+  "app": "0.1.7",
   "meta": { "name": "Click when ready", "description": "", "author": "" },
   "engine": "auto",
   "graph": {
@@ -285,7 +285,7 @@ A preset is a single JSON file.
 {
   "format": "macromagi.preset",
   "version": 1,
-  "app": "0.1.2",
+  "app": "0.1.7",
   "name": "Rapid fire",
   "description": "",
   "kind": "auto_clicker",
@@ -375,7 +375,7 @@ data/tune/<class>/<file>      fine-tuning pictures of earlier versions (optional
 nt/<tool>/<file>              the model's own native tools (optional)
 ```
 
-Since 0.1.6, compiling a text model writes a Magi package (below) and the workspace's `package` names it; the workspace then leaves out `model/` (`include.model` and `include.weights` false), and opening it takes the model from the package – the path given, or `szi/<file>` beside the workspace. A model asset in a macro always holds its model, and its weights when MacroMagi's native engine runs it.
+Since 0.1.7, compiling a text model writes a Magi package (below) and the workspace's `package` names it; the workspace then leaves out `model/` (`include.model` and `include.weights` false), and opening it takes the model from the package – the path given, or `szi/<file>` beside the workspace. A model asset in a macro always holds its model, and its weights when MacroMagi's native engine runs it.
 
 The weights are in the [safetensors](https://github.com/huggingface/safetensors) layout: an 8-byte header length, a JSON header, then raw little-endian tensors. They are data only; loading them runs no code.
 
@@ -385,7 +385,7 @@ The weights are in the [safetensors](https://github.com/huggingface/safetensors)
 {
   "format": "macromagi.magic",
   "version": 1,
-  "app": "0.1.2",
+  "app": "0.1.7",
   "name": "Ready check",
   "description": "Presses Space when the ready prompt is on screen.",
   "input": { "name": "input", "width": 224, "height": 224, "layout": "nchw", "color": "rgb",
@@ -421,7 +421,7 @@ The weights are in the [safetensors](https://github.com/huggingface/safetensors)
 | `text` | Text models: how they read and write – see below. |
 | `architecture` | The shape of a model trained in MacroMagi, as the trainer builds it: `width`, `heads`, `kv_heads`, `context`, `positions` (`rope` or `learned`), `rope_theta`, optional `hyper_connections` (`{"streams", "sinkhorn"}`) and `mtp` (`{"weight"}`), `prefix_split`, `tied` and `embed_scale` (optional booleans), `layers` (one per layer: `{"attention": {"kind": "full" \| "window" \| "mla" \| "csa" \| "hca" \| "ssm", …}, "ffn": {"kind": "dense" \| "moe" \| "persona", …}, "norm": "pre" \| "sandwich"}`; `full` attention may have `qk_norm`, `bias`, `rotary` and `window`, a `dense` feed-forward `activation`: `swiglu` or `geglu`), `conv` for vision models, and `blocks`: the canvas blocks it was made from, each `{ "kind", "params", "ffn" }`. |
 | `studio` | The Magic tab's canvas: `nodes`, `wires` and `groups` as in a [nodes preset](#kind-nodes), with the Magic tab's block types (`magic.*`, listed in [MAGIC.md](MAGIC.md#blocks)). Setup blocks keep their part of the model in `params.value` (Model Info: `name`, `description`, `author`, `license`, `source`; Text: the `text` object; Tools: the `text.tools` the program carries out; Native Tools: the `text.tools` with `native`; Thinking: `text.thinking`; Reasoning Effort: `text.effort`; Screen Area: `capture`; Answers: `classes`; When It Acts: `action`; Sliders: `settings`; Picture Preparation: `input`), and the description above is what the setup blocks chained into the start say. Files without it get a canvas built from their description. |
-| `gguf` | Before 0.1.7.2: a GGUF model file the model ran with llama.cpp. MacroMagi no longer reads it. |
+| `gguf` | Up to 0.1.5: a GGUF model file the model ran with llama.cpp. MacroMagi no longer reads it. |
 | `datasets` | The text datasets in the archive, by path (`data/text/…`). |
 | `trained` | What training the model went through: `stages` (`pretrain`, `sft`, `rl`, `compaction`, `vision`), `steps`, the final `loss`, `parameters`. |
 | `include` | Also `weights` (`model/weights.safetensors`) and `datasets`. |
@@ -446,7 +446,7 @@ A text model's `text`:
 
 Tokens are the 256 byte values of UTF-8 text (ids 0–255), then – with a learned tokenizer, `"tokenizer": {"kind": "learned", "size": 4096, "merges": [[a, b], …]}` – one token per merge (ids 256 on, in order: merge *i* joins tokens *a* and *b* into token 256 + *i*), then each of `specials` in order; special tags are matched longest first. A learned tokenizer cuts the text between tags into chunks (Python: `rb" ?[A-Za-z\x80-\xff]+| ?[0-9]| ?[^\sA-Za-z0-9\x80-\xff]+|[\r\n]+|[ \t\x0b\x0c]+(?![^\s])|[ \t\x0b\x0c]+"`) and joins each chunk's bytes by the lowest-numbered merge present, all its places at once, until none applies ([`tokenizer.rs`](../crates/magi-core/src/tokenizer.rs)). Without `tokenizer` (or with `"kind": "bytes"`), tokens are bytes. A request is `system_tag system end_tag user_tag request end_tag assistant_tag` (the system part only when there is one), and the answer ends at `end_tag`. The system part is the system prompt, then `Reasoning effort: <level>` (with `effort`), then the tools (with `tool_tag`), separated by blank lines – [MAGIC.md](MAGIC.md#how-text-is-read-and-written) shows it. With `thinking`, a request that does not think ends with an empty `think_tags` pair. Tool calls are `tool_tags.0` + `{"name": …, "arguments": {…}}` + `tool_tags.1`, and a tool's result is `tool_tag result end_tag`. `tool_tag`, `thinking` and `effort` are optional: files without `tool_tag` (made before it) keep their tokens, write calls with `"args"`, and read results as user turns. The ONNX model takes `tokens` (int64, `[1, length]`) and gives `logits` (`[1, length, vocabulary]`).
 
-Since 0.1.6, `text.tools[].native` marks a native tool, `memory` is the Memory & Cache block's settings (`precision`, `hot_mb`, `warm_mb`, `disk_dir`, `disk_gb`, `persist_prefix`, `read_blocks`, `flash_attention`), `architecture.rope_scaling` is the Context Scaler's (`kind`: `yarn`, `ntk` or `none`; `factor`, `original`, `target`), `trained.system` is the system prompt the model was trained with, and `package` names its Magi package.
+Since 0.1.7, `text.tools[].native` marks a native tool, `memory` is the Memory & Cache block's settings (`precision`, `hot_mb`, `warm_mb`, `disk_dir`, `disk_gb`, `persist_prefix`, `read_blocks`, `flash_attention`), `architecture.rope_scaling` is the Context Scaler's (`kind`: `yarn`, `ntk` or `none`; `factor`, `original`, `target`), `trained.system` is the system prompt the model was trained with, and `package` names its Magi package.
 
 A model asset inside a `.magi` file is the same archive with `training`, `finetune` and the datasets left out, and the weights too unless the native engine runs the model.
 
@@ -466,7 +466,7 @@ README.md             what it is
 
 `model.json` is `{"format": "magi.szi", "version": 2, "app", "family", "files": {"weights", "onnx", "native_tools"}, …}` followed by the fields of `magic.json` (name, `kind`, `text`, `architecture`, `memory`, `trained`…) without the canvas and the datasets. A native tool with `"confirm": true` (it writes files or runs programs) runs only when the user allows each call; one whose `run.kind` is `host` has no program of its own – the program running the model carries it out, by its `entry` name (MacroMagi's `view_image`) – and other files in its folder are helpers it may use (`describe.py`). Tool results go back to the model as the tool printed them, keys in the tool's order. `family` is `Magi-F` (up to a billion parameters), `Magi-S` (up to thirty billion) or `Magi-T`. The weights and the ONNX model are stored, not compressed, so a reader can take them straight from the file. MacroMagi opens it with File › Open or in the AI Agent window, takes it as a base model, and CodeMagi will run it.
 
-**Version 1** (0.1.6 to 0.1.7.1) was a folder: a `<name>.szi` JSON description – the same fields, `"version": 1` – beside `weights.safetensors`, `model.onnx` and `nt/`. MacroMagi still opens it (the folder or its `.szi` file); a workspace saved with it finds its package in `szi/` beside it.
+**Version 1** (development builds before the 0.1.7 release) was a folder: a `<name>.szi` JSON description – the same fields, `"version": 1` – beside `weights.safetensors`, `model.onnx` and `nt/`. MacroMagi still opens it (the folder or its `.szi` file); a workspace saved with it finds its package in `szi/` beside it.
 
 ## Shared vocabulary
 

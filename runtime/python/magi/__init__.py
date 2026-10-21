@@ -16,7 +16,7 @@ Layout:
     api.py          the `magi` object available inside Python Script blocks
 """
 
-__version__ = "0.1.5"
+__version__ = "0.1.7"
 
 # Bumped whenever a message changes shape. The app refuses to talk to a
 # runtime that speaks a different protocol version.

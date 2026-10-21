@@ -16,7 +16,7 @@ magi-app                egui UI, controller, CLI, the Magic tab
 ├── magi-engine         runs macros
 │   ├── magi-vision     pictures: image and color search
 │   ├── magi-audio      sound: loudness, pitch, recognising sounds
-│   ├── magi-ml         AI models: preparing pictures, running them
+│   ├── magi-ml         AI models: running them, and native tools
 │   └── magi-core
 ├── magi-ml
 ├── magi-platform       the only crate that talks to the OS
@@ -26,10 +26,10 @@ magi-app                egui UI, controller, CLI, the Magic tab
 
 | Crate | Owns | Must not |
 | --- | --- | --- |
-| `magi-core` | Graphs, block definitions, the input vocabulary, recordings, assets, the `.magi`, `.mp` and `.magic` formats, the `Host` interface | Touch the OS or draw anything |
+| `magi-core` | Graphs, block definitions, the input vocabulary, recordings, assets, the `.magi`, `.mp`, `.magic` and `.szi` formats, native tool definitions, the `Host` interface | Touch the OS or draw anything |
 | `magi-vision` | Template matching and color search on pixel buffers | Know where pixels come from |
 | `magi-audio` | Loudness, pitch, sound fingerprints and matching; decoding uploaded sound files | Know where sound comes from |
-| `magi-ml` | Running small vision models (ONNX): preparing a picture the way a model expects, the built-in engine, ONNX Runtime when it has been downloaded, choosing the CPU or a graphics card | Capture the screen or know about blocks |
+| `magi-ml` | Running models: Magi text models on the native engine (from their weights, with a key/value cache) and the agent loop with native tools; vision models (ONNX) – preparing a picture the way a model expects, the built-in engine, ONNX Runtime when it has been downloaded, choosing the CPU or a graphics card | Capture the screen or know about blocks |
 | `magi-platform` | Sending input, listening for input, gamepads, screen capture, listening to sound, notifications, the clipboard, listing graphics cards and sound inputs | Know about graphs or blocks |
 | `magi-engine` | Running a graph: the native interpreter, the Python bridge, shared device operations | Touch the OS directly (it goes through `Host`) |
 | `magi-app` | The window, the controller thread, the command line, the Magic tab and its importer, optional downloads | Contain block behaviour |
@@ -172,12 +172,12 @@ Adding a capability a macro can use means adding a method here, implementing it 
 
 ## AI models
 
-[`magi-ml`](../crates/magi-ml/src/lib.rs) runs a model on a prepared picture and knows nothing about screens or blocks. It has two engines:
+[`magi-ml`](../crates/magi-ml/src/lib.rs) runs models and knows nothing about screens or blocks. Text models are below (*Text models*); a vision model runs on a prepared picture, on one of two engines:
 
 | Engine | What | When |
 | --- | --- | --- |
 | Built-in | [tract](https://github.com/sonos/tract), pure Rust, compiled in | Always available; the CPU only |
-| ONNX Runtime | Microsoft's runtime, loaded from the data folder at run time | Once downloaded on the AI settings page; the CPU, or on Windows any DirectX 12 graphics card through DirectML |
+| ONNX Runtime | Microsoft's runtime, loaded from the data folder at run time | Once downloaded under *Settings › Runtime*; the CPU, or on Windows any DirectX 12 graphics card through DirectML |
 
 ONNX Runtime is loaded with `ort`'s *load-dynamic* feature: MacroMagi does not link it, so the executable stays a single file and works without it. A process can load it once, so installing or removing it takes effect after a restart.
 
