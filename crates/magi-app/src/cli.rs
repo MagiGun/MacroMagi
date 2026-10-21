@@ -19,10 +19,11 @@ use crate::paths::Paths;
 use crate::settings::{Settings, Tab};
 
 pub const HELP: &str = "\
-MacroMagi – auto clicker and node-based macro editor
+MacroMagi – auto clicker, node-based macro editor and AI model workshop
 
 USAGE
-    macromagi [FILE.magi]              Open the editor, optionally with a macro
+    macromagi [FILE]                   Open the editor, optionally with a macro (.magi)
+                                       or a model (.magic, .szi: in the Magic tab)
     macromagi run FILE.magi [OPTIONS]  Run a macro without opening the window
     macromagi nodes                    Print every node definition as JSON
     macromagi example N FILE.magi      Save built-in example number N (1, 2, …) as a file

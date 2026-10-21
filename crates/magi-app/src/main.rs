@@ -1,4 +1,4 @@
-//! MacroMagi – an auto clicker and node-based macro editor.
+//! MacroMagi – an auto clicker, node-based macro editor and AI model workshop.
 //!
 //! This crate is the desktop application. It contains the user interface and
 //! the glue between it and the engine; everything else lives in the library

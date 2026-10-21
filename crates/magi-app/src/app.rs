@@ -356,10 +356,10 @@ impl MagiApp {
         let ctx = cc.egui_ctx.clone();
         magi_ml::tools::show_approvals(Box::new(move || ctx.request_repaint()));
 
-        let magic = options
-            .open
-            .as_ref()
-            .is_some_and(|path| path.extension().is_some_and(|e| e.eq_ignore_ascii_case(magi_core::magic::EXTENSION)));
+        let magic = options.open.as_ref().is_some_and(|path| {
+            path.extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case(magi_core::magic::EXTENSION) || e.eq_ignore_ascii_case("szi"))
+        });
         if let Some(path) = options.open.as_ref().filter(|_| magic) {
             // A model: it opens in the Magic tab.
             match magi_core::szi::open(path) {
