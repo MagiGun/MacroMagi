@@ -53,7 +53,21 @@ pub struct MagicDoc {
     saved: Option<(MagicModel, u64)>,
     /// The description and revision as last put into the macro, where it is kept too.
     kept: Option<(MagicModel, u64)>,
+    /// The model (`fingerprint`) the package `.szi` holds, to write it again only when it changed.
+    packaged: Option<u64>,
     history: History<Snapshot>,
+}
+
+/// A quick fingerprint of a model's weights and ONNX model: their lengths and their first and last
+/// bytes – enough to tell a model trained again, without reading a large one through.
+fn fingerprint(file: &MagicFile) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for bytes in [&file.weights, &file.onnx] {
+        let edge = bytes.len().min(1 << 16);
+        (bytes.len(), &bytes[..edge], &bytes[bytes.len() - edge..]).hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 impl MagicDoc {
@@ -72,7 +86,11 @@ impl MagicDoc {
             training: file.model.training.clone(),
             finetune: file.model.finetune.clone(),
         });
-        let mut doc = Self { file, path, notes, shape, studio, revision: 0, saved: None, kept: None, history };
+        // A workspace opened with its package holds the package's model.
+        let packaged =
+            file.model.package.as_ref().filter(|p| std::path::Path::new(p).is_file()).map(|_| fingerprint(&file));
+        let mut doc =
+            Self { file, path, notes, shape, studio, revision: 0, saved: None, kept: None, packaged, history };
         doc.sync_canvas();
         doc.history = History::new(&doc.snapshot());
         doc.saved = doc.path.as_ref().map(|_| (doc.file.model.clone(), 0));
@@ -264,22 +282,20 @@ impl MagicDoc {
         // The Magi model: one .szi file with its weights and its native tools.
         if params.szi && trained {
             let szi = project.join(format!("{stem}.{}", magi_core::szi::EXTENSION));
-            magi_core::szi::write(&self.file, &szi, params.onnx)
-                .map_err(|e| format!("Could not write the Magi model: {e}"))?;
-            self.file.model.package = Some(szi.display().to_string());
+            self.write_szi(&szi, params.onnx)?;
             written.push(szi);
         }
-        // The workspace: canvas, setup, datasets and pictures – the model only when no .szi holds it.
+        // The workspace: canvas, setup, and the datasets and pictures if chosen – never the model,
+        // which goes into the .szi beside it (written too when the .szi switch is off).
         if params.magic {
             let include = &mut self.file.model.include;
-            let packaged = self.file.model.package.as_ref().is_some_and(|p| std::path::Path::new(p).is_file());
-            (include.model, include.weights) = (!packaged, !packaged && params.weights);
             include.datasets = params.datasets;
             (include.training, include.finetune) = (params.pictures, params.pictures);
             include.blocks = params.blocks;
             let path = project.join(format!("{stem}.magic"));
-            self.file.save(&path).map_err(|e| format!("Could not save {}: {e}", path.display()))?;
-            self.mark_saved(path.clone());
+            if let Some(szi) = self.save_workspace(&path)? {
+                written.push(szi);
+            }
             written.insert(0, path);
         }
 
@@ -291,6 +307,41 @@ impl MagicDoc {
             written.push(onnx);
         }
         Ok((written, skipped))
+    }
+
+    /// Writes the trained model as a `.szi` (with its ONNX model when it needs it, or `with_onnx`),
+    /// and makes it the workspace's package.
+    fn write_szi(&mut self, szi: &std::path::Path, with_onnx: bool) -> Result<(), String> {
+        let with_onnx = with_onnx || magi_core::szi::needs_onnx(&self.file);
+        magi_core::szi::write(&self.file, szi, with_onnx)
+            .map_err(|e| format!("Could not write the Magi model: {e}"))?;
+        self.file.model.package = Some(szi.display().to_string());
+        self.packaged = Some(fingerprint(&self.file));
+        Ok(())
+    }
+
+    /// Saves the workspace (`.magic`): the canvas and the setup, and the datasets and pictures as
+    /// its `include` says – never the model. A trained model is kept in a `.szi` of the same name
+    /// beside it, written when it is not there yet or the model changed; the workspace names it.
+    /// Returns the `.szi` when one was written.
+    pub fn save_workspace(&mut self, path: &std::path::Path) -> Result<Option<PathBuf>, String> {
+        let trained = !self.file.weights.is_empty() || !self.file.onnx.is_empty();
+        let mut written = None;
+        if trained {
+            let szi = path.with_extension(magi_core::szi::EXTENSION);
+            let current =
+                self.file.model.package.as_ref().is_some_and(|p| std::path::Path::new(p) == szi && szi.is_file())
+                    && self.packaged == Some(fingerprint(&self.file));
+            if !current {
+                self.write_szi(&szi, false)?;
+                written = Some(szi);
+            }
+        }
+        let include = &mut self.file.model.include;
+        (include.model, include.weights) = (false, false);
+        self.file.save(path).map_err(|e| format!("Could not save {}: {e}", path.display()))?;
+        self.mark_saved(path.to_path_buf());
+        Ok(written)
     }
 
     pub fn is_dirty(&self) -> bool {

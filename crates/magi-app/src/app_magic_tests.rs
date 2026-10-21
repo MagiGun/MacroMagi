@@ -462,3 +462,23 @@ fn write_the_example_models() {
         doc.file.save(&dir.join(name)).unwrap();
     }
 }
+
+/// A workspace (`.magic`) never holds the model: saving a trained one writes the model as a `.szi`
+/// beside it, which opening the workspace reads back; saving again leaves an unchanged `.szi` be.
+#[test]
+fn a_saved_workspace_keeps_its_model_in_a_szi_beside_it() {
+    let dir = std::env::temp_dir().join(format!("magi-workspace-szi-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut doc = MagicDoc::new(crate::magic::new_model(true), None, Vec::new());
+    doc.file.weights = vec![7; 64];
+    let path = dir.join("Model.magic");
+    let szi = doc.save_workspace(&path).unwrap().expect("the model is written");
+    assert_eq!(szi, dir.join("Model.szi"));
+    let workspace = magi_core::magic::MagicFile::load(&path).unwrap();
+    assert!(workspace.weights.is_empty() && workspace.onnx.is_empty(), "no model in the .magic");
+    assert_eq!(magi_core::szi::open(&path).unwrap().weights, vec![7; 64], "opening it reads the .szi");
+    assert!(doc.save_workspace(&path).unwrap().is_none(), "an unchanged model is not written again");
+    doc.file.weights = vec![8; 64];
+    assert!(doc.save_workspace(&path).unwrap().is_some(), "a model trained again is");
+    let _ = std::fs::remove_dir_all(&dir);
+}

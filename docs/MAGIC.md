@@ -5,7 +5,7 @@ The Magic tab builds, trains, tries and packages AI models. It uses a canvas lik
 - **Magi** is MacroMagi's text model: an **agent**. It knows how to work – think, plan, look things up, use tools, check – not facts or exact code. When it needs the exact way to do something it searches **MagiDB**, a library of linked Markdown pages; it reads and changes files, runs commands, opens documents and looks at pictures through its **native tools**, tens of calls for one request. It runs in MacroMagi (the AI Agent window, the AI Agent block) and CodeMagi.
 - **Vision models** look at part of the screen and pick an answer. The **AI Watch** and **AI Model** blocks run them.
 
-A `.magic` file is the **workspace**: the canvas, the setup, the datasets and pictures. A trained Magi model is a **Magi model** file (`.szi`): one file with its weights and its native tools. The file formats are in [FILE_FORMAT.md](FILE_FORMAT.md#magic--ai-models).
+A `.magic` file is the **workspace**: the canvas and the setup, and as chosen the datasets and pictures – never the model. A trained model is a **Magi model** file (`.szi`): one file with its weights and its native tools. The file formats are in [FILE_FORMAT.md](FILE_FORMAT.md#magic--ai-workspaces).
 
 ## Contents
 
@@ -289,7 +289,7 @@ The exported folder's `README.md` explains each file. `python run.py --package` 
 
 | Path | When | For |
 | --- | --- | --- |
-| `<name>.magic` | *.magic workspace* | The **workspace**: the canvas, setup, datasets and pictures, and where its package is. With a package, it holds no model. |
+| `<name>.magic` | *.magic workspace* | The **workspace**: the canvas and setup, the datasets and pictures if chosen, and where its model is. It never holds the model: that is the `.szi` beside it, saved with it. |
 | `<name>.szi` | *Magi Model (.szi)* | The **Magi model**, in one file (a zip archive): its description, its weights (the native engine runs these), its native tools – and its ONNX model when *ONNX file* is on. Open it in MacroMagi (File › Open, or the AI Agent window), use it as a base model, upload it anywhere, or run it in CodeMagi. |
 | `onnx/<name>.onnx` | *ONNX file* | ONNX runtimes. Vision models run from it. |
 

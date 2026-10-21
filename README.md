@@ -399,7 +399,7 @@ project.json        the macro: a readable text file with the blocks, wires, grou
 assets/….png        images linked from blocks
 assets/….json       recordings linked from blocks
 assets/….wav        sounds linked from Sound Recognition blocks
-assets/….magic      AI models linked from AI blocks
+assets/….szi        AI models linked from AI blocks
 presets/….mp        presets bundled with the macro (optional)
 ```
 
@@ -409,9 +409,9 @@ presets/….mp        presets bundled with the macro (optional)
 
 A **`.mp`** file is a preset: a small JSON file holding either Auto Clicker settings or a group of configured blocks (with the images, recordings, sounds and models they use embedded). Presets live in `data/presets`.
 
-A **`.magic`** file is an AI workspace: a ZIP archive with a readable `magic.json` describing the model and how to use it (its answers or its tokens, chat tags and tools, its architecture, the Magic tab's canvas), and – as chosen in the Compile Package block – its weights, its text datasets and its pictures, and the ONNX model a vision model runs from.
+A **`.magic`** file is a Magic tab workspace: a ZIP archive with a readable `magic.json` describing the model and how to use it (its answers or its tokens, chat tags and tools, its architecture, the Magic tab's canvas), and – as chosen in the Compile Package block – its text datasets and its pictures. It never holds the model itself: saving it writes a trained model as a `.szi` of the same name beside it.
 
-A **`.szi`** file is a Magi model: one ZIP archive with its description, its weights and its native tools, which the AI Agent window, macros and CodeMagi run.
+A **`.szi`** file is an AI model: one ZIP archive with its description, its weights (or, for a vision model, its ONNX model) and its native tools, which the AI Agent window, macros and CodeMagi run. Macros keep their models as `.szi` files inside them.
 
 All four formats are specified in [docs/FILE_FORMAT.md](docs/FILE_FORMAT.md). Files from earlier versions open unchanged.
 
@@ -532,7 +532,7 @@ Contributions are welcome – bug reports, platform testing (especially Linux an
 MacroMagi sends real input to your computer.
 
 - Know your stop hotkey (`F8`) before you run a macro that loops. Try unfamiliar macros with **Dry run** first.
-- A `.magi` file from someone else can contain a Python Script block, which is code that runs with your permissions. Read it before you run it, exactly as you would any script. A `.magic` file contains no code (its weights are plain numbers, never pickled Python), but an AI Watch block presses keys on its own, and so does an AI Agent with *Carry out its tool calls* on – try a new model with those off first.
+- A `.magi` file from someone else can contain a Python Script block, which is code that runs with your permissions. Read it before you run it, exactly as you would any script. A model's weights are plain numbers, never pickled Python, but a `.szi`'s native tools are programs that run when the model calls them (those that change files or run commands ask first), an AI Watch block presses keys on its own, and so does an AI Agent with *Carry out its tool calls* on – try a new model with those off first.
 - Sound blocks can listen to your microphone while a macro runs them. Nothing heard is stored or sent anywhere.
 - Automation is against the rules of many online games and services. Whether you may use it is between you and them.
 

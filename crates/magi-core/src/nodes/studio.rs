@@ -1693,7 +1693,7 @@ pub fn registry() -> Registry {
         )
         .param(
             ParamDef::new("magic", ".magic workspace", ParamKind::Bool)
-                .help("The canvas and setup, to open and train again. It holds the model too when no .szi is saved."),
+                .help("The canvas and setup, to open and train again – never the model, which is the .szi beside it (saved with it)."),
         )
         .param(ParamDef::new("datasets", "With the datasets", ParamKind::Bool).show_if("magic", true))
         .param(ParamDef::new("pictures", "With the pictures", ParamKind::Bool).show_if("magic", true))

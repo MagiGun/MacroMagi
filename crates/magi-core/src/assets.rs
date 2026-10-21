@@ -68,7 +68,7 @@ impl AssetKind {
             AssetKind::Image => "png",
             AssetKind::Recording => "json",
             AssetKind::Audio => "wav",
-            AssetKind::Model => crate::magic::EXTENSION,
+            AssetKind::Model => crate::szi::EXTENSION,
         }
     }
 }

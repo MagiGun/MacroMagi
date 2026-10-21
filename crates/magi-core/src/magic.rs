@@ -1280,24 +1280,16 @@ impl MagicFile {
         Self::read_from(std::io::Cursor::new(bytes))
     }
 
-    /// The file as a macro keeps it: the model and its configuration, without
-    /// the training data.
+    /// The model as a macro keeps it: a `.szi` (the model, its configuration and native tools –
+    /// not the canvas or the training data). Text models the native engine runs go with their
+    /// weights alone; other models with their ONNX model alone.
     pub fn for_macro(&self) -> Result<Vec<u8>> {
         let mut copy = self.clone();
-        // Text models the native engine runs go with their weights alone: it runs them from those, fast.
-        let native = self.model.architecture.as_ref().is_some_and(|a| a.native_problem().is_none());
-        let weights_alone = native && !self.weights.is_empty();
-        copy.model.include = Includes {
-            model: !weights_alone,
-            blocks: true,
-            training: false,
-            finetune: false,
-            weights: native,
-            datasets: false,
-        };
-        // The canvas is for making the model, not for using it.
-        copy.model.studio = None;
-        copy.to_bytes()
+        let with_onnx = crate::szi::needs_onnx(self);
+        if with_onnx && !copy.onnx.is_empty() {
+            copy.weights.clear();
+        }
+        crate::szi::to_bytes(&copy, with_onnx)
     }
 
     pub fn save(&self, path: &std::path::Path) -> Result<()> {
@@ -1481,9 +1473,10 @@ To use one"
         assert_eq!(back.model.kind, ModelKind::Text);
         assert_eq!(back.weights, [1, 2, 3]);
         assert!(back.data.contains_key("data/text/chat.jsonl"));
-        // A macro keeps neither the weights, the datasets nor the canvas.
-        let in_macro = MagicFile::from_bytes(&file.for_macro().unwrap()).unwrap();
-        assert!(in_macro.weights.is_empty() && in_macro.data.is_empty() && in_macro.model.studio.is_none());
+        // A macro keeps the model as a .szi: neither the datasets nor the canvas.
+        let in_macro = crate::szi::from_bytes(&file.for_macro().unwrap()).unwrap();
+        assert!(in_macro.data.is_empty() && in_macro.model.studio.is_none() && in_macro.model.datasets.is_empty());
+        assert_eq!(in_macro.weights, [1, 2, 3]);
         // Files from before text models open as vision models.
         let old: MagicModel = serde_json::from_str(r#"{ "name": "Old" }"#).unwrap();
         assert_eq!(old.kind, ModelKind::Vision);
@@ -1549,7 +1542,7 @@ To use one"
         let back = MagicFile::from_bytes(&file.to_bytes().unwrap()).unwrap();
         assert_eq!(back, file);
 
-        let slim = MagicFile::from_bytes(&file.for_macro().unwrap()).unwrap();
+        let slim = crate::szi::from_bytes(&file.for_macro().unwrap()).unwrap();
         assert!(slim.data.is_empty() && slim.model.training.is_empty());
         assert_eq!(slim.onnx, vec![1, 2, 3]);
         assert!(MagicFile::from_bytes(b"not a zip").is_err());

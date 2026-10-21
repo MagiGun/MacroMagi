@@ -1,10 +1,11 @@
 # File formats
 
-MacroMagi has three file types: **`.magi`** (a macro), **`.mp`** (a preset) and **`.magic`** (an AI model). All are designed to be readable, diffable and easy to produce with other tools.
+MacroMagi has four file types: **`.magi`** (a macro, and as chosen your settings and presets), **`.mp`** (a macro or Auto Clicker preset), **`.magic`** (a Magic tab workspace, and as chosen its datasets and pictures) and **`.szi`** (an AI model). A `.magi` can carry presets and models inside it; a `.magic` never carries the model – it names the `.szi` beside it. All are designed to be readable, diffable and easy to produce with other tools.
 
 - [`.magi` – projects](#magi--projects)
 - [`.mp` – presets](#mp--presets)
-- [`.magic` – AI models](#magic--ai-models)
+- [`.magic` – AI workspaces](#magic--ai-workspaces)
+- [`.szi` – Magi models](#szi--magi-models)
 - [Shared vocabulary](#shared-vocabulary)
 - [Versioning](#versioning)
 
@@ -17,7 +18,7 @@ project.json           required – the macro
 assets/<id>.png        images
 assets/<id>.json       recordings
 assets/<id>.wav        sounds (for Sound Recognition)
-assets/<id>.magic      AI models (for the AI blocks)
+assets/<id>.szi        AI models (for the AI blocks)
 presets/<nn>-<name>.mp bundled presets (optional)
 ```
 
@@ -174,7 +175,7 @@ Wires that refer to missing nodes are dropped on load.
 | `image` | `assets/<id>.png` | A PNG image. |
 | `recording` | `assets/<id>.json` | A [recording](#recordings). |
 | `audio` | `assets/<id>.wav` | A sound to listen for: a 16-bit mono WAV file, 16 kHz, at most 10 seconds. Uploaded MP3, OGG and FLAC files are converted to this. |
-| `model` | `assets/<id>.magic` | An AI model: a [`.magic` file](#magic--ai-models) without training pictures. |
+| `model` | `assets/<id>.szi` | An AI model: a [`.szi` file](#szi--magi-models). Macros saved before 0.1.8 hold a `.magic` file with the model instead; it is still read. |
 
 Blocks refer to assets by `id` in their parameters (`"image": "img-…"`, `"recording": "rec-1"`, `"sound": "snd-…"`, `"model": "mdl-…"`). Image, sound and model ids are derived from the content, so the same picture, sound or model is stored once.
 
@@ -360,9 +361,9 @@ Missing fields take their defaults. Files from the first version, which had only
 
 A nodes preset may also carry `groups` whose blocks are all in it. When it is inserted, its nodes get fresh ids and its assets are imported (images, sounds and models are de-duplicated by content). Variables are not part of a preset: settings bound to a variable the receiving macro does not have use their defaults until it is created. This is also the format MacroMagi puts on the clipboard when blocks are copied, prefixed with `macromagi-nodes:`.
 
-## `.magic` – AI workspaces and models
+## `.magic` – AI workspaces
 
-A `.magic` file is a ZIP archive: a Magic tab **workspace** (the canvas, the setup, the datasets and pictures) and, unless a Magi package holds it, the AI model itself – a vision model or a text model. The Magic tab reads and writes it; macros embed it, with the model, as a `model` asset.
+A `.magic` file is a ZIP archive: a Magic tab **workspace** – the canvas and the setup, and, as chosen, the datasets and pictures. It never holds the model: saving a trained model's workspace writes the model as a `.szi` of the same name beside it, and `package` names it. Files from before 0.1.8 may still hold the model (`model/`), and open as they are.
 
 ```text
 magic.json                    required – the description below

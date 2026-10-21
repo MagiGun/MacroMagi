@@ -8,6 +8,7 @@ File-format changes are called out explicitly; see [docs/FILE_FORMAT.md](docs/FI
 
 ### Changed
 
+- **Each file has one job.** A `.magic` workspace never holds the model: saving it writes a trained model as a `.szi` of the same name beside it (again only when the model changed), and Compile Package does the same. Macros keep their AI models as `.szi` files (`assets/<id>.szi`). **File format:** older `.magic` files with a model inside, and macros with `.magic` model assets, still open.
 - The document tools name file types (.docx, .xlsx, .pptx, .pdf, .csv) in their descriptions, messages and MagiDB pages.
 
 ### Fixed

@@ -749,7 +749,7 @@ impl MagiApp {
             }
             MagicPending::OpenModel(asset) => {
                 let Some(bytes) = self.doc.project.assets.model(&asset).cloned() else { return };
-                match magi_core::magic::MagicFile::from_bytes(&bytes) {
+                match magi_core::szi::model_from_bytes(&bytes) {
                     Ok(file) => {
                         let mut doc = MagicDoc::new(file, None, Vec::new());
                         doc.mark_kept();
@@ -795,14 +795,13 @@ impl MagiApp {
         if doc.file.model.blocks.is_none() {
             doc.file.model.blocks = Some(crate::magic::starter_blocks(&doc.file.model, "", &self.registry));
         }
-        // A workspace whose model is in a package leaves the model out.
-        let packaged = doc.file.model.package.as_ref().is_some_and(|p| std::path::Path::new(p).is_file());
-        doc.file.model.include.model = !packaged;
-        doc.file.model.include.weights = !packaged;
-        match doc.file.save(&path) {
-            Ok(()) => {
-                doc.mark_saved(path.clone());
-                self.toast(format!("Saved {}", path.display()));
+        // The workspace never holds the model: a trained one goes into a .szi beside it.
+        match doc.save_workspace(&path) {
+            Ok(szi) => {
+                self.toast(match szi {
+                    Some(szi) => format!("Saved {} and the model, {}", path.display(), szi.display()),
+                    None => format!("Saved {}", path.display()),
+                });
                 true
             }
             Err(error) => {

@@ -914,7 +914,7 @@ fn model_description(project: &Project, id: &str) -> Option<magi_core::magic::Ma
             .entry(id.to_owned())
             .or_insert_with(|| {
                 let bytes = project.assets.model(id)?;
-                magi_core::magic::MagicFile::from_bytes(bytes).ok().map(|file| file.model)
+                magi_core::szi::model_from_bytes(bytes).ok().map(|file| file.model)
             })
             .clone()
     })

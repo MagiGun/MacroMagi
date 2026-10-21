@@ -169,6 +169,18 @@ fn readme(manifest: &Manifest, native: &[&str], with_onnx: bool) -> String {
     text
 }
 
+/// Whether a `.szi` of this model needs its ONNX model: everything but a text model the native
+/// engine runs from its weights.
+pub fn needs_onnx(file: &MagicFile) -> bool {
+    let native = file.model.architecture.as_ref().is_some_and(|a| a.native_problem().is_none());
+    !(native && !file.weights.is_empty())
+}
+
+/// A model as a macro keeps it: a `.szi` – or, in macros saved before 0.1.8, a `.magic`.
+pub fn model_from_bytes(bytes: &[u8]) -> Result<MagicFile> {
+    from_bytes(bytes).or_else(|_| MagicFile::from_bytes(bytes))
+}
+
 /// Reads a `.szi` model: the file, or a version 1 folder or its description file.
 pub fn read(path: &Path) -> Result<MagicFile> {
     if path.is_dir() {

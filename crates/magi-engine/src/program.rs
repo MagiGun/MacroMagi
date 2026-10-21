@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use magi_audio::Fingerprint;
 use magi_core::assets::AssetStore;
 use magi_core::graph::{Graph, Node, NodeId};
-use magi_core::magic::{MagicFile, MagicModel, ModelKind};
+use magi_core::magic::{MagicModel, ModelKind};
 use magi_core::nodes::flow::DefineParams;
 use magi_core::nodes::{EngineSupport, NodePorts, Registry, ids};
 use magi_core::project::Project;
@@ -143,12 +143,12 @@ impl Program {
             return Ok(Arc::clone(model));
         }
         let bytes = self.assets.model(id).ok_or_else(|| EngineError::new(format!("model `{id}` is missing")))?;
-        let file = MagicFile::from_bytes(bytes).map_err(|e| EngineError::new(e.to_string()))?;
+        let file = magi_core::szi::model_from_bytes(bytes).map_err(|e| EngineError::new(e.to_string()))?;
         if file.model.kind == ModelKind::Text {
             return Err(EngineError::new("this is a text model: run it with an AI Agent block"));
         }
         if file.onnx.is_empty() {
-            return Err(EngineError::new("this .magic file does not include the model itself"));
+            return Err(EngineError::new("this model file does not include the model itself"));
         }
         let model = magi_ml::Model::load(&file.onnx, &file.model.input).map_err(|e| EngineError::new(e.0))?;
         let loaded = Arc::new(LoadedModel { spec: file.model, model: Mutex::new(model) });
@@ -165,7 +165,7 @@ impl Program {
             return Ok(Arc::clone(model));
         }
         let bytes = self.assets.model(id).ok_or_else(|| EngineError::new(format!("model `{id}` is missing")))?;
-        let file = MagicFile::from_bytes(bytes).map_err(|e| EngineError::new(e.to_string()))?;
+        let file = magi_core::szi::model_from_bytes(bytes).map_err(|e| EngineError::new(e.to_string()))?;
         let Some(spec) = file.model.text.clone().filter(|_| file.model.kind == ModelKind::Text) else {
             return Err(EngineError::new("this is a vision model: run it with an AI Watch or AI Model block"));
         };
