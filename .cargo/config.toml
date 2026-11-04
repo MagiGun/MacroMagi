@@ -1,0 +1,5 @@
+# `cargo tidy`: deletes the debug and test builds (target/debug), which pile up
+# old copies as dependencies and settings change. Release builds and the app's
+# data folder (target/release) are kept; the next debug build starts fresh.
+[alias]
+tidy = "clean --profile dev"

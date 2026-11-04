@@ -59,10 +59,17 @@ unsafe_op_in_unsafe_fn = "warn"
 dbg_macro = "warn"
 todo = "warn"
 
+# Debug builds keep file and line numbers (for panics and backtraces), not full
+# debugger data: that data was most of a debug build's tens of gigabytes.
+[profile.dev]
+debug = "line-tables-only"
+
 # Dependencies are optimised even in debug builds: egui text layout and image
-# decoding are painfully slow at opt-level 0, and they rarely need debugging.
+# decoding are painfully slow at opt-level 0, and they rarely need debugging –
+# so they carry no debug data at all.
 [profile.dev.package."*"]
 opt-level = 2
+debug = false
 
 # Template matching is a tight numeric loop; unoptimised it takes seconds.
 [profile.dev.package.magi-vision]
