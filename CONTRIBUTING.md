@@ -47,7 +47,10 @@ cargo test --workspace                     # all tests
 cargo fmt --all                            # format
 cargo clippy --workspace --all-targets     # lint; must be warning-free
 cargo build --release                      # the optimised single-file build
+cargo tidy                                 # delete the debug and test builds (target/debug)
 ```
+
+Debug builds keep only file and line numbers, and dependencies none, so they stay a few gigabytes. Old copies still pile up in `target/debug` as dependencies and settings change – Cargo never deletes them – so run `cargo tidy` now and then; release builds are kept.
 
 Tests that touch the real machine are ignored by default. The platform tests move the pointer by zero pixels and measure a screenshot without keeping it; the hotkey tests press F13 and F14 (keys with no default action) with the controller in dry-run mode:
 
