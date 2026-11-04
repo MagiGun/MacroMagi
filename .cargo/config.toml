@@ -3,3 +3,9 @@
 # data folder (target/release) are kept; the next debug build starts fresh.
 [alias]
 tidy = "clean --profile dev"
+
+# The compiler's and linker's temporary files stay in the project (.cache/tmp,
+# ignored by git) rather than in the system's temp folder on another drive.
+[env]
+TMP = { value = ".cache/tmp", relative = true }
+TEMP = { value = ".cache/tmp", relative = true }

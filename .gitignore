@@ -1,5 +1,7 @@
 # Rust
 /target/
+# Caches kept beside the project: Cargo, rustup, pip, Hugging Face, temporary files
+/.cache/
 **/*.rs.bk
 *.pdb
 
