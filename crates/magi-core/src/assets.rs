@@ -16,7 +16,7 @@ pub enum AssetData {
     Recording(Arc<Recording>),
     /// A sound to listen for, as a WAV file (mono, 16-bit).
     Audio(Arc<Vec<u8>>),
-    /// An AI model: a `.magic` file without its training data.
+    /// An AI model of an earlier version, kept as it is so its macro opens and saves unchanged.
     Model(Arc<Vec<u8>>),
 }
 
@@ -68,7 +68,7 @@ impl AssetKind {
             AssetKind::Image => "png",
             AssetKind::Recording => "json",
             AssetKind::Audio => "wav",
-            AssetKind::Model => crate::szi::EXTENSION,
+            AssetKind::Model => "szi",
         }
     }
 }
@@ -155,7 +155,7 @@ impl AssetStore {
         id
     }
 
-    /// An AI model (`.magic` bytes).
+    /// An AI model of an earlier version (its bytes).
     pub fn model(&self, id: &str) -> Option<&Arc<Vec<u8>>> {
         match &self.get(id)?.data {
             AssetData::Model(bytes) => Some(bytes),
@@ -163,7 +163,7 @@ impl AssetStore {
         }
     }
 
-    /// Adds an AI model (`.magic` bytes). Identical models share one asset.
+    /// Adds an AI model of an earlier version (its bytes). Identical models share one asset.
     pub fn add_model(&mut self, name: impl Into<String>, magic: Vec<u8>) -> String {
         let id = format!("mdl-{:016x}", fnv1a(&magic));
         self.assets.entry(id.clone()).or_insert_with(|| Asset {

@@ -20,8 +20,9 @@ pub const UI_SCALE_RANGE: std::ops::RangeInclusive<f32> = 0.5..=2.5;
 pub enum Tab {
     #[default]
     AutoClicker,
+    /// Settings saved while the Magic tab of earlier versions was open come back to the Macro tab.
+    #[serde(alias = "magic")]
     Macro,
-    Magic,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,23 +33,18 @@ pub enum SettingsPage {
     Appearance,
     Hotkeys,
     Recording,
+    /// The pages of earlier versions' AI downloads and graphics cards come back here.
+    #[serde(alias = "ai", alias = "runtime", alias = "hardware")]
     Engine,
-    /// Downloads: what trains and runs AI models.
-    #[serde(alias = "ai")]
-    Runtime,
-    /// The processor, memory and graphics cards, and which ones AI uses.
-    Hardware,
 }
 
 impl SettingsPage {
-    pub const ALL: [SettingsPage; 7] = [
+    pub const ALL: [SettingsPage; 5] = [
         SettingsPage::General,
         SettingsPage::Appearance,
         SettingsPage::Hotkeys,
         SettingsPage::Recording,
         SettingsPage::Engine,
-        SettingsPage::Runtime,
-        SettingsPage::Hardware,
     ];
 
     pub fn label(self) -> &'static str {
@@ -58,8 +54,6 @@ impl SettingsPage {
             SettingsPage::Hotkeys => "Hotkeys",
             SettingsPage::Recording => "Recording",
             SettingsPage::Engine => "Engine",
-            SettingsPage::Runtime => "Runtime",
-            SettingsPage::Hardware => "Hardware",
         }
     }
 }
@@ -119,12 +113,6 @@ impl Default for ExportChoices {
 #[serde(default)]
 pub struct Settings {
     pub tab: Tab,
-    /// Where the dataset editor generates samples: an OpenAI-compatible endpoint.
-    pub generator: crate::magic::generate::GeneratorSettings,
-    /// MagiDB's online address (raw files); empty: MagiGun/MagiDB on GitHub.
-    pub magidb_url: String,
-    /// A folder of MagiDB pages to read instead of the downloaded copy (a checkout being written).
-    pub magidb_dir: Option<PathBuf>,
     /// The Auto Clicker tab's current settings.
     pub clicker: AutoClickerConfig,
     /// Stops everything, always.
@@ -158,8 +146,6 @@ pub struct Settings {
     /// Keep MacroMagi's own window out of screen captures, so it can neither
     /// hide what a macro is looking for nor show up in template images.
     pub hide_from_capture: bool,
-    /// The AI Agent window shows what the model thought opened, not folded.
-    pub agent_open_thoughts: bool,
     /// Run macros without sending any input; the console shows what would be sent.
     pub dry_run: bool,
     /// What the export dialog offers by default.
@@ -182,31 +168,13 @@ pub struct Settings {
     pub recording_window_size: Option<[f32; 2]>,
     /// Size of the Variable Rate Editor.
     pub rate_window_size: Option<[f32; 2]>,
-    /// Where AI models run.
-    pub ai_device: magi_ml::Device,
     pub recent_files: Vec<PathBuf>,
-    /// `.magic` files opened lately, newest first.
-    pub recent_models: Vec<PathBuf>,
-    /// While a model trains, the Magic tab shows only the training, and the
-    /// background picture and see-through panels are off.
-    pub optimize_training: bool,
-    /// A sound and a desktop notification when a training run of more than a minute ends.
-    pub notify_after_training: bool,
-    /// The Magic tab's console, and the panel of the selected block.
-    pub magic_console: bool,
-    pub magic_panel: bool,
-    /// The graphics cards training uses (CUDA numbers): `None` is the first
-    /// one there is; an empty list is the CPU.
-    pub train_gpus: Option<Vec<u32>>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             tab: Tab::AutoClicker,
-            generator: crate::magic::generate::GeneratorSettings::default(),
-            magidb_url: String::new(),
-            magidb_dir: None,
             clicker: AutoClickerConfig::default(),
             stop_hotkey: Hotkey::key(Key::F8),
             record_hotkey: Hotkey::key(Key::F9),
@@ -225,7 +193,6 @@ impl Default for Settings {
             ui_scale: 1.0,
             always_on_top: false,
             hide_from_capture: true,
-            agent_open_thoughts: false,
             dry_run: false,
             export: ExportChoices::default(),
             show_console: false,
@@ -239,14 +206,7 @@ impl Default for Settings {
             palette_size: [280.0, 420.0],
             recording_window_size: None,
             rate_window_size: None,
-            ai_device: magi_ml::Device::Auto,
             recent_files: Vec::new(),
-            recent_models: Vec::new(),
-            optimize_training: true,
-            notify_after_training: true,
-            magic_console: true,
-            magic_panel: true,
-            train_gpus: None,
         }
     }
 }
@@ -339,5 +299,15 @@ mod tests {
         settings.reset_all();
         assert_eq!(settings.ui_scale, 1.0);
         assert_eq!(settings.recent_files, [PathBuf::from("a.magi")]);
+    }
+
+    #[test]
+    fn settings_saved_with_the_magic_tab_or_its_pages_still_load() {
+        let old = r#"{ "tab": "magic", "settings_page": "runtime", "ui_scale": 1.5, "magic_console": true,
+                       "ai_device": "auto", "recent_models": ["a.magic"], "train_gpus": [0] }"#;
+        let settings: Settings = serde_json::from_str(old).unwrap();
+        assert_eq!((settings.tab, settings.settings_page, settings.ui_scale), (Tab::Macro, SettingsPage::Engine, 1.5));
+        let hardware: Settings = serde_json::from_str(r#"{ "settings_page": "hardware" }"#).unwrap();
+        assert_eq!(hardware.settings_page, SettingsPage::Engine);
     }
 }

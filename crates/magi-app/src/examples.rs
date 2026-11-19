@@ -16,8 +16,13 @@ use magi_core::variables::{Variable, binding};
 use magi_vision::ImageRef;
 use serde_json::{Value, json};
 
-pub const NAMES: [&str; 4] =
-    ["React to what is on screen", "Auto clicker, as blocks", "Replay a recording", "Variables, functions and groups"];
+pub const NAMES: [&str; 5] = [
+    "React to what is on screen",
+    "Auto clicker, as blocks",
+    "Replay a recording",
+    "Variables, functions and groups",
+    "Tell screens apart with AI Vision",
+];
 
 /// The examples' Start hotkey. Plain F7 is the Run hotkey.
 fn shift_f7() -> Hotkey {
@@ -29,7 +34,8 @@ pub fn build(index: usize, registry: &Registry) -> Project {
         0 => react_to_screen(registry),
         1 => auto_clicker(registry),
         2 => replay_recording(registry),
-        _ => functions(registry),
+        3 => functions(registry),
+        _ => ai_vision(registry),
     }
 }
 
@@ -221,6 +227,84 @@ fn functions(registry: &Registry) -> Project {
     b.project
 }
 
+/// A drawn screen, so the AI Vision example has pictures of each group: a menu
+/// (a column of buttons on a dark page) or the game (sky, ground and a health
+/// bar). `variant` moves things a little and changes the light, as real
+/// screenshots of the same screen differ.
+fn scene(menu: bool, variant: u32) -> Vec<u8> {
+    let (w, h) = (160u32, 100u32);
+    let shift = variant * 3;
+    let light = 0.9 + 0.08 * variant as f32;
+    let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            let pixel: [u8; 3] = if menu {
+                let row = (y + 100 - shift) % 100;
+                let button = (50..110).contains(&x) && [20, 42, 64].iter().any(|top| (*top..top + 14).contains(&row));
+                if button { [210, 200, 120] } else { [24, 28, 46] }
+            } else {
+                let horizon = 55 + shift;
+                let health = x < 50 + shift * 2 && (6..12).contains(&y) && x > 6;
+                if health {
+                    [220, 50, 50]
+                } else if y < horizon {
+                    [90, 150 + (y as u8 / 2), 230]
+                } else {
+                    [60, 140 - ((y - horizon) as u8), 50]
+                }
+            };
+            rgba.extend(pixel.map(|v| (f32::from(v) * light).min(255.0) as u8));
+            rgba.push(255);
+        }
+    }
+    magi_vision::encode_png(ImageRef::new(w, h, &rgba)).expect("encoding a small image cannot fail")
+}
+
+/// Learns what a menu and the game look like, then keeps saying which one is on screen.
+fn ai_vision(registry: &Registry) -> Project {
+    let mut b = Builder { project: Project::new(), registry };
+    b.project.meta.name = "Tell screens apart with AI Vision".into();
+    let menu: Vec<String> =
+        (0..3).map(|i| b.project.assets.add_image(format!("Menu {}", i + 1), scene(true, i))).collect();
+    let game: Vec<String> =
+        (0..3).map(|i| b.project.assets.add_image(format!("Game {}", i + 1), scene(false, i))).collect();
+
+    b.node(
+        ids::COMMENT,
+        [-330.0, -10.0],
+        "How this works",
+        json!({
+            "text": "AI Vision learns from the pictures in each of its groups what the screen looks like then – \
+                     here a menu and the game, drawn for the example. Put in pictures of your own: Capture \
+                     drags a box on the screen, Load pictures takes files.\n\nThe macro keeps looking and \
+                     writes in the console which group it sees.",
+            "width": 280.0,
+            "height": 190.0,
+        }),
+    );
+    let start = b.node(ids::START, [40.0, 0.0], "", json!({ "hotkey": shift_f7() }));
+    let repeat = b.node(ids::REPEAT, [40.0, 120.0], "Keep looking", json!({ "mode": "forever" }));
+    let decision =
+        b.node(ids::DECISION, [17.0, 272.0], "Sure of a group?", json!({ "cases": [{ "id": "1", "label": "Yes" }] }));
+    let vision = b.node(
+        ids::AI_VISION,
+        [-330.0, 300.0],
+        "What is on screen?",
+        json!({ "groups": [{ "name": "Menu", "images": menu }, { "name": "Game", "images": game }] }),
+    );
+    let say = b.node(ids::LOG, [-46.0, 470.0], "Say which", json!({ "message": "On screen:" }));
+    let pause = b.node(ids::DELAY, [200.0, 470.0], "Look again soon", json!({ "ms": 500.0 }));
+
+    b.flow(start, ports::OUT, repeat);
+    b.flow(repeat, ports::LOOP, decision);
+    b.wire(vision, "found", decision, "cond:1");
+    b.wire(vision, "group", say, "value");
+    b.flow(decision, "case:1", say);
+    b.flow(decision, ports::ELSE, pause);
+    b.flow(say, ports::OUT, pause);
+    b.project
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,6 +320,31 @@ mod tests {
                 assert!(project.assets.contains(&asset), "{name} refers to a missing asset");
             }
         }
+    }
+
+    #[test]
+    fn the_ai_vision_example_tells_its_drawn_screens_apart() {
+        use magi_core::nodes::ai::AiVisionParams;
+        let registry = Registry::builtin();
+        let project = build(4, &registry);
+        let vision = project.graph.nodes().find(|n| n.kind == ids::AI_VISION).expect("an AI Vision block");
+        let params: AiVisionParams = vision.params_or_default();
+        let decoded: Vec<Vec<magi_vision::Bitmap>> = params
+            .groups
+            .iter()
+            .map(|g| {
+                g.images.iter().map(|id| magi_vision::decode(project.assets.image(id).unwrap()).unwrap()).collect()
+            })
+            .collect();
+        let refs: Vec<Vec<ImageRef<'_>>> =
+            decoded.iter().map(|g| g.iter().map(magi_vision::Bitmap::as_ref).collect()).collect();
+        let checked = magi_vision::check(&refs);
+        assert_eq!(checked.right, checked.tried, "{checked:?}");
+        // A screen it has not seen: the menu moved further and darker.
+        let model = magi_vision::Classifier::train(&refs).unwrap();
+        let unseen = magi_vision::decode(&scene(true, 5)).unwrap();
+        let (group, sure) = model.classify(unseen.as_ref());
+        assert_eq!((group, sure > 0.8), (0, true), "{sure}");
     }
 
     #[test]

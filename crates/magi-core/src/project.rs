@@ -308,6 +308,28 @@ mod tests {
         assert_eq!(loaded, project);
     }
 
+    /// A macro of an earlier version with an AI block and the model it ran: both kept as they were,
+    /// though no block type of that name exists any more.
+    #[test]
+    fn removed_ai_blocks_and_their_models_survive_a_round_trip() {
+        let mut project = sample();
+        let model = project.assets.add_model("Ready check", b"PK an old model".to_vec());
+        let fragment: crate::graph::Fragment = serde_json::from_value(serde_json::json!({
+            "nodes": [{ "id": 1, "type": "ai.watch", "pos": [0.0, 0.0], "params": { "model": model, "max_fps": 4 } }],
+            "wires": [],
+        }))
+        .unwrap();
+        project.graph.insert_fragment(&fragment, [400.0, 0.0]);
+        let mut buffer = Cursor::new(Vec::new());
+        project.write_to(&mut buffer).unwrap();
+        buffer.set_position(0);
+        let loaded = Project::read_from(buffer).unwrap();
+        assert_eq!(loaded, project);
+        let old = loaded.graph.nodes().find(|n| n.kind == "ai.watch").expect("the old block");
+        assert_eq!(old.param::<String>("model").as_deref(), Some(model.as_str()));
+        assert_eq!(loaded.assets.model(&model).map(|b| b.as_slice()), Some(&b"PK an old model"[..]));
+    }
+
     #[test]
     fn the_archive_contains_a_readable_text_manifest() {
         let mut buffer = Cursor::new(Vec::new());

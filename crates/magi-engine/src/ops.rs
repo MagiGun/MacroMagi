@@ -16,8 +16,7 @@ use magi_core::geom::{Displays, Point, Rect};
 use magi_core::graph::NodeId;
 use magi_core::host::{Frame, Host, Notification, SoundSource, TextWord, WindowInfo, WindowQuery};
 use magi_core::input::{Button, InputEvent, Key};
-use magi_core::magic::Decision;
-use magi_core::nodes::ai::{AiAgentParams, AiParams, AiWatchParams};
+use magi_core::nodes::ai::AiVisionParams;
 use magi_core::nodes::files::{
     FindTextParams, ListFolderParams, ListKind, MakeFolderParams, ReadFileParams, ReadMode, WriteFileParams, WriteMode,
 };
@@ -171,22 +170,6 @@ fn first_number(text: &str) -> Option<f64> {
     Some(if negative { -value } else { value })
 }
 
-/// An AI Watch block between the times it acts.
-struct WatchState {
-    started: Instant,
-    hits: u64,
-    last: String,
-}
-
-/// Where an AI Watch block got to: it acted (run the blocks under "Acted"),
-/// or its time is up.
-#[derive(Clone, Debug, PartialEq, serde::Serialize)]
-pub struct WatchStep {
-    pub acted: bool,
-    pub hits: u64,
-    pub label: String,
-}
-
 /// Everything one run needs to act on the world.
 pub struct RunCx {
     pub host: Arc<dyn Host>,
@@ -218,8 +201,6 @@ pub struct RunCx {
     /// The sound each Sound Recognition block recognised last, and its group:
     /// what its "Which sound" output says until it recognises another.
     last_heard: HashMap<NodeId, (String, String)>,
-    /// AI Watch blocks part-way through watching, between the times they act.
-    watches: HashMap<NodeId, WatchState>,
     /// Pictures taken or read while this run goes on, by id (see [`PICTURE_KEY`]).
     pictures: HashMap<String, Arc<magi_vision::Bitmap>>,
 }
@@ -242,7 +223,6 @@ impl RunCx {
             streams: HashMap::new(),
             heard_until: HashMap::new(),
             last_heard: HashMap::new(),
-            watches: HashMap::new(),
             pictures: HashMap::new(),
             stop,
             stop_everything,
@@ -1251,219 +1231,53 @@ impl RunCx {
         Ok(outputs)
     }
 
-    // ---- AI models ------------------------------------------------------------
+    // ---- AI Vision ----------------------------------------------------------
 
-    /// Shows the model's part of the screen to the model once.
-    fn ai_look(
+    /// Which of its groups an **AI Vision** block sees in its area – or in the
+    /// picture wired into it. It learns from the groups' pictures the first
+    /// time (in a moment), and keeps what it learned.
+    pub fn ai_vision(
         &mut self,
-        loaded: &crate::program::LoadedModel,
-        config: &magi_core::magic::MagicModel,
-        display: u8,
-    ) -> OpResult<Decision> {
-        let displays = self.displays();
-        let rect = config
-            .capture
-            .rect(&displays, Some(display))
-            .ok_or_else(|| EngineError::new("there is no display to look at"))?;
-        let frame = self.host.capture(Some(rect)).map_err(EngineError::from)?;
-        let probabilities = loaded
-            .model
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .classify(&frame.rgba, frame.width, frame.height)
-            .map_err(|e| EngineError::new(e.0))?;
-        Ok(config.decide(&probabilities))
-    }
-
-    /// Asks a text model (an **AI Agent** block) and, if set to, carries out
-    /// the tool calls it knows. `wired` is the request wired into the block.
-    pub fn ai_agent(
-        &mut self,
-        params: &AiAgentParams,
-        wired: Option<Value>,
+        params: &AiVisionParams,
+        picture: Option<&magi_vision::Bitmap>,
         node: NodeId,
     ) -> OpResult<serde_json::Map<String, Value>> {
-        let loaded = self.program.text_model(&params.model)?;
-        let request = match wired {
-            Some(value) => as_text(&value),
-            None => params.request.clone(),
-        };
-        if request.trim().is_empty() {
-            return Err(EngineError::new("the AI Agent block has no request").into());
+        if let Some(problem) = params.problem() {
+            return Err(EngineError::new(problem).into());
         }
-        let seed =
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64);
-        let options = magi_ml::AskOptions {
-            max_tokens: params.max_tokens as usize,
-            temperature: params.temperature as f32,
-            seed,
-            context: params.context as usize,
-            thinking: match params.thinking.as_str() {
-                "on" => Some(true),
-                "off" => Some(false),
-                _ => None,
-            },
-            effort: params.effort.trim().to_owned(),
-        };
-        let steps = if params.native_tools { params.max_steps as usize } else { 0 };
-        let done = loaded.ask(&request, &options, steps).map_err(|e| EngineError::new(e.0))?;
-        for step in &done.steps {
+        let learning = Instant::now();
+        let model = self.program.vision_model(params)?;
+        let took = learning.elapsed();
+        if took > Duration::from_millis(50) {
+            let pictures: usize = params.trained_groups().map(|g| g.images.len()).sum();
             self.monitor.log(
                 LogLevel::Info,
                 Some(node),
-                format!("{}  {}  ›  {}", step.call.name, step.call.args, step.result),
+                format!(
+                    "AI Vision learned {pictures} pictures of {} groups in {:.1} s",
+                    model.names.len(),
+                    took.as_secs_f64()
+                ),
             );
         }
-        let answer = done.answer;
-        if params.run_tools {
-            for call in &answer.tools {
-                self.agent_tool(call, node)?;
+        let probabilities = match picture {
+            Some(picture) => model.classifier.probabilities(picture.as_ref()),
+            None => {
+                let area = self.search_area(params.region, params.display);
+                let frame = self.host.capture(area).map_err(EngineError::from)?;
+                model.classifier.probabilities(ImageRef::new(frame.width, frame.height, &frame.rgba))
             }
-        }
-        let first = answer.tools.first();
+        };
+        let (best, sure) =
+            probabilities.iter().copied().enumerate().fold((0, 0.0f32), |b, (i, p)| if p > b.1 { (i, p) } else { b });
+        let likeliest = model.names.get(best).cloned().unwrap_or_default();
+        let found = f64::from(sure) >= params.threshold.clamp(0.0, 1.0);
         let mut outputs = serde_json::Map::new();
-        outputs.insert("answer".into(), Value::String(answer.text.clone()));
-        outputs.insert("thinking".into(), Value::String(answer.thinking.clone()));
-        outputs.insert("tool".into(), Value::String(first.map(|c| c.name.clone()).unwrap_or_default()));
-        outputs.insert("args".into(), Value::String(first.map(|c| c.args.to_string()).unwrap_or_default()));
-        outputs.insert("calls".into(), serde_json::json!(answer.tools.len()));
-        outputs.insert("raw".into(), Value::String(answer.raw));
+        outputs.insert("found".into(), serde_json::json!(found));
+        outputs.insert("group".into(), serde_json::json!(if found { likeliest.clone() } else { String::new() }));
+        outputs.insert("confidence".into(), serde_json::json!((f64::from(sure) * 1000.0).round() / 1000.0));
+        outputs.insert("likeliest".into(), serde_json::json!(likeliest));
         Ok(outputs)
-    }
-
-    /// Loads a text model now (an **AI Load Model** block).
-    pub fn ai_load(&mut self, model: &str) -> OpResult<()> {
-        self.program.text_model(model)?;
-        Ok(())
-    }
-
-    /// Unloads a text model (an **AI Unload Model** block).
-    pub fn ai_unload(&mut self, model: &str) -> OpResult<()> {
-        self.program.unload_text_model(model);
-        Ok(())
-    }
-
-    /// Carries out one tool call of an AI Agent block. Tools MacroMagi does
-    /// not know are left to the blocks after it.
-    fn agent_tool(&mut self, call: &magi_core::magic::ToolCall, node: NodeId) -> OpResult<()> {
-        let text = |key: &str| call.args.get(key).map(as_text).unwrap_or_default();
-        let number = |key: &str| call.args.get(key).and_then(as_number);
-        match call.name.as_str() {
-            "press" => {
-                let name = text("key");
-                let key = serde_json::from_value::<Key>(Value::String(name.clone()))
-                    .ok()
-                    .or_else(|| Key::ALL.iter().copied().find(|k| k.label().eq_ignore_ascii_case(name.trim())))
-                    .ok_or_else(|| {
-                        EngineError::new(format!("the model asked to press “{name}”, which is not a key"))
-                    })?;
-                self.perform_actions(&ActionParams { actions: vec![InputAction::tap(key)], hold_ms: 30.0 }, None)?;
-            }
-            "type" => self.send(&InputEvent::Text { text: text("text") })?,
-            "move" | "click" => {
-                if let (Some(x), Some(y)) = (number("x"), number("y")) {
-                    self.send(&InputEvent::MoveTo { x: x as i32, y: y as i32 })?;
-                }
-                if call.name == "click" {
-                    let button = match text("button").to_lowercase().as_str() {
-                        "right" => magi_core::input::MouseButton::Right,
-                        "middle" => magi_core::input::MouseButton::Middle,
-                        _ => magi_core::input::MouseButton::Left,
-                    };
-                    self.perform_actions(
-                        &ActionParams { actions: vec![InputAction::click(button)], hold_ms: 20.0 },
-                        None,
-                    )?;
-                }
-            }
-            "wait" => self.sleep_ms(number("ms").unwrap_or(0.0).clamp(0.0, 60_000.0))?,
-            "log" => self.monitor.log(LogLevel::Info, Some(node), text("text")),
-            _ => {}
-        }
-        Ok(())
-    }
-
-    /// Asks an AI model about the screen once (an **AI Model** block).
-    pub fn ai_classify(&mut self, params: &AiParams) -> OpResult<serde_json::Map<String, Value>> {
-        let loaded = self.program.model(&params.model)?;
-        let config = loaded.spec.configured(&params.settings);
-        let decision = self.ai_look(&loaded, &config, params.display)?;
-        let mut outputs = serde_json::Map::new();
-        outputs.insert("act".into(), serde_json::json!(decision.act));
-        outputs.insert("label".into(), serde_json::json!(decision.label));
-        outputs.insert("class".into(), serde_json::json!(decision.class));
-        outputs.insert("confidence".into(), serde_json::json!((decision.confidence * 1000.0).round() / 1000.0));
-        outputs.insert("delay".into(), serde_json::json!(decision.delay_ms));
-        Ok(outputs)
-    }
-
-    /// Keeps showing the screen to an AI model and acts on its answers (an
-    /// **AI Watch** block). Returns how often it acted and its last answer.
-    /// Watches until the model acts (`acted` is then true: the blocks under
-    /// "Acted" run, and the block is entered again with `returning`), or until
-    /// the time is up. Counts and the last answer carry over between entries.
-    pub fn ai_watch(&mut self, params: &AiWatchParams, node: NodeId, returning: bool) -> OpResult<WatchStep> {
-        let loaded = self.program.model(&params.model)?;
-        let config = loaded.spec.configured(&params.settings);
-        if !returning || !self.watches.contains_key(&node) {
-            let engine = loaded.model.lock().unwrap_or_else(|p| p.into_inner()).engine();
-            self.monitor.log(
-                LogLevel::Info,
-                Some(node),
-                format!("“{}” is watching, on the {}", config.name, engine.label()),
-            );
-            self.watches.insert(node, WatchState { started: Instant::now(), hits: 0, last: String::new() });
-        } else {
-            // Back from the blocks under "Acted": let the event pass before looking again.
-            self.sleep_ms(config.action.cooldown_ms.max(0.0))?;
-        }
-        let frame_time = (params.max_fps > 0.0).then(|| Duration::from_secs_f64(1.0 / params.max_fps));
-        loop {
-            self.check_stop()?;
-            let state = &self.watches[&node];
-            if params.duration_ms > 0.0 && state.started.elapsed() >= millis(params.duration_ms) {
-                let state = self.watches.remove(&node).expect("checked above");
-                return Ok(WatchStep { acted: false, hits: state.hits, label: state.last });
-            }
-            let look_started = Instant::now();
-            let decision = self.ai_look(&loaded, &config, params.display)?;
-            if decision.act {
-                if decision.delay_ms > 0.0 {
-                    self.sleep_ms(decision.delay_ms)?;
-                }
-                if params.press {
-                    let press = ActionParams {
-                        actions: vec![InputAction::press(config.action.key).ok_or_else(|| {
-                            EngineError::new("the model's button is a gamepad button, which cannot be sent")
-                        })?],
-                        hold_ms: config.action.hold_ms,
-                    };
-                    self.perform_actions(&press, None)?;
-                }
-                self.monitor.log(
-                    LogLevel::Info,
-                    Some(node),
-                    format!(
-                        "{} “{}” ({:.0}% sure)",
-                        if params.press { "Pressed for" } else { "Saw" },
-                        decision.label,
-                        decision.confidence * 100.0
-                    ),
-                );
-                let state = self.watches.get_mut(&node).expect("set up above");
-                state.hits += 1;
-                state.last = decision.label;
-                return Ok(WatchStep { acted: true, hits: state.hits, label: state.last.clone() });
-            } else if let Some(frame_time) = frame_time {
-                let spent = look_started.elapsed();
-                if spent < frame_time {
-                    self.sleep(frame_time - spent)?;
-                }
-            } else {
-                // As fast as possible, but never a busy loop in the interpreter's eyes.
-                self.waited = true;
-            }
-        }
     }
 
     // ---- sound --------------------------------------------------------------

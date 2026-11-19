@@ -56,9 +56,12 @@ pub fn show(ui: &mut Ui, project: &mut Project, node_id: NodeId, env: &mut Inspe
     };
     let Some(def) = env.registry.get(&node.kind).cloned() else {
         ui.colored_label(theme::warning(), format!("Unknown block type “{}”", node.kind));
-        ui.weak(
-            "It probably comes from an add-on that is not installed. It is kept as it is, but cannot be edited or run.",
-        );
+        ui.weak(if node.kind.starts_with("ai.") {
+            "An AI block of an earlier version of MacroMagi, which ran models made in its Magic tab. It is kept as it \
+             is, but cannot be edited or run: use an AI Vision block instead."
+        } else {
+            "It probably comes from an add-on that is not installed. It is kept as it is, but cannot be edited or run."
+        });
         return requests;
     };
 
@@ -619,8 +622,7 @@ fn edit_param(
                 widgets::notice(ui, icon::WARNING, "This microphone is not connected.", theme::warning());
             }
         }
-        ParamKind::Model => edit_model(ui, project, node_id, key, requests),
-        ParamKind::ModelSettings => edit_model_settings(ui, project, node_id, key),
+        ParamKind::VisionGroups => super::lists::edit_vision_groups(ui, project, node_id, env.images, requests),
         ParamKind::Image => edit_image(ui, project, node_id, key, env, requests),
         ParamKind::Recording => edit_recording(ui, project, node_id, key, env, requests),
         ParamKind::Audio => edit_sound(ui, project, node_id, key, requests),
@@ -826,28 +828,6 @@ fn edit_image(
     asset_picker(ui, project, node_id, key, AssetKind::Image, "No image");
 }
 
-fn edit_model(ui: &mut Ui, project: &mut Project, node_id: NodeId, key: &str, requests: &mut Vec<UiRequest>) {
-    asset_picker(ui, project, node_id, key, AssetKind::Model, "No model");
-    ui.horizontal_wrapped(|ui| {
-        if ui
-            .button(format!("{}  Load model file…", icon::FOLDER_OPEN))
-            .on_hover_text("A .magic workspace or .szi Magi model from the Magic tab, or an .onnx model")
-            .clicked()
-        {
-            requests.push(UiRequest::LoadModel(node_id, key.to_owned()));
-        }
-        let current: String = project.graph.node(node_id).and_then(|n| n.param(key)).unwrap_or_default();
-        if project.assets.model(&current).is_some()
-            && ui
-                .button(format!("{}  Open in Magic", icon::MAGIC_WAND))
-                .on_hover_text("See and change the model's setup in the Magic tab, then use “Use in Macro” again")
-                .clicked()
-        {
-            requests.push(UiRequest::OpenModel(current));
-        }
-    });
-}
-
 /// A list of characters: each shown as a chip that removes it, and a field to add more.
 fn edit_characters(ui: &mut Ui, project: &mut Project, node_id: NodeId, key: &str) {
     let Some(node) = project.graph.node(node_id) else { return };
@@ -900,66 +880,6 @@ fn edit_characters(ui: &mut Ui, project: &mut Project, node_id: NodeId, key: &st
     ui.data_mut(|d| d.insert_temp(field_id, typed));
     if changed && let Some(node) = project.graph.node_mut(node_id) {
         node.set_param(key, list);
-    }
-}
-
-/// The description inside a model asset, read once per asset.
-fn model_description(project: &Project, id: &str) -> Option<magi_core::magic::MagicModel> {
-    thread_local! {
-        static READ: std::cell::RefCell<std::collections::HashMap<String, Option<magi_core::magic::MagicModel>>> =
-            std::cell::RefCell::default();
-    }
-    READ.with(|read| {
-        read.borrow_mut()
-            .entry(id.to_owned())
-            .or_insert_with(|| {
-                let bytes = project.assets.model(id)?;
-                magi_core::szi::model_from_bytes(bytes).ok().map(|file| file.model)
-            })
-            .clone()
-    })
-}
-
-/// The model's adjustable settings, set for this block.
-fn edit_model_settings(ui: &mut Ui, project: &mut Project, node_id: NodeId, key: &str) {
-    let Some(node) = project.graph.node(node_id) else { return };
-    let model_id: String = node.param("model").unwrap_or_default();
-    let Some(model) = model_description(project, &model_id) else {
-        ui.weak("Choose a model first.");
-        return;
-    };
-    if model.settings.is_empty() {
-        ui.weak("This model has no adjustable settings.");
-        return;
-    }
-    let mut values: Map<String, Value> = node.param(key).unwrap_or_default();
-    let mut changed = false;
-    for setting in &model.settings {
-        ui.push_id(&setting.key, |ui| {
-            let current = values.get(&setting.key).and_then(Value::as_f64);
-            ui.horizontal(|ui| {
-                widgets::caption_with_help(ui, &setting.label, &setting.help);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if widgets::reset_button(ui, current.is_some()) {
-                        values.remove(&setting.key);
-                        changed = true;
-                    }
-                });
-            });
-            let mut value = current.unwrap_or(setting.value);
-            let suffix = match setting.kind {
-                magi_core::magic::SettingKind::Percent => "%",
-                magi_core::magic::SettingKind::Milliseconds => " ms",
-            };
-            let (min, max) = (setting.min.min(setting.max), setting.max.max(setting.min));
-            if ui.add(egui::Slider::new(&mut value, min..=max).max_decimals(0).suffix(suffix)).changed() {
-                values.insert(setting.key.clone(), serde_json::json!(value));
-                changed = true;
-            }
-        });
-    }
-    if changed && let Some(node) = project.graph.node_mut(node_id) {
-        node.set_param(key, Value::Object(values));
     }
 }
 

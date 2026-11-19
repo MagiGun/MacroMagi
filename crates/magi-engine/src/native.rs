@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use magi_core::autoclicker::AutoClickParams;
 use magi_core::geom::Point;
 use magi_core::graph::{Node, NodeId};
-use magi_core::nodes::ai::{AiParams, AiWatchParams};
+use magi_core::nodes::ai::AiVisionParams;
 use magi_core::nodes::flow::{
     CallParams, DecisionParams, DefineParams, DelayParams, LogParams, RateParams, RepeatMode, RepeatParams, StopParams,
     StopScope, WaitUntilParams,
@@ -111,7 +111,6 @@ impl NativeNodes {
         nodes.flow(ids::SET_VARIABLE, set_variable);
         nodes.flow(ids::COUNTER, counter);
         nodes.flow(ids::NOTIFY, notify);
-        nodes.flow(ids::AI_WATCH, ai_watch);
         nodes.flow(ids::WRITE_FILE, |interp, node| {
             let p: magi_core::nodes::files::WriteFileParams = interp.params(node)?;
             let (value, path) = (interp.input(node, "value")?, interp.input(node, "path")?);
@@ -169,26 +168,17 @@ impl NativeNodes {
         nodes.value(ids::COMPARE, compare);
         nodes.value(ids::TEXT, text);
         nodes.value(ids::CLIPBOARD, clipboard);
-        nodes.flow(ids::AI_AGENT, |interp, node| {
-            let p: magi_core::nodes::ai::AiAgentParams = interp.params(node)?;
-            let wired = interp.input(node, "request")?;
-            let outputs = interp.cx.ai_agent(&p, wired, node.id)?;
-            interp.outputs.insert(node.id, outputs);
-            Ok(Next::out())
-        });
-        nodes.flow(ids::AI_LOAD, |interp, node| {
-            let p: magi_core::nodes::ai::AiModelParams = interp.params(node)?;
-            interp.cx.ai_load(&p.model)?;
-            Ok(Next::out())
-        });
-        nodes.flow(ids::AI_UNLOAD, |interp, node| {
-            let p: magi_core::nodes::ai::AiModelParams = interp.params(node)?;
-            interp.cx.ai_unload(&p.model)?;
-            Ok(Next::out())
-        });
-        nodes.value(ids::AI_CLASSIFY, |interp, node| {
-            let p: AiParams = interp.params(node)?;
-            interp.cx.ai_classify(&p)
+        nodes.value(ids::AI_VISION, |interp, node| {
+            let p: AiVisionParams = interp.params(node)?;
+            // A picture wired in is looked at instead of the screen.
+            let picture =
+                match interp.input(node, "picture")? {
+                    Some(value) => Some(interp.cx.picture_of(&value).ok_or_else(|| {
+                        EngineError::new("the picture wired in is not available (it is not a picture)")
+                    })?),
+                    None => None,
+                };
+            interp.cx.ai_vision(&p, picture.as_deref(), node.id)
         });
         nodes.value(ids::SOUND_LEVEL, |interp, node| {
             let p: SoundLevelParams = interp.params(node)?;
@@ -316,7 +306,7 @@ impl Interp<'_> {
                 }
                 Next::EndBranch => current = None,
                 Next::ExitLoop => match self.loops.pop() {
-                    // A Repeat leaves through "Done"; an AI Watch through its usual output.
+                    // A Repeat leaves through "Done".
                     Some(frame) => {
                         current = program
                             .graph
@@ -411,27 +401,6 @@ fn delay(interp: &mut Interp<'_>, node: &Node) -> OpResult<Next> {
 
 /// Watches; each time the model acts, runs the blocks under "Acted" as a loop
 /// round and comes back to watching, until the time is up.
-fn ai_watch(interp: &mut Interp<'_>, node: &Node) -> OpResult<Next> {
-    let p: AiWatchParams = interp.params(node)?;
-    let returning = interp.loops.last().is_some_and(|frame| frame.node == node.id);
-    let step = interp.cx.ai_watch(&p, node.id, returning)?;
-    interp.outputs.insert(
-        node.id,
-        Map::from_iter([("hits".to_owned(), json!(step.hits)), ("label".to_owned(), json!(step.label))]),
-    );
-    if step.acted {
-        if !returning {
-            interp.loops.push(LoopFrame { node: node.id, remaining: None });
-        }
-        Ok(Next::Port(magi_core::nodes::ai::ACTED.to_owned()))
-    } else {
-        if returning {
-            interp.loops.pop();
-        }
-        Ok(Next::out())
-    }
-}
-
 fn repeat(interp: &mut Interp<'_>, node: &Node) -> OpResult<Next> {
     let p: RepeatParams = interp.params(node)?;
     // Arriving while our own frame is on top means the looped branch came back.

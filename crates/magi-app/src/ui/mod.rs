@@ -5,16 +5,13 @@
 //! listening for a hotkey, opening a file dialog – they return a
 //! [`UiRequest`] and the app carries it out.
 
-pub mod agent_chat;
 pub mod autoclicker;
 pub mod clicker_form;
-pub mod dataset_editor;
 pub mod graph;
 pub mod images;
 pub mod inspector;
 pub mod lists;
 pub mod macro_tab;
-pub mod magic_tab;
 pub mod options;
 pub mod overlay;
 pub mod recording_editor;
@@ -68,8 +65,8 @@ pub enum SnipTarget {
     ImageRegion(NodeId, usize),
     /// The search area of one image group of an Image Detection block.
     ImageGroupRegion(NodeId, usize),
-    /// The fixed screen area of the model open in the Magic tab.
-    MagicArea,
+    /// A new picture for one group (by index) of an AI Vision block.
+    AddVisionImage(NodeId, usize),
     /// One end of a movement in a recording (asset, row, `true` for the end).
     RecordingMove(String, usize, bool),
 }
@@ -92,8 +89,6 @@ pub enum UiRequest {
     AddImageFile(NodeId),
     /// Load a sound file into a Sound Recognition block's list.
     AddSoundFile(NodeId),
-    /// Load a `.magic` file into a block's model setting.
-    LoadModel(NodeId, String),
-    /// Open a model asset of the macro in the Magic tab.
-    OpenModel(String),
+    /// Load picture files into one group (by index) of an AI Vision block.
+    AddVisionFiles(NodeId, usize),
 }

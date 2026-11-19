@@ -4,8 +4,8 @@
 [alias]
 tidy = "clean --profile dev"
 
-# The compiler's and linker's temporary files stay in the project (.cache/tmp,
-# ignored by git) rather than in the system's temp folder on another drive.
+# The compiler's and linker's temporary files stay in the project (target/tmp,
+# beside the build) rather than in the system's temp folder on another drive.
 [env]
-TMP = { value = ".cache/tmp", relative = true }
-TEMP = { value = ".cache/tmp", relative = true }
+TMP = { value = "target/tmp", relative = true }
+TEMP = { value = "target/tmp", relative = true }
