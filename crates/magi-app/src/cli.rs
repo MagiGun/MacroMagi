@@ -19,11 +19,10 @@ use crate::paths::Paths;
 use crate::settings::{Settings, Tab};
 
 pub const HELP: &str = "\
-MacroMagi – auto clicker, node-based macro editor and AI model workshop
+MacroMagi – auto clicker and node-based macro editor
 
 USAGE
-    macromagi [FILE]                   Open the editor, optionally with a macro (.magi)
-                                       or a model (.magic, .szi: in the Magic tab)
+    macromagi [FILE.magi]              Open the editor, optionally with a macro
     macromagi run FILE.magi [OPTIONS]  Run a macro without opening the window
     macromagi nodes                    Print every node definition as JSON
     macromagi example N FILE.magi      Save built-in example number N (1, 2, …) as a file
@@ -65,10 +64,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         show_targets: false,
         select_kind: None,
         settings_page: None,
-        train: false,
         wait: None,
-        dataset: None,
-        agent: false,
     };
     let mut positional: Vec<&str> = Vec::new();
     let mut engine = None;
@@ -100,19 +96,15 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 options.tab = Some(match value("--tab")? {
                     "clicker" => Tab::AutoClicker,
                     "macro" => Tab::Macro,
-                    "magic" => Tab::Magic,
-                    other => return Err(format!("unknown tab `{other}` (use clicker, macro or magic)")),
+                    other => return Err(format!("unknown tab `{other}` (use clicker or macro)")),
                 });
             }
             "--cards" => options.show_cards = true,
-            "--train" => options.train = true,
             "--wait" => {
                 let seconds = value("--wait")?.parse().map_err(|_| "--wait needs a number of seconds".to_owned())?;
                 options.wait = Some(seconds);
             }
             "--targets" => options.show_targets = true,
-            "--dataset" => options.dataset = Some(value("--dataset")?.to_owned()),
-            "--agent" => options.agent = true,
             "--select" => options.select_kind = Some(value("--select")?.to_owned()),
             "--settings" => {
                 let page = value("--settings")?.to_lowercase();

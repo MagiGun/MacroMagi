@@ -1644,151 +1644,85 @@ fn sound_recognition_listens_for_several_sounds_and_says_which() {
     });
 }
 
-// ---- AI models -----------------------------------------------------------------
+// ---- AI Vision -----------------------------------------------------------------
 
-/// A model that averages each color of the middle of the screen: its
-/// "classes" are red, green and blue. Acting on red presses R.
-fn color_model(project: &mut Project) -> String {
-    use magi_core::magic::*;
-    let model = MagicModel {
-        name: "Colors".into(),
-        input: InputSpec { width: 4, height: 4, mean: [0.0; 3], std: [1.0; 3], ..InputSpec::default() },
-        capture: CaptureSpec { area: CaptureArea::Center { height_share: 0.5 }, display: 0 },
-        classes: vec![
-            ClassSpec { label: "red".into(), act: true, threshold: 0.4, delay_ms: 0.0 },
-            ClassSpec { label: "green".into(), ..ClassSpec::default() },
-            ClassSpec { label: "blue".into(), ..ClassSpec::default() },
-        ],
-        action: ActionSpec { key: magi_core::input::Button::Key(Key::KeyR), hold_ms: 1.0, cooldown_ms: 200.0 },
-        settings: vec![ModelSetting {
-            key: "thresh".into(),
-            label: "Confidence".into(),
-            kind: SettingKind::Percent,
-            min: 0.0,
-            max: 100.0,
-            default: 40.0,
-            value: 40.0,
-            targets: vec![SettingTarget::Threshold { class: 0 }],
-            ..ModelSetting::default()
-        }],
-        ..MagicModel::default()
-    };
-    let file = MagicFile { model, onnx: include_bytes!("data/channel_means.onnx").to_vec(), ..MagicFile::default() };
-    project.assets.add_model("Colors", file.for_macro().unwrap())
+/// A screen-sized picture: one color, with a bar of white across it at `bar` (a share of the height).
+fn scene(rgb: [u8; 3], bar: f32) -> (Vec<u8>, u32, u32) {
+    let (w, h) = (96u32, 60u32);
+    let top = (bar * h as f32) as u32;
+    let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for _ in 0..w {
+            let c = if (top..top + 6).contains(&y) { [245, 245, 245] } else { rgb };
+            rgba.extend_from_slice(&[c[0], c[1], c[2], 255]);
+        }
+    }
+    (rgba, w, h)
 }
 
-fn colored(rgb: [u8; 3]) -> impl Fn() -> SimHost {
-    move || SimHost::with_screen(Frame::solid(Point::new(0, 0), 320, 200, rgb))
+fn showing(rgb: [u8; 3], bar: f32) -> impl Fn() -> SimHost {
+    move || {
+        let (rgba, w, h) = scene(rgb, bar);
+        SimHost::with_screen(Frame::new(Point::new(0, 0), w, h, rgba))
+    }
 }
 
-#[test]
-fn an_ai_model_answers_about_the_middle_of_the_screen() {
+/// An AI Vision block that learned a red menu and a blue game, then a Decision on what it sees.
+fn vision_macro() -> (Builder, NodeId) {
     let mut b = Builder::new();
-    let model = color_model(&mut b.project);
+    let menu: Vec<String> = (0..3)
+        .map(|i| {
+            add_image(&mut b.project, &format!("menu {i}"), scene([200, 30 + i * 10, 30], 0.2 + 0.1 * f32::from(i)))
+        })
+        .collect();
+    let game: Vec<String> = (0..3)
+        .map(|i| {
+            add_image(&mut b.project, &format!("game {i}"), scene([30, 40 + i * 10, 190], 0.6 + 0.1 * f32::from(i)))
+        })
+        .collect();
     let start = b.node(ids::START, json!({}));
-    let ask = b.node(ids::AI_CLASSIFY, json!({ "model": model }));
+    let vision = b.node(
+        ids::AI_VISION,
+        json!({ "groups": [{ "name": "menu", "images": menu }, { "name": "game", "images": game }], "threshold": 0.7 }),
+    );
     let decision = b.node(ids::DECISION, json!({}));
-    let yes = b.node(ids::LOG, json!({ "message": "saw" }));
-    let no = b.tap(Key::KeyN);
-    b.flow(start, ports::OUT, decision).wire(ask, "act", decision, "cond:1").flow(decision, "case:1", yes).flow(
+    let seen = b.node(ids::LOG, json!({ "message": "sees" }));
+    let unsure = b.tap(Key::KeyN);
+    b.flow(start, ports::OUT, decision).wire(vision, "found", decision, "cond:1").flow(decision, "case:1", seen).flow(
         decision,
         ports::ELSE,
-        no,
+        unsure,
     );
-    b.wire(ask, "label", yes, "value");
-    on_all(&b.project, start, colored([250, 10, 10]), |kind, outcome| {
-        assert!(outcome.logs.iter().any(|l| l.contains("saw red")), "{kind:?}: {:?}", outcome.logs);
-    });
-    on_all(&b.project, start, colored([10, 250, 10]), |kind, outcome| {
-        assert_eq!(outcome.taps(), [Key::KeyN], "{kind:?}: green is not acted on");
-    });
+    b.wire(vision, "group", seen, "value");
+    (b, start)
+}
 
-    // The block's own settings: demanding 90% certainty, red is no longer enough.
-    let mut strict = b.project.clone();
-    strict.graph.node_mut(ask).unwrap().set_param("settings", json!({ "thresh": 90 }));
-    on_all(&strict, start, colored([250, 10, 10]), |kind, outcome| {
-        assert_eq!(outcome.taps(), [Key::KeyN], "{kind:?}");
+#[test]
+fn ai_vision_tells_which_group_the_screen_shows() {
+    let (b, start) = vision_macro();
+    // Neither screen is one of the examples: other shades, the bar elsewhere.
+    on_all(&b.project, start, showing([215, 45, 40], 0.25), |kind, outcome| {
+        assert!(outcome.logs.iter().any(|l| l.contains("sees menu")), "{kind:?}: {:?}", outcome.logs);
+    });
+    on_all(&b.project, start, showing([35, 50, 200], 0.75), |kind, outcome| {
+        assert!(outcome.logs.iter().any(|l| l.contains("sees game")), "{kind:?}: {:?}", outcome.logs);
     });
 }
 
 #[test]
-fn ai_watch_presses_the_model_key_once_per_event() {
+fn ai_vision_says_what_is_missing() {
     let mut b = Builder::new();
-    let model = color_model(&mut b.project);
+    let only = add_image(&mut b.project, "only", scene([200, 30, 30], 0.2));
     let start = b.node(ids::START, json!({}));
-    let watch = b.node(ids::AI_WATCH, json!({ "model": model, "duration_ms": 60.0 }));
-    let report = b.log("hits");
-    b.chain(&[start, watch, report]);
-    b.wire(watch, "hits", report, "value");
-    on_all(&b.project, start, colored([250, 10, 10]), |kind, outcome| {
-        assert_eq!(outcome.taps(), [Key::KeyR], "{kind:?}: once, then the cooldown");
-        assert!(outcome.logs.iter().any(|l| l == "hits 1"), "{kind:?}: {:?}", outcome.logs);
-    });
-    let mut quiet = b.project.clone();
-    quiet.graph.node_mut(watch).unwrap().set_param("press", false);
-    on_all(&quiet, start, colored([250, 10, 10]), |kind, outcome| {
-        assert!(outcome.taps().is_empty(), "{kind:?}: watching only");
-    });
-}
-
-#[test]
-fn ai_watch_runs_the_blocks_under_acted_each_time_it_acts() {
-    let mut b = Builder::new();
-    let model = color_model(&mut b.project);
-    let start = b.node(ids::START, json!({}));
-    let watch = b.node(ids::AI_WATCH, json!({ "model": model, "press": false }));
-    let seen = b.log("saw");
-    let count = b.log("times");
-    let leave = b.node(ids::STOP, json!({ "scope": "exit_loop" }));
-    let done = b.log("done");
-    b.flow(start, ports::OUT, watch).flow(watch, "acted", seen).flow(seen, ports::OUT, count);
-    b.flow(count, ports::OUT, leave).flow(watch, ports::OUT, done);
-    b.wire(watch, "label", seen, "value").wire(watch, "hits", count, "value");
-    on_all(&b.project, start, colored([250, 10, 10]), |kind, outcome| {
-        assert!(outcome.errors.is_empty(), "{kind:?}: {:?}", outcome.errors);
-        assert!(outcome.taps().is_empty(), "{kind:?}: watching only");
-        let ours: Vec<&String> =
-            outcome.logs.iter().filter(|l| ["saw", "times", "done"].iter().any(|w| l.starts_with(w))).collect();
-        assert_eq!(ours, ["saw red", "times 1", "done"], "{kind:?}: the branch ran with the answer, then left");
-    });
-}
-
-/// A text model trained in MacroMagi's trainer to answer "hi" with "yo".
-fn text_model(project: &mut Project) -> String {
-    use magi_core::magic::*;
-    let model = MagicModel {
-        name: "Greeter".into(),
-        kind: ModelKind::Text,
-        text: Some(TextSpec { context: 32, ..TextSpec::default() }),
-        ..MagicModel::default()
-    };
-    let onnx = include_bytes!("../../magi-ml/tests/data/tiny_text.onnx").to_vec();
-    let file = MagicFile { model, onnx, ..MagicFile::default() };
-    project.assets.add_model("Greeter", file.for_macro().unwrap())
-}
-
-#[test]
-fn an_ai_agent_asks_a_text_model() {
-    let mut b = Builder::new();
-    let model = text_model(&mut b.project);
-    let start = b.node(ids::START, json!({}));
-    let agent = b.node(ids::AI_AGENT, json!({ "model": model, "request": "hi", "temperature": 0.0, "max_tokens": 10 }));
-    let report = b.log("said");
-    b.chain(&[start, agent, report]);
-    b.wire(agent, "answer", report, "value");
-    on_all(&b.project, start, colored([0, 0, 0]), |kind, outcome| {
-        assert!(outcome.logs.iter().any(|l| l == "said yo"), "{kind:?}: {:?}", outcome.logs);
-    });
-
-    // A vision block cannot run a text model, and says so.
-    let mut wrong = Builder::new();
-    let model = text_model(&mut wrong.project);
-    let start = wrong.node(ids::START, json!({}));
-    let ask = wrong.node(ids::AI_CLASSIFY, json!({ "model": model }));
-    let report = wrong.log("saw");
-    wrong.chain(&[start, report]);
-    wrong.wire(ask, "label", report, "value");
-    on_all(&wrong.project, start, colored([0, 0, 0]), |kind, outcome| {
-        assert!(outcome.errors.iter().any(|e| e.contains("AI Agent")), "{kind:?}: {:?}", outcome.errors);
+    let vision = b.node(
+        ids::AI_VISION,
+        json!({ "groups": [{ "name": "menu", "images": [only] }, { "name": "game", "images": [] }] }),
+    );
+    let decision = b.node(ids::DECISION, json!({}));
+    let seen = b.tap(Key::KeyY);
+    b.flow(start, ports::OUT, decision).wire(vision, "found", decision, "cond:1").flow(decision, "case:1", seen);
+    on_all(&b.project, start, showing([200, 30, 30], 0.2), |kind, outcome| {
+        assert!(outcome.errors.iter().any(|e| e.contains("two groups")), "{kind:?}: {:?}", outcome.errors);
+        assert!(outcome.taps().is_empty(), "{kind:?}");
     });
 }

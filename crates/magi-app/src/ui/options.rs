@@ -156,7 +156,7 @@ pub fn menu(
     ui.separator();
     if ui
         .button(format!("{}  Downloads…", icon::DOWNLOAD_SIMPLE))
-        .on_hover_text("Install or remove optional parts: ONNX Runtime, graphics card support, Python, PyTorch")
+        .on_hover_text("Install or remove optional parts: the embedded Python")
         .clicked()
     {
         events.push(OptionsEvent::OpenDownloads);

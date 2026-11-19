@@ -18,7 +18,7 @@ CATEGORIES = [
      "order of execution and are evaluated whenever another block reads them."),
     ("sound", "Sound", "Listening to what the computer plays, or to the microphone. Value blocks, like "
      "the vision blocks."),
-    ("ai", "AI", "Small vision models prepared in the Magic tab, run on what is on screen."),
+    ("ai", "AI", "AI Vision: learns from example pictures which of a few groups the screen shows."),
     ("window", "Window", "Working with program windows."),
     ("variables", "Variables", "Named values a macro reads and changes while it runs. Any setting of any "
      "block can also follow a variable (the link button next to it)."),
@@ -41,7 +41,7 @@ KIND_NAMES = {
     "actions": "list of inputs", "cases": "list of cases", "clicker": "Auto Clicker settings",
     "variable": "variable", "definition": "definition", "block": "block", "display": "display",
     "audio": "sound", "images": "list of images", "sounds": "list of sounds", "characters": "list of characters", "path": "path",
-    "audio_device": "microphone", "model": "AI model", "model_settings": "model settings",
+    "audio_device": "microphone", "vision_groups": "groups of pictures",
 }
 
 

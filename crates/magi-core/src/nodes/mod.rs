@@ -20,7 +20,6 @@ pub mod logic;
 pub mod notes;
 pub mod script;
 pub mod sound;
-pub mod studio;
 pub mod system;
 pub mod variables;
 pub mod vision;
@@ -77,11 +76,7 @@ pub mod ids {
     pub const COMMENT: &str = "note.comment";
     pub const SOUND_LEVEL: &str = "sound.level";
     pub const SOUND_MATCH: &str = "sound.match";
-    pub const AI_WATCH: &str = "ai.watch";
-    pub const AI_CLASSIFY: &str = "ai.classify";
-    pub const AI_AGENT: &str = "ai.agent";
-    pub const AI_LOAD: &str = "ai.load";
-    pub const AI_UNLOAD: &str = "ai.unload";
+    pub const AI_VISION: &str = "ai.vision";
 }
 
 /// Ids of ports that engines and the editor refer to by name.
@@ -122,17 +117,10 @@ pub enum Category {
     Script,
     Notes,
     Addon,
-    // The Magic tab's blocks (see [`studio`]).
-    Start,
-    ModelSetup,
-    Architecture,
-    Data,
-    Training,
-    Package,
 }
 
 impl Category {
-    pub const ALL: [Category; 19] = [
+    pub const ALL: [Category; 13] = [
         Category::Flow,
         Category::Input,
         Category::Vision,
@@ -146,12 +134,6 @@ impl Category {
         Category::Script,
         Category::Notes,
         Category::Addon,
-        Category::Start,
-        Category::ModelSetup,
-        Category::Architecture,
-        Category::Data,
-        Category::Training,
-        Category::Package,
     ];
 
     pub fn label(self) -> &'static str {
@@ -169,12 +151,6 @@ impl Category {
             Category::Script => "Script",
             Category::Notes => "Notes",
             Category::Addon => "Add-ons",
-            Category::Start => "Start",
-            Category::ModelSetup => "Model",
-            Category::Architecture => "Architecture",
-            Category::Data => "Data",
-            Category::Training => "Training",
-            Category::Package => "Package",
         }
     }
 }
@@ -346,10 +322,9 @@ pub enum ParamKind {
     },
     /// The name of a sound input device; empty for the system's default.
     AudioDevice,
-    /// Id of an AI model asset (a `.magic` file).
-    Model,
-    /// Values for the adjustable settings an AI model declares, by key.
-    ModelSettings,
+    /// The groups of example pictures an AI Vision block learns to tell apart
+    /// ([`ai::VisionGroup`]): a name and image asset ids each.
+    VisionGroups,
 }
 
 impl ParamKind {
@@ -472,11 +447,20 @@ fn asset_ids_in(kind: &ParamKind, value: &Value) -> Vec<String> {
             .unwrap_or_default()
     };
     match kind {
-        ParamKind::Image | ParamKind::Recording | ParamKind::Audio | ParamKind::Model => {
+        ParamKind::Image | ParamKind::Recording | ParamKind::Audio => {
             value.as_str().filter(|id| !id.is_empty()).map(|id| vec![id.to_owned()]).unwrap_or_default()
         }
         ParamKind::Images => listed("image"),
         ParamKind::Sounds => listed("sound"),
+        ParamKind::VisionGroups => value
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|group| group.get("images")?.as_array())
+            .flatten()
+            .filter_map(|id| id.as_str())
+            .map(str::to_owned)
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -495,7 +479,7 @@ fn rename_assets_in(kind: &ParamKind, value: &mut Value, rename: &dyn Fn(&str) -
         }
     };
     match kind {
-        ParamKind::Image | ParamKind::Recording | ParamKind::Audio | ParamKind::Model => {
+        ParamKind::Image | ParamKind::Recording | ParamKind::Audio => {
             if let Value::String(id) = value
                 && let Some(new) = rename(id)
             {
@@ -504,6 +488,17 @@ fn rename_assets_in(kind: &ParamKind, value: &mut Value, rename: &dyn Fn(&str) -
         }
         ParamKind::Images => in_list("image"),
         ParamKind::Sounds => in_list("sound"),
+        ParamKind::VisionGroups => {
+            for group in value.as_array_mut().into_iter().flatten() {
+                for id in group.get_mut("images").and_then(Value::as_array_mut).into_iter().flatten() {
+                    if let Value::String(old) = id
+                        && let Some(new) = rename(old)
+                    {
+                        *old = new;
+                    }
+                }
+            }
+        }
         _ => {}
     }
 }

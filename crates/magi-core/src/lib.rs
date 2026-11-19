@@ -14,26 +14,19 @@
 pub mod action;
 pub mod assets;
 pub mod autoclicker;
-pub mod bulk;
-pub mod dataset;
 pub mod error;
 pub mod geom;
 pub mod graph;
 pub mod host;
 pub mod hotkey;
 pub mod input;
-pub mod magic;
-pub mod native_tools;
 pub mod nodes;
 pub mod options;
 pub mod preset;
 pub mod project;
 pub mod recording;
-pub mod safetensors;
-pub mod szi;
 pub mod targets;
 pub mod text;
-pub mod tokenizer;
 pub mod values;
 pub mod variables;
 

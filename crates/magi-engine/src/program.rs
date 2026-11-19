@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use magi_audio::Fingerprint;
 use magi_core::assets::AssetStore;
 use magi_core::graph::{Graph, Node, NodeId};
-use magi_core::magic::{MagicModel, ModelKind};
+use magi_core::nodes::ai::{AiVisionParams, VisionGroup};
 use magi_core::nodes::flow::DefineParams;
 use magi_core::nodes::{EngineSupport, NodePorts, Registry, ids};
 use magi_core::project::Project;
@@ -29,10 +29,6 @@ pub struct Program {
     pub variables: Vec<Variable>,
     /// Decoded template images by id and shrink factor, filled in on first use.
     images: Mutex<HashMap<(String, u32), Arc<Bitmap>>>,
-    /// AI models, loaded on first use.
-    models: Mutex<HashMap<String, Arc<LoadedModel>>>,
-    /// Text models, loaded on first use.
-    text_models: Mutex<HashMap<String, Arc<LoadedText>>>,
     /// Fingerprints of the sounds listened for, by id and how much of the
     /// sound is used (whole milliseconds; 0 for all of it), filled in on first use.
     sounds: Mutex<HashMap<(String, u64), Arc<Fingerprint>>>,
@@ -47,8 +43,6 @@ impl Program {
             variables: Vec::new(),
             images: Mutex::new(HashMap::new()),
             sounds: Mutex::new(HashMap::new()),
-            models: Mutex::new(HashMap::new()),
-            text_models: Mutex::new(HashMap::new()),
         }
     }
 
@@ -134,69 +128,41 @@ impl Program {
         Ok(fingerprint)
     }
 
-    /// An AI model asset, ready to run.
-    pub fn model(&self, id: &str) -> Result<Arc<LoadedModel>, EngineError> {
-        if id.is_empty() {
-            return Err(EngineError::new("no AI model has been chosen"));
-        }
-        if let Some(model) = self.models.lock().unwrap_or_else(|p| p.into_inner()).get(id) {
-            return Ok(Arc::clone(model));
-        }
-        let bytes = self.assets.model(id).ok_or_else(|| EngineError::new(format!("model `{id}` is missing")))?;
-        let file = magi_core::szi::model_from_bytes(bytes).map_err(|e| EngineError::new(e.to_string()))?;
-        if file.model.kind == ModelKind::Text {
-            return Err(EngineError::new("this is a text model: run it with an AI Agent block"));
-        }
-        if file.onnx.is_empty() {
-            return Err(EngineError::new("this model file does not include the model itself"));
-        }
-        let model = magi_ml::Model::load(&file.onnx, &file.model.input).map_err(|e| EngineError::new(e.0))?;
-        let loaded = Arc::new(LoadedModel { spec: file.model, model: Mutex::new(model) });
-        self.models.lock().unwrap_or_else(|p| p.into_inner()).insert(id.to_owned(), Arc::clone(&loaded));
-        Ok(loaded)
-    }
-
-    /// A text model, loaded on first use.
-    pub fn text_model(&self, id: &str) -> Result<Arc<LoadedText>, EngineError> {
-        if id.is_empty() {
-            return Err(EngineError::new("no AI model has been chosen"));
-        }
-        if let Some(model) = self.text_models.lock().unwrap_or_else(|p| p.into_inner()).get(id) {
-            return Ok(Arc::clone(model));
-        }
-        let bytes = self.assets.model(id).ok_or_else(|| EngineError::new(format!("model `{id}` is missing")))?;
-        let file = magi_core::szi::model_from_bytes(bytes).map_err(|e| EngineError::new(e.to_string()))?;
-        let Some(spec) = file.model.text.clone().filter(|_| file.model.kind == ModelKind::Text) else {
-            return Err(EngineError::new("this is a vision model: run it with an AI Watch or AI Model block"));
-        };
-        let native =
-            file.model.architecture.as_ref().filter(|a| a.native_problem().is_none() && !file.weights.is_empty());
-        // MacroMagi's own engine, with its cache; the ONNX model for what it does not run.
-        let model = if let Some(architecture) = native {
-            let memory = file.model.memory.clone().unwrap_or_default();
-            magi_ml::TextModel::load_native(architecture, &file.weights, &memory, &magi_ml::tools::cache_dir())
-                .map_err(|e| EngineError::new(e.0))?
-        } else {
-            if file.onnx.is_empty() {
-                return Err(EngineError::new("this .magic file does not include the model itself; train it first"));
+    /// What an AI Vision block learned from its groups' pictures: learned the
+    /// first time they are used, then kept – across runs too – until the
+    /// pictures or the groups change.
+    pub fn vision_model(&self, params: &AiVisionParams) -> Result<Arc<VisionModel>, EngineError> {
+        use std::hash::{Hash, Hasher};
+        let groups: Vec<&VisionGroup> = params.trained_groups().collect();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for group in &groups {
+            group.name.hash(&mut hasher);
+            for id in &group.images {
+                self.assets
+                    .image(id)
+                    .ok_or_else(|| EngineError::new(format!("image `{id}` is missing")))?
+                    .hash(&mut hasher);
             }
-            magi_ml::TextModel::load(&file.onnx, spec.context as usize).map_err(|e| EngineError::new(e.0))?
-        };
-        let loaded = Arc::new(LoadedText { spec, model: Mutex::new(model), data: file.data });
-        self.text_models.lock().unwrap_or_else(|p| p.into_inner()).insert(id.to_owned(), Arc::clone(&loaded));
-        Ok(loaded)
-    }
-
-    /// Unloads a text model: it loads again on its next request.
-    pub fn unload_text_model(&self, id: &str) {
-        self.text_models.lock().unwrap_or_else(|p| p.into_inner()).remove(id);
-    }
-
-    /// Unloads every AI model the macro loaded – text and vision models – as
-    /// when it stops. Returns how many text models were loaded.
-    pub fn unload_models(&self) -> usize {
-        self.models.lock().unwrap_or_else(|p| p.into_inner()).clear();
-        std::mem::take(&mut *self.text_models.lock().unwrap_or_else(|p| p.into_inner())).len()
+        }
+        let key = hasher.finish();
+        let cache = VISION_MODELS.get_or_init(Default::default);
+        if let Some(model) = cache.lock().unwrap_or_else(|p| p.into_inner()).get(&key) {
+            return Ok(Arc::clone(model));
+        }
+        let pictures: Vec<Vec<Arc<Bitmap>>> =
+            groups.iter().map(|g| g.images.iter().map(|id| self.image(id)).collect()).collect::<Result<_, _>>()?;
+        let refs: Vec<Vec<magi_vision::ImageRef<'_>>> =
+            pictures.iter().map(|group| group.iter().map(|b| b.as_ref().as_ref()).collect()).collect();
+        let classifier = magi_vision::Classifier::train(&refs).ok_or_else(|| {
+            EngineError::new(params.problem().unwrap_or("AI Vision needs at least two groups with example pictures"))
+        })?;
+        let model = Arc::new(VisionModel { classifier, names: groups.iter().map(|g| g.name.clone()).collect() });
+        let mut cache = cache.lock().unwrap_or_else(|p| p.into_inner());
+        if cache.len() >= 16 {
+            cache.clear();
+        }
+        cache.insert(key, Arc::clone(&model));
+        Ok(model)
     }
 
     /// Whether any enabled node can only be run by the Python engine.
@@ -240,37 +206,14 @@ impl Program {
     }
 }
 
-/// An AI model of the macro, loaded.
-pub struct LoadedText {
-    pub spec: magi_core::magic::TextSpec,
-    /// The native engine (or the ONNX model).
-    pub model: Mutex<magi_ml::TextModel>,
-    /// The model's own files (its native tools).
-    pub data: std::collections::BTreeMap<String, Vec<u8>>,
+/// What an AI Vision block learned, and the names of its groups (in the classifier's order).
+pub struct VisionModel {
+    pub classifier: magi_vision::Classifier,
+    pub names: Vec<String>,
 }
 
-impl LoadedText {
-    /// Asks the model; with `max_steps` above 0 its native tools run until it answers.
-    pub fn ask(
-        &self,
-        request: &str,
-        options: &magi_ml::AskOptions,
-        max_steps: usize,
-    ) -> Result<magi_ml::tools::AgentAnswer, magi_ml::MlError> {
-        let mut run = |call: &magi_core::magic::ToolCall| magi_ml::tools::run_call(&self.spec, &self.data, call);
-        let mut generate = |prompt: &str| {
-            let mut model = self.model.lock().unwrap_or_else(|p| p.into_inner());
-            magi_ml::complete(&mut model, &self.spec, prompt, options)
-        };
-        magi_ml::tools::agent(&self.spec, request, options, max_steps, &mut generate, &mut run)
-    }
-}
-
-pub struct LoadedModel {
-    /// Its configuration, as saved (before a block's own settings).
-    pub spec: MagicModel,
-    pub model: Mutex<magi_ml::Model>,
-}
+/// AI Vision models, by what they learned from: the same pictures are learned once.
+static VISION_MODELS: std::sync::OnceLock<Mutex<HashMap<u64, Arc<VisionModel>>>> = std::sync::OnceLock::new();
 
 /// The flow output a disabled block passes execution to: `out` if it has
 /// one, otherwise its first output.

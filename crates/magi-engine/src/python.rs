@@ -596,26 +596,15 @@ fn perform(cx: &mut RunCx, op: &str, args: &Value) -> OpResult<Value> {
         }
         "clipboard" => Ok(Value::String(cx.clipboard()?)),
         "sound_level" => Ok(Value::Object(cx.sound_level(&arg(args, "params")?)?)),
-        "ai_classify" => Ok(Value::Object(cx.ai_classify(&arg(args, "params")?)?)),
-        "ai_agent" => {
-            let wired: Option<bool> = arg(args, "wired")?;
-            let value = wired.unwrap_or(false).then(|| args.get("value").cloned().unwrap_or(Value::Null));
-            Ok(Value::Object(cx.ai_agent(&arg(args, "params")?, value, arg(args, "node")?)?))
-        }
-        "ai_load" => {
-            let model: String = arg(args, "model")?;
-            cx.ai_load(&model)?;
-            Ok(Value::Null)
-        }
-        "ai_unload" => {
-            let model: String = arg(args, "model")?;
-            cx.ai_unload(&model)?;
-            Ok(Value::Null)
-        }
-        "ai_watch" => {
-            let returning: Option<bool> = arg(args, "returning")?;
-            let step = cx.ai_watch(&arg(args, "params")?, arg(args, "node")?, returning.unwrap_or(false))?;
-            Ok(serde_json::to_value(step).map_err(|e| EngineError::new(e.to_string()))?)
+        "ai_vision" => {
+            let picture =
+                match args.get("picture").filter(|v| !v.is_null()) {
+                    Some(value) => Some(cx.picture_of(value).ok_or_else(|| {
+                        EngineError::new("the picture wired in is not available (it is not a picture)")
+                    })?),
+                    None => None,
+                };
+            Ok(Value::Object(cx.ai_vision(&arg(args, "params")?, picture.as_deref(), arg(args, "node")?)?))
         }
         "sound_match" => Ok(Value::Object(cx.sound_match(&arg(args, "params")?, arg(args, "node")?)?)),
         "autotype" => {

@@ -7,13 +7,14 @@
 //! * [`find_template`] – locate an image inside a larger one (template matching).
 //! * [`find_color`] – locate pixels of a given color.
 //! * [`decode`] / [`encode_png`] – convert between image files and pixel buffers.
-//!
-//! This is the crate where a future local vision model would be added, as
-//! another function that takes pixels and returns an answer.
+//! * [`Classifier`] – learns from example pictures of a few groups which group
+//!   a picture is in (the AI Vision block).
 
+mod classify;
 mod color;
 mod template;
 
+pub use classify::{Checked, Classifier, check};
 pub use color::{ColorMatch, find_color};
 pub use template::{Match, find_template};
 

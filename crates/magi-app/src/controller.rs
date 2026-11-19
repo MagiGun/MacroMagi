@@ -355,12 +355,6 @@ impl Controller {
         self.inner.stop_node(node);
     }
 
-    /// The machine, for things outside macros that look at the screen or
-    /// press keys (the Magic tab's live test). Dry-run aware.
-    pub fn machine(&self, dry_run: bool) -> Arc<dyn Host> {
-        self.inner.host(dry_run, &self.inner.monitor)
-    }
-
     /// Empties a variable of the macro, as if it had never been set.
     pub fn clear_variable(&self, name: &str) {
         if let Some((_, session)) = &self.inner.state().session {
@@ -503,8 +497,7 @@ impl State {
                 let clicker = &self.config.clicker;
                 bindings.push((clicker.hotkey.clone(), Binding::Clicker(clicker.activation)));
             }
-            // The Magic tab feeds macros, so their hotkeys stay on.
-            Tab::Macro | Tab::Magic => {
+            Tab::Macro => {
                 bindings.push((self.config.run_hotkey.clone(), Binding::RunMacro));
                 if let Some(published) = &self.published {
                     bindings.extend(

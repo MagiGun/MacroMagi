@@ -548,3 +548,159 @@ fn wav_seconds(wav: &[u8]) -> Option<f64> {
     let data = u32::from_le_bytes(wav.get(40..44)?.try_into().ok()?);
     (rate > 0).then(|| f64::from(data) / 2.0 / f64::from(rate))
 }
+
+/// The groups of an AI Vision block: each a name and the pictures of it, with
+/// buttons to capture a picture from the screen or load picture files into it,
+/// and a check of how well the block tells them apart.
+pub fn edit_vision_groups(
+    ui: &mut Ui,
+    project: &mut Project,
+    node_id: NodeId,
+    images: &mut ImageCache,
+    requests: &mut Vec<UiRequest>,
+) {
+    use magi_core::nodes::ai::{AiVisionParams, VisionGroup};
+    let Some(node) = project.graph.node(node_id) else { return };
+    let params: AiVisionParams = node.params_or_default();
+    let mut groups = params.groups.clone();
+    let mut changed = false;
+    let mut remove_group = None;
+    for (index, group) in groups.iter_mut().enumerate() {
+        ui.push_id(("vision-group", index), |ui| {
+            egui::Frame::new().fill(theme::bg_raised()).corner_radius(theme::RADIUS).inner_margin(6).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    let field = egui::TextEdit::singleline(&mut group.name)
+                        .hint_text("What it is")
+                        .desired_width((ui.available_width() - 34.0).max(60.0));
+                    changed |= ui.add(field).on_hover_text("The group's name: what “Group” says").changed();
+                    if widgets::icon_button(ui, icon::TRASH, "Remove this group and its pictures").clicked() {
+                        remove_group = Some(index);
+                    }
+                });
+                // The pictures, small; clicking one takes it out.
+                let mut gone = None;
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                    for (i, id) in group.images.iter().enumerate() {
+                        let name = project.assets.get(id).map(|a| a.name.clone()).unwrap_or_default();
+                        let response = match images.get(ui.ctx(), &project.assets, id) {
+                            Some(texture) => {
+                                let size = fit_size(&texture, vec2(44.0, 30.0), 4.0);
+                                ui.add_sized(
+                                    [46.0, 32.0],
+                                    egui::Image::new((texture.id(), size)).sense(egui::Sense::click()),
+                                )
+                            }
+                            None => ui.add_sized([46.0, 32.0], egui::Label::new(icon::IMAGE_BROKEN)),
+                        };
+                        if response.on_hover_text(format!("{name} – click to take it out")).clicked() {
+                            gone = Some(i);
+                        }
+                    }
+                });
+                if let Some(i) = gone {
+                    group.images.remove(i);
+                    changed = true;
+                }
+                let count = group.images.len();
+                widgets::button_row(ui, |ui| {
+                    ui.label(
+                        RichText::new(match count {
+                            0 => "No pictures yet".to_owned(),
+                            1 => "1 picture".to_owned(),
+                            n => format!("{n} pictures"),
+                        })
+                        .size(11.0)
+                        .color(if count == 0 { theme::warning() } else { theme::text_dim() }),
+                    );
+                    if ui
+                        .small_button(format!("{}  Capture", icon::CAMERA))
+                        .on_hover_text("Drag a box around what this group looks like on screen")
+                        .clicked()
+                    {
+                        requests.push(UiRequest::Snip(SnipMode::Image, SnipTarget::AddVisionImage(node_id, index)));
+                    }
+                    if ui
+                        .small_button(format!("{}  Load pictures…", icon::FOLDER_OPEN))
+                        .on_hover_text("Picture files of this group – several at once")
+                        .clicked()
+                    {
+                        requests.push(UiRequest::AddVisionFiles(node_id, index));
+                    }
+                });
+            });
+        });
+        ui.add_space(4.0);
+    }
+    if let Some(index) = remove_group {
+        groups.remove(index);
+        changed = true;
+    }
+    widgets::button_row(ui, |ui| {
+        if ui.button(format!("{}  Add group", icon::PLUS)).clicked() {
+            let names: Vec<String> = groups.iter().map(|g| g.name.clone()).collect();
+            groups.push(VisionGroup { name: new_group_name(&names), images: Vec::new() });
+            changed = true;
+        }
+        let ready = groups.iter().filter(|g| !g.images.is_empty()).count() >= 2;
+        let check = egui::Button::new(format!("{}  Check", icon::CHECK_CIRCLE));
+        if ui
+            .add_enabled(ready, check)
+            .on_hover_text(
+                "Learns from all but a few pictures of each group and tries itself on those: how well it tells the \
+                 groups apart",
+            )
+            .on_disabled_hover_text("Give at least two groups pictures first")
+            .clicked()
+        {
+            let result = check_groups(project, &groups);
+            ui.data_mut(|d| d.insert_temp(egui::Id::new(("vision-check", node_id)), (groups.clone(), result)));
+        }
+    });
+    // The last check, while the groups are as they were then.
+    let last: Option<(Vec<VisionGroup>, Result<magi_vision::Checked, String>)> =
+        ui.data(|d| d.get_temp(egui::Id::new(("vision-check", node_id))));
+    if let Some((_, result)) = last.filter(|(checked, _)| *checked == groups) {
+        match result {
+            Ok(c) if c.tried == 0 => {
+                widgets::note(ui, "Each group needs at least two pictures to be checked: one to learn, one to try.")
+            }
+            Ok(c) => {
+                let share = c.right as f32 / c.tried as f32;
+                let text = format!(
+                    "It put {} of {} pictures it had not learned from in the right group ({:.0}%).{}",
+                    c.right,
+                    c.tried,
+                    share * 100.0,
+                    if share < 0.9 { " More, and more varied, pictures of each group help." } else { "" }
+                );
+                let color = if share >= 0.9 { theme::success() } else { theme::warning() };
+                widgets::notice(ui, icon::CHECK_CIRCLE, text, color);
+            }
+            Err(error) => widgets::notice(ui, icon::WARNING, error, theme::warning()),
+        }
+    }
+    if changed && let Some(node) = project.graph.node_mut(node_id) {
+        node.set_param("groups", groups);
+    }
+}
+
+/// How well the groups' pictures can be told apart (see [`magi_vision::check`]).
+fn check_groups(
+    project: &Project,
+    groups: &[magi_core::nodes::ai::VisionGroup],
+) -> Result<magi_vision::Checked, String> {
+    let mut decoded: Vec<Vec<magi_vision::Bitmap>> = Vec::new();
+    for group in groups.iter().filter(|g| !g.images.is_empty()) {
+        let mut pictures = Vec::new();
+        for id in &group.images {
+            let bytes = project.assets.image(id).ok_or_else(|| format!("a picture of “{}” is missing", group.name))?;
+            pictures.push(magi_vision::decode(bytes).map_err(|e| e.to_string())?);
+        }
+        decoded.push(pictures);
+    }
+    let refs: Vec<Vec<magi_vision::ImageRef<'_>>> =
+        decoded.iter().map(|g| g.iter().map(magi_vision::Bitmap::as_ref).collect()).collect();
+    Ok(magi_vision::check(&refs))
+}

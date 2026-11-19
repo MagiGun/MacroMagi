@@ -15,8 +15,6 @@ thiserror.workspace = true
 base64.workspace = true
 zip.workspace = true
 regex.workspace = true
-# The native tools Magi models come with (src/nt), built in.
-include_dir.workspace = true
 
 [lints]
 workspace = true
