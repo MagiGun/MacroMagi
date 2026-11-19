@@ -205,7 +205,7 @@ cargo test -p magi-engine --test engines
 
 **Something drawn on the block itself**, like the thumbnail on Image Detection or the card on Play Recording. That is the one case with UI code: see `Layout::compute` and `GraphView::show` in `ui/graph.rs`.
 
-**Settings that hold assets** – of the kinds `Image`, `Images`, `Recording`, `Audio`, `Sounds` and `Model` – need nothing extra either: `NodeDef::asset_ids` finds the assets they use, so copied blocks and presets carry them along, and `NodeDef::rename_assets` points them at the right ones when they are pasted into another macro.
+**Settings that hold assets** – of the kinds `Image`, `Images`, `Recording`, `Audio`, `Sounds` and `VisionGroups` – need nothing extra either: `NodeDef::asset_ids` finds the assets they use, so copied blocks and presets carry them along, and `NodeDef::rename_assets` points them at the right ones when they are pasted into another macro.
 
 **Settings that follow variables** need nothing extra: `interp.params` (native) resolves them, and the Python runtime hands each block its settings already resolved. Settings of the kinds `ParamKind::bindable` lists get a link button in the inspector automatically.
 

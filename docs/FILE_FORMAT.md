@@ -1,11 +1,10 @@
 # File formats
 
-MacroMagi has four file types: **`.magi`** (a macro, and as chosen your settings and presets), **`.mp`** (a macro or Auto Clicker preset), **`.magic`** (a Magic tab workspace, and as chosen its datasets and pictures) and **`.szi`** (an AI model). A `.magi` can carry presets and models inside it; a `.magic` never carries the model – it names the `.szi` beside it. All are designed to be readable, diffable and easy to produce with other tools.
+MacroMagi has two file types: **`.magi`** (a macro, and as chosen your settings and presets) and **`.mp`** (a macro or Auto Clicker preset). A `.magi` can carry presets inside it. Both are designed to be readable, diffable and easy to produce with other tools. The `.magic` and `.szi` files of versions before 0.1.8 (AI workspaces and models) are no longer read or written; see [AI files of earlier versions](#ai-files-of-earlier-versions).
 
 - [`.magi` – projects](#magi--projects)
 - [`.mp` – presets](#mp--presets)
-- [`.magic` – AI workspaces](#magic--ai-workspaces)
-- [`.szi` – Magi models](#szi--magi-models)
+- [AI files of earlier versions](#ai-files-of-earlier-versions)
 - [Shared vocabulary](#shared-vocabulary)
 - [Versioning](#versioning)
 
@@ -18,7 +17,6 @@ project.json           required – the macro
 assets/<id>.png        images
 assets/<id>.json       recordings
 assets/<id>.wav        sounds (for Sound Recognition)
-assets/<id>.szi        AI models (for the AI blocks)
 presets/<nn>-<name>.mp bundled presets (optional)
 ```
 
@@ -175,9 +173,9 @@ Wires that refer to missing nodes are dropped on load.
 | `image` | `assets/<id>.png` | A PNG image. |
 | `recording` | `assets/<id>.json` | A [recording](#recordings). |
 | `audio` | `assets/<id>.wav` | A sound to listen for: a 16-bit mono WAV file, 16 kHz, at most 10 seconds. Uploaded MP3, OGG and FLAC files are converted to this. |
-| `model` | `assets/<id>.szi` | An AI model: a [`.szi` file](#szi--magi-models). Macros saved before 0.1.8 hold a `.magic` file with the model instead; it is still read. |
+| `model` | `assets/<id>.szi` or `.magic` | An AI model of a version before 0.1.8, for its AI blocks. It is kept, byte for byte, so such a macro opens and saves unchanged, but nothing runs it. |
 
-Blocks refer to assets by `id` in their parameters (`"image": "img-…"`, `"recording": "rec-1"`, `"sound": "snd-…"`, `"model": "mdl-…"`). Image, sound and model ids are derived from the content, so the same picture, sound or model is stored once.
+Blocks refer to assets by `id` in their parameters (`"image": "img-…"`, `"recording": "rec-1"`, `"sound": "snd-…"`). Image and sound ids are derived from the content, so the same picture or sound is stored once.
 
 ### Image and sound lists
 
@@ -215,22 +213,25 @@ Screenshot and Read File output pictures, which only exist while the macro runs:
 
 File blocks have a `path`: a full path, or one relative to the `files` folder in MacroMagi's data folder.
 
-### AI blocks
+### AI Vision
 
-AI Watch and AI Model have `model` (the id of a `model` asset) and `settings`: values for the model's adjustable settings, by key, for this block only. A key that is missing takes the model's own value. AI Watch has two flow outputs: `acted`, followed each time the model acts, and `out`, followed when its time is up.
-
-```json
-"params": { "model": "mdl-3a…", "settings": { "thresh": 60 }, "display": 0, "press": true, "duration_ms": 0, "max_fps": 0 }
-```
-
-AI Agent (`ai.agent`) runs a text model. `max_tokens` 0, `temperature` below 0, `context` 0, `thinking` `"model"` and an empty `effort` use the model's own settings. `native_tools` runs the model's native tools, at most `max_steps` calls per request.
+An AI Vision block (`ai.vision`) has `groups`: each a `name` and the ids of its example pictures (image assets). It learns from them when the macro runs; nothing it learned is saved. `region` and `display` say where it looks, as for Image Detection; `threshold` is how sure (0–1) it must be of a group for `found`.
 
 ```json
-"params": { "model": "mdl-7c…", "request": "Say hello", "run_tools": false, "max_tokens": 0, "temperature": -1,
-            "thinking": "model", "effort": "", "context": 0, "native_tools": true, "max_steps": 6 }
+"params": {
+  "groups": [
+    { "name": "Menu", "images": ["img-…", "img-…"] },
+    { "name": "Game", "images": ["img-…", "img-…", "img-…"] }
+  ],
+  "region": null,
+  "display": 0,
+  "threshold": 0.8
+}
 ```
 
-AI Load Model (`ai.load`) and AI Unload Model (`ai.unload`) have `model` only.
+Its outputs: `found` (true/false), `group` (the group's name when found, else empty), `confidence` (0–1) and `likeliest` (the likeliest group's name, sure or not). A picture wired into its `picture` input is looked at instead of the screen.
+
+The AI blocks of versions before 0.1.8 – `ai.watch`, `ai.classify`, `ai.agent`, `ai.load` and `ai.unload` – are kept as they are, with their settings, but are unknown blocks now: the editor shows them, and engines treat them as not runnable.
 
 ### Recordings
 
@@ -353,121 +354,16 @@ Missing fields take their defaults. Files from the first version, which had only
   "assets": [
     { "id": "img-…", "name": "Ready button", "kind": "image", "base64": "iVBORw0KGgo…" },
     { "id": "rec-1", "name": "Take 1", "kind": "recording", "recording": { "duration_ms": 0.0, "strokes": [] } },
-    { "id": "snd-…", "name": "Alarm", "kind": "audio", "wav_base64": "UklGRi…" },
-    { "id": "mdl-…", "name": "Ready check", "kind": "model", "magic_base64": "UEsDBB…" }
+    { "id": "snd-…", "name": "Alarm", "kind": "audio", "wav_base64": "UklGRi…" }
   ]
 }
 ```
 
-A nodes preset may also carry `groups` whose blocks are all in it. When it is inserted, its nodes get fresh ids and its assets are imported (images, sounds and models are de-duplicated by content). Variables are not part of a preset: settings bound to a variable the receiving macro does not have use their defaults until it is created. This is also the format MacroMagi puts on the clipboard when blocks are copied, prefixed with `macromagi-nodes:`.
+A nodes preset may also carry `groups` whose blocks are all in it. When it is inserted, its nodes get fresh ids and its assets are imported (images and sounds are de-duplicated by content; a model of an earlier version, `"kind": "model"` with `magic_base64`, is kept as it is). Variables are not part of a preset: settings bound to a variable the receiving macro does not have use their defaults until it is created. This is also the format MacroMagi puts on the clipboard when blocks are copied, prefixed with `macromagi-nodes:`.
 
-## `.magic` – AI workspaces
+## AI files of earlier versions
 
-A `.magic` file is a ZIP archive: a Magic tab **workspace** – the canvas and the setup, and, as chosen, the datasets and pictures. It never holds the model: saving a trained model's workspace writes the model as a `.szi` of the same name beside it, and `package` names it. Files from before 0.1.8 may still hold the model (`model/`), and open as they are.
-
-```text
-magic.json                    required – the description below
-model/model.onnx              the model, in ONNX format (left out when include.model is false)
-model/weights.safetensors     its weights (models trained in MacroMagi; optional)
-data/text/<file>              text datasets: .jsonl, .md or .txt (optional)
-data/train/<class>/<file>     pictures of each answer, one folder per class (optional)
-data/not/<class>/<file>       pictures an answer was mistaken for (optional)
-data/tune/<class>/<file>      fine-tuning pictures of earlier versions (optional)
-nt/<tool>/<file>              the model's own native tools (optional)
-```
-
-Since 0.1.7, compiling a text model writes a Magi package (below) and the workspace's `package` names it; the workspace then leaves out `model/` (`include.model` and `include.weights` false), and opening it takes the model from the package – the path given, or `szi/<file>` beside the workspace. A model asset in a macro always holds its model, and its weights when MacroMagi's native engine runs it.
-
-The weights are in the [safetensors](https://github.com/huggingface/safetensors) layout: an 8-byte header length, a JSON header, then raw little-endian tensors. They are data only; loading them runs no code.
-
-### `magic.json`
-
-```json
-{
-  "format": "macromagi.magic",
-  "version": 1,
-  "app": "0.1.7",
-  "name": "Ready check",
-  "description": "Presses Space when the ready prompt is on screen.",
-  "input": { "name": "input", "width": 224, "height": 224, "layout": "nchw", "color": "rgb",
-             "scale": 0.00392157, "mean": [0.485, 0.456, 0.406], "std": [0.229, 0.224, 0.225], "softmax": true },
-  "capture": { "area": { "kind": "center", "height_share": 0.2074 }, "display": 0 },
-  "classes": [
-    { "label": "Nothing", "act": false, "threshold": 0.5, "delay_ms": 0 },
-    { "label": "Ready", "act": true, "threshold": 0.6, "delay_ms": 0 }
-  ],
-  "action": { "key": "Space", "hold_ms": 5, "cooldown_ms": 500 },
-  "settings": [
-    { "key": "thresh", "label": "Confidence", "kind": "percent", "min": 1, "max": 100, "default": 60, "value": 60,
-      "targets": [ { "kind": "threshold", "class": 1 } ] }
-  ],
-  "include": { "model": true, "blocks": true, "training": true, "finetune": true },
-  "training": [ { "file": "data/train/1/0001-ready.png", "class": 1 } ]
-}
-```
-
-| Field | Meaning |
-| --- | --- |
-| `format`, `version`, `app` | As for projects: `macromagi.magic`, the format version, the MacroMagi version that wrote it. |
-| `name`, `description`, `author`, `source`, `license` | About the model. `source` and `license` record where an imported model came from and its licence. |
-| `input` | How a picture becomes the model's input: resized to `width × height`, laid out `nchw` (channels first) or `nhwc`, in `rgb` or `bgr` order, each value `v` (0–255) becoming `(v × scale − mean) / std` per channel. `softmax: true` turns raw scores into probabilities. `name` is the model's input name. |
-| `capture` | The screen area shown to the model: `{ "kind": "center", "height_share": … }` – a square in the middle of display `display`, as tall as that share of the display's height – or `{ "kind": "region", "rect": { "x", "y", "w", "h", "display" } }`. |
-| `classes` | One per answer the model gives, in its output order. `act`: whether this answer calls for the action; `threshold` (0–1): how sure the model must be; `delay_ms`: how long to wait before acting. |
-| `action` | The [key or mouse button](#shared-vocabulary) to press (`"Space"`, `"Mouse:Left"`), how long to hold it, and how long to ignore answers after acting. |
-| `settings` | Adjustable settings, shown as sliders in the Magic tab and in each AI block. `kind` is `percent` or `milliseconds`. Each sets its `targets`: `{ "kind": "threshold", "class": n }`, `{ "kind": "delay", "class": n }`, `{ "kind": "cooldown" }` or `{ "kind": "hold" }`. A setting's `value` is applied over the values it targets. |
-| `blocks` | Optional. Blocks to use the model with – `nodes`, `wires` and `groups` as in a [nodes preset](#kind-nodes), without assets; added to a macro along with the model. |
-| `include` | What the archive holds besides `magic.json`: the model, the blocks, training pictures, fine-tuning pictures. |
-| `training`, `finetune` | The pictures under `data/`, each with the class it shows. `negative: true` marks a picture of what the class is *not*. |
-| `kind` | `vision` (the default, and what files without it are) or `text`. |
-| `text` | Text models: how they read and write – see below. |
-| `architecture` | The shape of a model trained in MacroMagi, as the trainer builds it: `width`, `heads`, `kv_heads`, `context`, `positions` (`rope` or `learned`), `rope_theta`, optional `hyper_connections` (`{"streams", "sinkhorn"}`) and `mtp` (`{"weight"}`), `prefix_split`, `tied` and `embed_scale` (optional booleans), `layers` (one per layer: `{"attention": {"kind": "full" \| "window" \| "mla" \| "csa" \| "hca" \| "ssm", …}, "ffn": {"kind": "dense" \| "moe" \| "persona", …}, "norm": "pre" \| "sandwich"}`; `full` attention may have `qk_norm`, `bias`, `rotary` and `window`, a `dense` feed-forward `activation`: `swiglu` or `geglu`), `conv` for vision models, and `blocks`: the canvas blocks it was made from, each `{ "kind", "params", "ffn" }`. |
-| `studio` | The Magic tab's canvas: `nodes`, `wires` and `groups` as in a [nodes preset](#kind-nodes), with the Magic tab's block types (`magic.*`, listed in [MAGIC.md](MAGIC.md#blocks)). Setup blocks keep their part of the model in `params.value` (Model Info: `name`, `description`, `author`, `license`, `source`; Text: the `text` object; Tools: the `text.tools` the program carries out; Native Tools: the `text.tools` with `native`; Thinking: `text.thinking`; Reasoning Effort: `text.effort`; Screen Area: `capture`; Answers: `classes`; When It Acts: `action`; Sliders: `settings`; Picture Preparation: `input`), and the description above is what the setup blocks chained into the start say. Files without it get a canvas built from their description. |
-| `gguf` | Up to 0.1.5: a GGUF model file the model ran with llama.cpp. MacroMagi no longer reads it. |
-| `datasets` | The text datasets in the archive, by path (`data/text/…`). |
-| `trained` | What training the model went through: `stages` (`pretrain`, `sft`, `rl`, `compaction`, `vision`), `steps`, the final `loss`, `parameters`. |
-| `include` | Also `weights` (`model/weights.safetensors`) and `datasets`. |
-
-A text model's `text`:
-
-```json
-"text": {
-  "specials": ["<|end|>", "<|system|>", "<|user|>", "<|assistant|>", "<think>", "</think>", "<tool_call>", "</tool_call>", "<compact>", "</compact>", "<|tool|>"],
-  "context": 2048,
-  "system_tag": "<|system|>", "user_tag": "<|user|>", "assistant_tag": "<|assistant|>", "end_tag": "<|end|>",
-  "think_tags": ["<think>", "</think>"], "tool_tags": ["<tool_call>", "</tool_call>"], "compact_tags": ["<compact>", "</compact>"],
-  "tool_tag": "<|tool|>",
-  "thinking": { "on_by_default": true },
-  "effort": { "levels": ["low", "medium", "high"], "default": "medium" },
-  "personas": [ { "name": "Gun", "tag": "<gun>", "role": "Strict code and tool execution" } ],
-  "tools": [ { "name": "press", "description": "taps a key", "parameters": { "type": "object", "properties": { "key": { "type": "string" } } } } ],
-  "system": "You press keys for the user.",
-  "temperature": 0.7, "top_k": 40, "max_tokens": 200
-}
-```
-
-Tokens are the 256 byte values of UTF-8 text (ids 0–255), then – with a learned tokenizer, `"tokenizer": {"kind": "learned", "size": 4096, "merges": [[a, b], …]}` – one token per merge (ids 256 on, in order: merge *i* joins tokens *a* and *b* into token 256 + *i*), then each of `specials` in order; special tags are matched longest first. A learned tokenizer cuts the text between tags into chunks (Python: `rb" ?[A-Za-z\x80-\xff]+| ?[0-9]| ?[^\sA-Za-z0-9\x80-\xff]+|[\r\n]+|[ \t\x0b\x0c]+(?![^\s])|[ \t\x0b\x0c]+"`) and joins each chunk's bytes by the lowest-numbered merge present, all its places at once, until none applies ([`tokenizer.rs`](../crates/magi-core/src/tokenizer.rs)). Without `tokenizer` (or with `"kind": "bytes"`), tokens are bytes. A request is `system_tag system end_tag user_tag request end_tag assistant_tag` (the system part only when there is one), and the answer ends at `end_tag`. The system part is the system prompt, then `Reasoning effort: <level>` (with `effort`), then the tools (with `tool_tag`), separated by blank lines – [MAGIC.md](MAGIC.md#how-text-is-read-and-written) shows it. With `thinking`, a request that does not think ends with an empty `think_tags` pair. Tool calls are `tool_tags.0` + `{"name": …, "arguments": {…}}` + `tool_tags.1`, and a tool's result is `tool_tag result end_tag`. `tool_tag`, `thinking` and `effort` are optional: files without `tool_tag` (made before it) keep their tokens, write calls with `"args"`, and read results as user turns. The ONNX model takes `tokens` (int64, `[1, length]`) and gives `logits` (`[1, length, vocabulary]`).
-
-Since 0.1.7, `text.tools[].native` marks a native tool, `memory` is the Memory & Cache block's settings (`precision`, `hot_mb`, `warm_mb`, `disk_dir`, `disk_gb`, `persist_prefix`, `read_blocks`, `flash_attention`), `architecture.rope_scaling` is the Context Scaler's (`kind`: `yarn`, `ntk` or `none`; `factor`, `original`, `target`), `trained.system` is the system prompt the model was trained with, and `package` names its Magi package.
-
-A model asset inside a `.magi` file is the same archive with `training`, `finetune` and the datasets left out, and the weights too unless the native engine runs the model.
-
-## `.szi` – Magi models
-
-A Magi model is **one file**: download it, open it, and it runs – native tools included. Compile Package (*Magi Model (.szi)*) writes it as `<project>/<name>.szi`, and a workspace exported as Python writes `<name>.szi` beside `run.py`. It is a zip archive:
-
-```text
-model.json            the description: JSON, below
-weights.safetensors   the weights (MacroMagi's native engine runs these), stored uncompressed
-model.onnx            the same model for ONNX runtimes, uncompressed (only when Compile Package asks for an ONNX file,
-                      or the native engine cannot run the architecture)
-nt/<tool>/tool.json   each native tool: {"name", "description", "parameters", "run": {"kind": "python" | "command" | "host", "entry", "timeout_ms"}, "confirm"?}
-nt/<tool>/run.py      its program: arguments as JSON on standard input, its result as JSON on standard output
-README.md             what it is
-```
-
-`model.json` is `{"format": "magi.szi", "version": 2, "app", "family", "files": {"weights", "onnx", "native_tools"}, …}` followed by the fields of `magic.json` (name, `kind`, `text`, `architecture`, `memory`, `trained`…) without the canvas and the datasets. A native tool with `"confirm": true` (it writes files or runs programs) runs only when the user allows each call; one whose `run.kind` is `host` has no program of its own – the program running the model carries it out, by its `entry` name (MacroMagi's `view_image`) – and other files in its folder are helpers it may use (`describe.py`). Tool results go back to the model as the tool printed them, keys in the tool's order. `family` is `Magi-F` (up to a billion parameters), `Magi-S` (up to thirty billion) or `Magi-T`. The weights and the ONNX model are stored, not compressed, so a reader can take them straight from the file. MacroMagi opens it with File › Open or in the AI Agent window, takes it as a base model, and CodeMagi will run it.
-
-**Version 1** (development builds before the 0.1.7 release) was a folder: a `<name>.szi` JSON description – the same fields, `"version": 1` – beside `weights.safetensors`, `model.onnx` and `nt/`. MacroMagi still opens it (the folder or its `.szi` file); a workspace saved with it finds its package in `szi/` beside it.
+Versions 0.1.5 to 0.1.7 had a Magic tab that built and trained AI models, with two file types of its own: **`.magic`**, a ZIP archive of a workspace (its canvas, setup, datasets and pictures – and, before 0.1.8, sometimes the model), and **`.szi`**, a ZIP archive of a trained model (`model.json`, `weights.safetensors` and its native tools). MacroMagi 0.1.8 neither reads nor writes them; both are ordinary ZIP archives whose description files are JSON, readable with any tool. A macro that embedded such a model keeps it as a `model` asset (see [Assets](#assets)).
 
 ## Shared vocabulary
 

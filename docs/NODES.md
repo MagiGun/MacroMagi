@@ -334,90 +334,23 @@ Listens for particular sounds – a notification, an alarm, a voice line – tha
 
 ## AI
 
-Small vision models prepared in the Magic tab, run on what is on screen.
+AI Vision: learns from example pictures which of a few groups the screen shows.
 
-### AI Agent
+### AI Vision
 
-`ai.agent`
+`ai.vision`
 
-Asks a text model made in the Magic tab and gives its answer, what it thought, and the tool it called with its arguments. Set to, it carries out the tool calls MacroMagi knows – press, type, click, move, wait and log – and other tools are left to the blocks after it.
+Learns from example pictures which of a few groups the screen shows – a menu or the game, a full bar or an empty one, whose turn it is – even where Image Detection cannot, because the screen never looks exactly the same. Make two or more groups and add pictures of each: captured from the screen or loaded from files. “Found” is true when it is at least as sure as the confidence setting; “Group” says which one.
 
-- Flow in: yes
-- Flow out: **Then**
-- Value inputs: **Request** (text)
-- Value outputs: **Answer** (text), **Thinking** (text), **Tool** (text), **Arguments** (text), **Tool calls** (number), **Everything it wrote** (text)
+- Value inputs: **Picture** (picture)
+- Value outputs: **Found** (true/false), **Group** (text), **Confidence** (number), **Likeliest group** (text)
 
 | Setting | Kind | Default | Notes |
 | --- | --- | --- | --- |
-| Model | AI model | none | A model from the Magic tab (“Use in Macro” there), or a .magic, .szi or .onnx file. |
-| Request | text | empty | Used when nothing is wired into “Request”. |
-| Carry out its tool calls | on/off | off | press {key}, type {text}, click {x, y, button}, move {x, y}, wait {ms} and log {text}. Off: the block only reports them. |
-| Longest answer | whole number | 0 tokens | 0: the model's own setting. |
-| Temperature | number | -1 | 0 always writes the likeliest; higher is freer. Below 0: the model's own setting. |
-| Thinking | choice | As the model does | For models with a Thinking block: think before answering, or answer straight away. Options: As the model does; On; Off. |
-| Reasoning effort | text | empty | One of the model's levels, such as standard or superior. Empty: its default. |
-| Context window | whole number | 0 tokens | The most text the model reads at once. 0: the model's. Smaller keeps only the latest part, and uses less memory. |
-| Run its native tools | on/off | on | Magi models: run the tools in the model's native tools folder (calculator, web search…) and give it their results, until it answers. |
-| Tool calls per request | whole number | 100 | At most this many native tool calls before it must answer. |
-
-### AI Model
-
-`ai.classify`
-
-Shows part of the screen to an AI model once and gives its answer: the likeliest class, how sure the model is, and whether the model's setup says to act on it.
-
-- Value outputs: **Act** (true/false), **Answer** (text), **Class number** (number), **Confidence** (number), **Delay (ms)** (number)
-
-| Setting | Kind | Default | Notes |
-| --- | --- | --- | --- |
-| Model | AI model | none | A model from the Magic tab (“Use in Macro” there), or a .magic, .szi or .onnx file. |
-| Model settings | model settings | the model's own | The model's own adjustable settings, changed for this block only. |
-| Display | display | 1 (primary) | For models that look at the middle of the screen: which display. |
-
-### AI Load Model
-
-`ai.load`
-
-Loads a text model now, so the AI Agent blocks after it answer at once. It stays loaded until an AI Unload Model block, or until the macro stops – then every AI model is unloaded. Without it, a model loads on its first request.
-
-- Flow in: yes
-- Flow out: **Then**
-
-| Setting | Kind | Default | Notes |
-| --- | --- | --- | --- |
-| Model | AI model | none | A model from the Magic tab (“Use in Macro” there), or a .magic, .szi or .onnx file. |
-
-### AI Unload Model
-
-`ai.unload`
-
-Unloads a text model: frees its memory until it is asked again or loaded again.
-
-- Flow in: yes
-- Flow out: **Then**
-
-| Setting | Kind | Default | Notes |
-| --- | --- | --- | --- |
-| Model | AI model | none | A model from the Magic tab (“Use in Macro” there), or a .magic, .szi or .onnx file. |
-
-### AI Watch
-
-`ai.watch`
-
-Keeps showing part of the screen to an AI model and does what the model is set up to do – for example press a key the moment it sees the right thing. Each time it acts, the blocks under “Acted” run (with “Times acted” and “Last answer” up to date), then it watches again. Runs until the macro stops, or for as long as set; then it continues from “Done”.
-
-- Flow in: yes
-- Flow out: **Acted**, **Done**
-- Value outputs: **Times acted** (number), **Last answer** (text)
-
-| Setting | Kind | Default | Notes |
-| --- | --- | --- | --- |
-| Model | AI model | none | A model from the Magic tab (“Use in Macro” there), or a .magic, .szi or .onnx file. |
-| Model settings | model settings | the model's own | The model's own adjustable settings, changed for this block only. |
-| Display | display | 1 (primary) | For models that look at the middle of the screen: which display. |
-| Press the model's key | on/off | on | Off: the model only watches and runs the blocks under “Acted” – try it safely, or do something else than pressing the key. |
-| Stop after | duration | 0 ms | 0 keeps watching until the macro is stopped. |
-| Looks per second | number | 0 | 0 looks as often as the computer can. A limit saves power. |
+| Groups | groups of pictures | [{'name': 'Group 1', 'images': []}, {'name': 'Group 2', 'images': []}] | Each group is one thing to recognise. Give each a few pictures of it as it can look – more, and more varied, pictures make it surer. It learns from them by itself, in a moment, when the macro runs. |
+| Area | screen area | whole screen | Where to look – the same part of the screen the example pictures show. |
+| Display | display | 1 (primary) | The display looked at when there is no area. |
+| Confidence | percentage | 80% | How sure it must be of a group for “Found”. Below it, “Group” is empty. |
 
 ## Window
 

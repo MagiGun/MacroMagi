@@ -2,7 +2,7 @@
 
 **IMPORTANT: READ THE TERMS AND CONDITIONS OF THIS LICENSE AGREEMENT CAREFULLY BEFORE YOU DOWNLOAD, BUILD OR USE MACROMAGI.**
 
-This End-User License Agreement ("EULA") is a legal agreement between you (an individual or a single entity) and MagiGun, the developers of MacroMagi (the "Licensor"), for the MacroMagi software, which includes its source code, compiled builds, the components it downloads on request, the example data, models and MagiDB pages that come with it, and its documentation, whether printed, online or electronic (the "SOFTWARE PRODUCT"). By downloading, building, copying or otherwise using the SOFTWARE PRODUCT, you agree to be bound by the terms of this EULA. This EULA is the entire agreement about the SOFTWARE PRODUCT between you and the Licensor, and it supersedes any prior proposal, representation or understanding between the parties. If you do not agree to the terms of this EULA, do not download, build or use the SOFTWARE PRODUCT.
+This End-User License Agreement ("EULA") is a legal agreement between you (an individual or a single entity) and MagiGun, the developers of MacroMagi (the "Licensor"), for the MacroMagi software, which includes its source code, compiled builds, the components it downloads on request, the examples that come with it, and its documentation, whether printed, online or electronic (the "SOFTWARE PRODUCT"). By downloading, building, copying or otherwise using the SOFTWARE PRODUCT, you agree to be bound by the terms of this EULA. This EULA is the entire agreement about the SOFTWARE PRODUCT between you and the Licensor, and it supersedes any prior proposal, representation or understanding between the parties. If you do not agree to the terms of this EULA, do not download, build or use the SOFTWARE PRODUCT.
 
 The SOFTWARE PRODUCT is protected by copyright laws and international copyright treaties, as well as other intellectual property laws and treaties. The SOFTWARE PRODUCT is licensed, not sold. Its source code is published so that it can be read, built and improved – it is **source available**, not open source.
 
@@ -34,15 +34,15 @@ The SOFTWARE PRODUCT is licensed as follows:
 
 **(g) Support services.** The Licensor may provide you with support related to the SOFTWARE PRODUCT ("Support Services"). Any supplemental code provided to you as part of the Support Services is part of the SOFTWARE PRODUCT and subject to this EULA.
 
-**(h) Compliance with applicable laws.** You must comply with all laws that apply to your use of the SOFTWARE PRODUCT. You are responsible for what you make it do: it sends real keyboard and mouse input, and its AI models can read and change files and run programs when you allow them to. Many games and online services forbid automation; whether you may use it there is between you and them.
+**(h) Compliance with applicable laws.** You must comply with all laws that apply to your use of the SOFTWARE PRODUCT. You are responsible for what you make it do: it sends real keyboard and mouse input, and acts on what it sees and hears. Many games and online services forbid automation; whether you may use it there is between you and them.
 
-**(i) Third-party components.** The SOFTWARE PRODUCT is built with open-source libraries (listed in `Cargo.toml` and `Cargo.lock`), and the components it downloads on request – Python, PyTorch, ONNX Runtime, document libraries, models and datasets – come from their publishers. Each keeps its own license, and nothing in this EULA limits what those licenses allow.
+**(i) Third-party components.** The SOFTWARE PRODUCT is built with open-source libraries (listed in `Cargo.toml` and `Cargo.lock`), and the components it downloads on request – such as Python – come from their publishers. Each keeps its own license, and nothing in this EULA limits what those licenses allow.
 
 If you would like to do something this EULA does not allow, ask the Licensor by opening an issue in the official repository. Permission the Licensor gives in writing overrides this EULA for that case.
 
 ## 3. Contributions
 
-Contributions – code, documentation, translations, artwork, MagiDB pages, datasets, issue reports with patches – are welcome. By submitting a contribution (for example a pull request), you confirm that:
+Contributions – code, documentation, translations, artwork, examples, issue reports with patches – are welcome. By submitting a contribution (for example a pull request), you confirm that:
 
 - the contribution is your own work, or you otherwise have the right to submit it;
 - you grant the Licensor a perpetual, worldwide, non-exclusive, royalty-free, irrevocable license to use, copy, modify, publish, distribute and sublicense your contribution as part of the SOFTWARE PRODUCT, under this EULA or any future terms of the SOFTWARE PRODUCT;
