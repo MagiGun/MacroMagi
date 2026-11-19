@@ -4,25 +4,36 @@ Notable changes to MacroMagi. The format follows [Keep a Changelog](https://keep
 
 File-format changes are called out explicitly; see [docs/FILE_FORMAT.md](docs/FILE_FORMAT.md) for the compatibility rules.
 
-## Unreleased
+## 0.1.8 – 2026-11-18
+
+The Magic tab and every text AI are gone; AI is now one block in the macro editor, **AI Vision**, which learns to tell screens apart from a few pictures – no setup, no downloads.
 
 ### Added
 
-- **Magi 150M** (Presets › Commons, beside *Magi 400M* – Magi's own preset, renamed – each sizing the recipe's steps and corpora too): Magi's design and recipe at about 150M parameters, 64M at work per token – 512 wide, 24 layers, 750 million tokens of pretraining – to try the whole recipe in a few hours on a GPU server before the full size.
-- **A long run is rehearsed first**: before a training of more than a thousand steps starts (not when it goes on from a save), every stage runs three steps on the real model and data and the model is written, in a scratch folder – a crash in a later stage shows in minutes, not hours in. The learned tokens and cut corpora are kept for the run; `MAGI_TRAIN_REHEARSE=0` skips it.
+- **AI Vision block** (AI category): make two or more groups, give each a few pictures – captured from the screen or loaded from files, several at once – and it says which group the screen shows, how sure it is, and the likeliest group even when it is unsure. It learns by itself when the macro runs, in a moment (each picture learned in several versions: shifted, zoomed, lighter, darker), on the CPU, with nothing to install, and keeps what it learned until the pictures change. *Check* tells how well it tells your groups apart before you run anything. A picture wired in (from Screenshot or Read File) is looked at instead of the screen. Both engines run it. **File format:** `ai.vision` with `groups` (`name`, `images`), `region`, `display`, `threshold`.
+- **File › Examples › Tell screens apart with AI Vision**: a macro that learns a menu and a game screen and keeps saying which one it sees.
 
 ### Changed
 
-- **Colab keeps the whole project on Google Drive**: the notebook asks for the zip the first time only and copies the project to *MyDrive/MacroMagi/<name>/project*; when a session ends (which empties `/content`), running the cells again restores it and the run goes on – no upload. `NEW_ZIP = True` takes a new export. The finished `.szi` is copied to Drive too.
-- **The terms are an end-user license agreement**: `TERMS.md` is now `EULA.md`, in the form of a classic EULA (grant of license, limitations, termination, no warranties, limitation of liability). What it allows is the same – use, read, build and modify for yourself, contribute; no selling and no distributing builds – and it says outright that what you make with MacroMagi is yours.
-- **Each file has one job.** A `.magic` workspace never holds the model: saving it writes a trained model as a `.szi` of the same name beside it (again only when the model changed), and Compile Package does the same. Macros keep their AI models as `.szi` files (`assets/<id>.szi`). **File format:** older `.magic` files with a model inside, and macros with `.magic` model assets, still open.
-- The document tools name file types (.docx, .xlsx, .pptx, .pdf, .csv) in their descriptions, messages and MagiDB pages.
+- *Options › Downloads…* and the Engine page offer the one optional download left, the embedded Python. Settings saved on the Magic tab, the Runtime page or the Hardware page open on the Macro tab and the Engine page.
+- Debug builds keep only file and line numbers, so a debug and test build takes a few gigabytes instead of tens; `cargo tidy` deletes them.
 
-### Fixed
+### Removed
 
-- **A long run could turn into NaN and save it over its only good save.** The experts' router (√Softplus) had an infinite gradient once a score fell below about −104 – one step made every weight NaN, and the next saves kept them. The router now works in float32 away from zero; a step whose gradients are not numbers is skipped (fifty in a row stop the run); a broken model is never saved, the save before is kept as `resume.prev.pt` and used when the last one is broken; and `out/train.log` keeps the console's lines, with each step's gradient norm.
-- `macromagi FILE.szi` opens the Magi model in the Magic tab (it was read as a macro and failed); the command line's help names the Magic tab.
-- **MagiDB downloads again**: *Settings › Runtime* and the `db_search`/`db_read` tools read MagiDB from `MagiGun/MagiDB` (they looked for `MacroMagi/MagiDB`, which does not exist).
+- **The Magic tab**: building, training, importing and packaging AI models on a canvas, the dataset editor, File › Export as Python and its Colab notebook, Magi and its presets, MagiDB, the trainer (`runtime/python/magi_train`), and the `.magic` and `.szi` files. They were too hard to use for what they did.
+- **Text AI**: the AI Agent window, and the AI Agent, AI Load Model and AI Unload Model blocks.
+- **AI Watch and AI Model**, which ran vision models made in the Magic tab: AI Vision does their job without a model to make first.
+- *Settings › Runtime* and *Settings › Hardware*, with PyTorch, onnx, ONNX Runtime and Magi's tools. What earlier versions downloaded for them into the data folder is deleted at start.
+- **File format:** macros with the removed AI blocks still open and save unchanged – the blocks show as unknown blocks that do not run, and the models they used are kept as they are.
+
+## 0.1.7.5 – 2026-10-27
+
+- **The terms are an end-user license agreement**: `TERMS.md` is now `EULA.md`, in the form of a classic EULA. What it allows is the same – use, read, build and modify for yourself, contribute; no selling and no distributing builds – and it says outright that what you make with MacroMagi is yours.
+- For the Magic tab (gone in 0.1.8): Magi 150M and Magi 400M presets, a rehearsal of every stage before a long training run, training that skips steps whose gradients are not numbers and never saves a broken model, and a Colab notebook that keeps the whole project on Google Drive.
+
+## 0.1.7.4 – 2026-10-21
+
+An update of 0.1.7, for the Magic tab (gone in 0.1.8): `.magic` workspaces that never hold the model, `macromagi FILE.szi` opening the model, the document tools naming file types, MagiDB downloading from `MagiGun/MagiDB`, and the docs brought up to date.
 
 ## 0.1.7 – 2026-10-21
 

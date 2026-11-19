@@ -74,22 +74,21 @@ cargo run --release -p magi-app -- --screenshot docs/images/macro-editor.png --t
 cargo run --release -p magi-app -- --screenshot docs/images/recording.png --tab macro --example 2 --size 1100x680 --cards --select input.recording
 echo '{"show_variables": true}' > "$MACROMAGI_DATA_DIR/settings.json"
 cargo run --release -p magi-app -- --screenshot docs/images/functions.png --tab macro --example 3 --size 1280x820 --select flow.delay
+cargo run --release -p magi-app -- --screenshot docs/images/ai-vision.png --tab macro --example 4 --size 1280x860 --select ai.vision
 ```
 
-`--tab magic` opens the Magic tab, and a `.magic` file named on the command line opens in it. `--dataset <file>[:view]` opens a dataset file of the Magic tab's model (a new example model when none is open) in the dataset editor, such as `--dataset data/text/tools.jsonl:model` (views: `chat`, `model`, `raw`); `--dataset ""` opens the example model without the editor, for `--select`. `--agent` opens the AI Agent window inside the main window. `--settings <page>` opens the settings window on a page (`general`, `appearance`, `hotkeys`, `recording`, `engine`, `ai`). `--targets` opens *View → Screen targets* at start; it covers the screen, so it is for checking the overlay by hand rather than for `--screenshot`.
+`--settings <page>` opens the settings window on a page (`general`, `appearance`, `hotkeys`, `recording`, `engine`). `--wait <seconds>` takes the screenshot only after that long. `--targets` opens *View → Screen targets* at start; it covers the screen, so it is for checking the overlay by hand rather than for `--screenshot`.
 
 ## Where things live
 
 ```text
 crates/magi-core/      data model, block definitions, file formats    (no OS, no UI)
-crates/magi-vision/    image matching, color search                  (pure functions on pixels)
+crates/magi-vision/    image matching, color search, AI Vision       (pure functions on pixels)
 crates/magi-audio/     loudness, pitch, sound recognition, sound files (pure functions on samples)
-crates/magi-ml/        preparing pictures for AI models, running them  (CPU or graphics card)
 crates/magi-platform/  input, listening, gamepads, capture, sound     (the only OS code)
 crates/magi-engine/    native interpreter, Python bridge, device operations
-crates/magi-app/       the application: UI, controller, command line, the Magic tab, downloads
-runtime/python/        the Python engine (standard library only) and the Magic tab's trainer (PyTorch)
-magidb/                MagiDB's pages, published as MagiGun/MagiDB
+crates/magi-app/       the application: UI, controller, command line, downloads
+runtime/python/        the Python engine (standard library only)
 docs/                  architecture, formats, guides
 tools/                 scripts that generate documentation
 ```
@@ -132,9 +131,8 @@ Tests sit next to the code they test (`#[cfg(test)] mod tests`), plus:
 
 - `crates/magi-engine/tests/engines.rs` – macros run end to end on both engines against a simulated machine. Any new block or change to execution belongs here.
 - the tests at the bottom of `crates/magi-app/src/ui/graph.rs` – the node editor driven headlessly with a simulated pointer and keyboard (dragging wires, moving and selecting blocks, shortcuts, zooming).
-- the tests at the bottom of `crates/magi-app/src/app.rs` – the whole app driven headlessly, with key presses fed to the controller exactly as the system listener would (assigning hotkeys and using them at once, opening the block list, taking a model from the Magic tab into a macro).
+- the tests at the bottom of `crates/magi-app/src/app.rs` – the whole app driven headlessly, with key presses fed to the controller exactly as the system listener would (assigning hotkeys and using them at once, opening the block list, giving an AI Vision block groups and checking them).
 - `windows_reads_the_text_in_a_screenshot` in `crates/magi-platform/tests/system.rs` – ignored by default; reads a documentation screenshot with the text recognition built into Windows.
-- `real_projects_import` in `crates/magi-app/src/magic/import.rs` – ignored by default; imports the projects named in `MAGI_IMPORT` (separated by `;`) and prints what was found, to check the importer against real models: `MAGI_IMPORT=path/to/project cargo test -p magi-app real_projects_import -- --ignored --nocapture`. With `MAGI_IMPORT_OUT` set to a folder, each import is also saved there as a `.magic` file.
 - `crates/magi-platform/tests/system.rs` – ignored by default; checks against the real machine.
 
 Guidelines:
